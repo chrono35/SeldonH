@@ -1,0 +1,29 @@
+<RCC>
+    <qresource prefix="/skills">
+        <file alias="00_identite.md">skills/00_identite.md</file>
+        <file alias="01_conventions_datation.md">skills/01_conventions_datation.md</file>
+        <file alias="02_chronomodel_concepts.md">skills/02_chronomodel_concepts.md</file>
+        <file alias="03_chronomodel_creer_modele.md">skills/03_chronomodel_creer_modele.md</file>
+        <file alias="04_chronomodel_interpreter.md">skills/04_chronomodel_interpreter.md</file>
+        <file alias="05_radiocarbone.md">skills/05_radiocarbone.md</file>
+        <file alias="06_archeomagnetisme.md">skills/06_archeomagnetisme.md</file>
+        <file alias="07_tracer_courbes.md">skills/07_tracer_courbes.md</file>
+        <file alias="08_dates_autres_methodes.md">skills/08_dates_autres_methodes.md</file>
+        <file alias="09_outils_calcul.md">skills/09_outils_calcul.md</file>
+        <file alias="10_aide_utilisation.md">skills/10_aide_utilisation.md</file>
+        <file alias="11_chronomodel_logs.md">skills/11_chronomodel_logs.md</file>
+        <file alias="12_chronomodel_logs_remedes.md">skills/12_chronomodel_logs_remedes.md</file>
+    </qresource>
+    <qresource prefix="/help">
+        <file alias="aide.html">help/aide.html</file>
+    </qresource>
+    <qresource prefix="/icons">
+        <file alias="seldonh_16.png">icons/seldonh_16.png</file>
+        <file alias="seldonh_32.png">icons/seldonh_32.png</file>
+        <file alias="seldonh_48.png">icons/seldonh_48.png</file>
+        <file alias="seldonh_64.png">icons/seldonh_64.png</file>
+        <file alias="seldonh_128.png">icons/seldonh_128.png</file>
+        <file alias="seldonh_256.png">icons/seldonh_256.png</file>
+        <file alias="seldonh_512.png">icons/seldonh_512.png</file>
+    </qresource>
+</RCC>

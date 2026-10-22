@@ -1,0 +1,16 @@
+<RCC>
+    <qresource prefix="/methods/c14">
+        <file alias="curves/UWSY98.14C">curves/UWSY98.14C</file>
+        <file alias="curves/intcal04.14C">curves/intcal04.14C</file>
+        <file alias="curves/intcal09.14C">curves/intcal09.14C</file>
+        <file alias="curves/intcal13.14c">curves/intcal13.14c</file>
+        <file alias="curves/intcal20.14c">curves/intcal20.14c</file>
+        <file alias="curves/marine04.14C">curves/marine04.14C</file>
+        <file alias="curves/marine09.14C">curves/marine09.14C</file>
+        <file alias="curves/marine13.14c">curves/marine13.14c</file>
+        <file alias="curves/marine20.14c">curves/marine20.14c</file>
+        <file alias="curves/shcal04.14C">curves/shcal04.14C</file>
+        <file alias="curves/shcal13.14c">curves/shcal13.14c</file>
+        <file alias="curves/shcal20.14c">curves/shcal20.14c</file>
+    </qresource>
+</RCC>

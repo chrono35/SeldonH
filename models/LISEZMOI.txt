@@ -1,0 +1,8 @@
+Déposez ici le modèle (fichier .gguf) utilisé par SeldonH.
+
+Modèle recommandé : Qwen3.5-4B-Q4_K_M.gguf (2,74 Go)
+https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/tree/main
+
+Si plusieurs fichiers .gguf sont présents, le premier par ordre alphabétique est chargé au démarrage
+(sauf si un modèle est choisi explicitement dans Préférences ou Fichier > Ouvrir un modèle).
+Les fichiers .gguf sont ignorés par git.

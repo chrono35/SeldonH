@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SeldonH — mode d'emploi</title>
+<!--
+  Ce fichier est LA source de l'aide : il s'ouvre tel quel dans un navigateur (sans lancer SeldonH),
+  et l'application l'affiche dans l'onglet « Aide » (menu Aide > Mode d'emploi, F1, ou la commande /aide).
+
+  Pour l'éditer :
+   - restez en HTML simple (titres, paragraphes, listes, tableaux, <code>) : l'application ignore les blocs
+     <style> et <script> et applique sa propre mise en forme, qui suit le thème clair/sombre du système ;
+   - un exemple cliquable s'écrit  <a class="ex" data-method="c14">C14 de 3560 ± 20 BP</a>  (sans href).
+     Dans l'application, un clic recopie la phrase dans la zone de question ; dans le navigateur, il la copie
+     dans le presse-papiers. data-method (facultatif) indique la méthode de calcul qui doit comprendre la
+     phrase : les tests automatiques vérifient chacun de ces exemples ;
+   - pour un lien interne, utilisez  <a href="#ancre">  vers un  <h2 id="ancre">.
+-->
+<style>
+  :root { --fg:#1f2328; --bg:#ffffff; --muted:#57606a; --line:#d0d7de; --accent:#2a7de1; --note:#eef4fc; --code:#f3f4f6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e6edf3; --bg:#14181d; --muted:#9aa4af; --line:#30363d; --accent:#6aa9f5; --note:#1b2634; --code:#222831; }
+  }
+  html { background: var(--bg); }
+  body { font: 16px/1.55 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: var(--fg); background: var(--bg);
+         max-width: 52rem; margin: 0 auto; padding: 1.2rem 1.2rem 4rem; }
+  h1 { font-size: 1.7rem; margin: .2em 0 .1em; }
+  h2 { font-size: 1.3rem; margin: 2em 0 .4em; padding-top: .4em; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.4em 0 .3em; }
+  p.lead { color: var(--muted); margin-top: 0; }
+  a { color: var(--accent); }
+  a.ex { cursor: pointer; text-decoration: none; border-bottom: 1px dashed var(--accent); font-family: ui-monospace, Menlo, Consolas, monospace;
+         font-size: .92em; background: var(--code); padding: 1px 5px; border-radius: 4px; display: inline-block; margin: 2px 0; }
+  a.ex.done { border-bottom-style: solid; }
+  code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: .92em; background: var(--code); padding: 1px 4px; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; margin: .6em 0; }
+  th, td { border: 1px solid var(--line); padding: .35em .6em; text-align: left; vertical-align: top; }
+  th { background: var(--code); }
+  td.note { background: var(--note); border-left: 4px solid var(--accent); }
+  td.warn { background: var(--note); border-left: 4px solid #d9a400; }
+  ul.toc { columns: 2; list-style: none; padding-left: 0; }
+  .small { color: var(--muted); font-size: .9em; }
+</style>
+</head>
+<body>
+
+<h1>SeldonH — mode d'emploi</h1>
+<p class="lead">Assistant local d'aide à la datation et à la modélisation chronologique. Tout se passe sur votre ordinateur : aucune donnée ne le quitte.</p>
+
+<p><b>Les exemples en pointillés sont cliquables</b> : dans SeldonH, un clic recopie la phrase dans la zone de question (vous pouvez la modifier avant d'appuyer sur Entrée) ; dans un navigateur, elle est copiée dans le presse-papiers.</p>
+
+<ul class="toc">
+  <li><a href="#demarrer">1. Démarrer</a></li>
+  <li><a href="#interface">2. L'interface</a></li>
+  <li><a href="#dater">3. Faire une datation</a></li>
+  <li><a href="#resultats">4. Lire un résultat (HPD)</a></li>
+  <li><a href="#modele">5. Créer un modèle ChronoModel</a></li>
+  <li><a href="#interpreter">6. Interpréter des résultats</a></li>
+  <li><a href="#graphiques">7. Graphiques et images</a></li>
+  <li><a href="#competences">8. Enrichir les compétences</a></li>
+  <li><a href="#reglages">9. Préférences</a></li>
+  <li><a href="#limites">10. Limites connues</a></li>
+  <li><a href="#faq">11. Questions fréquentes</a></li>
+</ul>
+
+<h2 id="demarrer">1. Démarrer</h2>
+<ol>
+  <li>SeldonH fait tourner un modèle de langage <b>GGUF</b> en local (moteur llama.cpp). Placez le fichier <code>.gguf</code> dans le dossier des modèles (menu <i>Fichier &gt; Ouvrir le dossier des modèles</i>) ou choisissez-le avec <i>Fichier &gt; Ouvrir un modèle (.gguf)…</i>.</li>
+  <li>Attendez la fin du chargement (barre de progression sous la conversation). La zone de question est active quand le nom du modèle s'affiche.</li>
+  <li>Posez votre question en français. <code>Entrée</code> envoie, <code>Maj+Entrée</code> ajoute une ligne.</li>
+</ol>
+<table><tr><td class="note">Les <b>calculs de datation</b> (calibration, HPD…) sont faits par l'application elle-même, avec les méthodes de ChronoModel, <b>pas par le modèle de langage</b> : ils sont exacts et instantanés. Le modèle sert à expliquer, commenter, structurer un modèle ou interpréter des résultats. Sur un ordinateur sans GPU, ses réponses peuvent prendre de longues secondes.</td></tr></table>
+
+<h2 id="interface">2. L'interface</h2>
+<ul>
+  <li><b>Zone de dialogue</b> (à gauche, en haut) : vos questions et les réponses. Sous une réponse, des liens permettent de la copier ou, pour un modèle ChronoModel, de l'enregistrer en <code>.chr</code>.</li>
+  <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code> ou une image).</li>
+  <li><b>Panneau graphiques</b> (à droite) : une courbe par calcul, vos images, et cet onglet d'aide. <code>F4</code> l'affiche ou le masque.</li>
+  <li><b>Volet Historique</b> (à gauche, repliable) : vos conversations, la plus récente en haut (voir plus bas). <code>Ctrl+Maj+H</code> (<code>⌘⇧H</code> sur Mac) ou la croix du volet le masque, le menu <i>Affichage</i> le réaffiche.</li>
+  <li><b>Menus</b> : <i>Fichier</i> (nouvelle conversation, modèle, enregistrer la conversation en HTML), <i>Édition</i> (Préférences), <i>Compétences</i>, <i>Affichage</i>, <i>Aide</i>.</li>
+</ul>
+<p>Commandes dans la zone de question : <code>/aide</code> ouvre ce mode d'emploi (même sans modèle chargé).</p>
+
+<h3 id="historique">Historique des conversations</h3>
+<p>Chaque conversation est <b>enregistrée automatiquement</b> dès la première question (questions, réponses, fiches de calcul et courbes). Le volet <b>Historique</b>, à gauche de la fenêtre, les liste avec leur date.</p>
+<ul>
+  <li><b>Revenir à une conversation</b> : double-clic (ou sélection puis <i>Ouvrir</i>). La conversation est réaffichée telle qu'elle était, avec ses courbes, et vous pouvez la <b>poursuivre</b> : l'assistant retrouve tout le contexte, même si vous changez de modèle entre-temps. La conversation que vous quittez reste dans l'historique.</li>
+  <li><b>Nouvelle conversation</b> : le bouton en haut du volet (ou <i>Fichier &gt; Nouvelle conversation</i>).</li>
+  <li><b>Supprimer</b> : sélection puis <i>Supprimer</i> (ou touche <code>Suppr</code>, ou clic droit). <i>Tout effacer…</i> vide l'historique. Une suppression est définitive, après confirmation ; si la conversation supprimée est celle qui est affichée, l'écran est vidé.</li>
+  <li><b>Rechercher</b> : la zone en haut du volet filtre les conversations par leur titre (la première question).</li>
+  <li>Pendant qu'une réponse est en cours, on ne peut pas ouvrir une autre conversation.</li>
+</ul>
+<table><tr><td class="warn"><b>Confidentialité :</b> l'historique est stocké <b>en clair sur cet ordinateur</b>, dans le dossier de données de SeldonH. Il contient aussi le texte des fichiers que vous avez joints. Il n'est jamais envoyé nulle part par SeldonH. Pour ne rien conserver, décochez « Enregistrer automatiquement les conversations » dans les Préférences, puis effacez l'historique existant.</td></tr></table>
+
+<h2 id="dater">3. Faire une datation</h2>
+<p>Écrivez simplement la mesure avec son erreur. SeldonH reconnaît la méthode, calcule, affiche une fiche de résultat dans la conversation et trace la densité dans le panneau de droite ; le modèle de langage commente ensuite.</p>
+
+<table>
+  <tr><th>Méthode</th><th>Exemple (cliquez)</th><th>À savoir</th></tr>
+  <tr>
+    <td><b>Radiocarbone</b> (14C)</td>
+    <td><a class="ex" data-method="c14">C14 de 3560 ± 20 BP</a><br>
+        <a class="ex" data-method="c14">14C 3560 ± 20 BP, courbe IntCal13</a><br>
+        <a class="ex" data-method="c14">coquille marine, 14C 3000 ± 30 BP, ΔR 100 ± 50</a><br>
+        <a class="ex" data-method="c14">14C 2500 ± 30 BP, hémisphère sud</a></td>
+    <td>Âge conventionnel en <b>BP</b> (avant 1950). Courbe par défaut : IntCal20 ; SHCal20 si « hémisphère sud » ; Marine20 si matériel marin (précisez ΔR ± erreur). Courbes disponibles : IntCal04/09/13/20, SHCal04/13/20, Marine04/09/13/20, UWSY98 (nommez-la dans la question pour la choisir).</td>
+  </tr>
+  <tr>
+    <td><b>F14C</b> (post-bombe)</td>
+    <td><a class="ex" data-method="f14c">échantillon F14C = 1,1023 ± 0,0030</a></td>
+    <td>Pour les échantillons postérieurs à 1950. Courbes « bomb » de ChronoModel (hémisphères nord et sud).</td>
+  </tr>
+  <tr>
+    <td><b>TL / OSL</b></td>
+    <td><a class="ex" data-method="tl">TL 800 ± 60 ans, mesuré en 2015</a><br>
+        <a class="ex" data-method="tl">OSL 12,5 ± 1,2 ka</a></td>
+    <td>Précisez l'année de mesure ; sinon SeldonH suppose l'année en cours et l'indique dans un avertissement.</td>
+  </tr>
+  <tr>
+    <td><b>Archéomagnétisme</b></td>
+    <td><a class="ex" data-method="am">archéomagnétisme : inclinaison 65°, alpha95 = 1</a><br>
+        <a class="ex" data-method="am">archéomagnétisme : inclinaison 62, déclinaison -3, α95 = 2</a><br>
+        <a class="ex" data-method="am">archéomagnétisme : intensité 52 ± 3 µT</a></td>
+    <td>Inclinaison (I), déclinaison (D) et/ou intensité (F), avec α95 pour les directions. Courbes intégrées : Paris (Gallet 2002) pour I et D, GwH2013 pour F, Bulgarie. La déclinaison seule n'est pas calculable (son erreur dépend de l'inclinaison).</td>
+  </tr>
+  <tr>
+    <td><b>Gaussienne</b></td>
+    <td><a class="ex" data-method="gauss">date gaussienne N(1200, 50)</a></td>
+    <td>Âge calendaire (année signée) ± σ.</td>
+  </tr>
+  <tr>
+    <td><b>Uniforme</b></td>
+    <td><a class="ex" data-method="unif">date uniforme entre -500 et -400</a></td>
+    <td>Terminus post quem / ante quem.</td>
+  </tr>
+</table>
+
+<h3>Dates et échelles de temps</h3>
+<ul>
+  <li><b>BP</b> = années avant 1950, réservé à l'âge radiocarbone conventionnel. 1954 ± 50 BP n'a rien d'incohérent : c'est environ 2 000 ans.</li>
+  <li>Les résultats sont donnés en <b>années calendaires signées</b>, comme dans ChronoModel (−1898 = 1899 av. J.-C. ; l'année 0 est 1 av. J.-C.), et affichées en « av./apr. J.-C. ».</li>
+</ul>
+
+<h3>Quand la question est incomplète</h3>
+<p>Si l'âge ou l'erreur manque, SeldonH ne calcule pas et le modèle vous demande la valeur manquante. Il ne doit jamais citer d'intervalle calibré « de tête » : en cas de doute, demandez-lui de refaire le calcul avec la phrase complète.</p>
+
+<h2 id="resultats">4. Lire un résultat (HPD)</h2>
+<p>Une densité calibrée n'est <b>pas gaussienne</b> : elle est souvent multimodale (plateaux de la courbe). On ne la résume donc <b>jamais</b> par « ± 1σ » ou « ± 2σ ». SeldonH donne :</p>
+<ul>
+  <li>les <b>régions HPD à 95 % et à 68 %</b> (Highest Posterior Density) : une ou plusieurs plages, chacune avec sa probabilité ;</li>
+  <li>le <b>MAP</b> (valeur la plus probable), la <b>moyenne ; écart-type</b> et les <b>quartiles</b> de la densité ;</li>
+  <li>des avertissements, par exemple si la densité touche la limite ancienne ou récente de la courbe.</li>
+</ul>
+<table><tr><td class="note">Sur le graphique, <b>seule la région HPD est remplie</b> (95 % par défaut) ; la courbe entière reste tracée. Les résultats sont ceux de ChronoModel : pour 3560 ± 20 BP avec IntCal13, SeldonH et ChronoModel donnent les mêmes valeurs.</td></tr></table>
+
+<h2 id="modele">5. Créer un modèle ChronoModel</h2>
+<p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage propose alors une spécification, que SeldonH transforme en fichier <code>.chr</code> en un clic (lien <i>Enregistrer en .chr</i> sous la réponse).</p>
+<p>Exemples de demandes :</p>
+<ul>
+  <li><a class="ex">Fais-moi un modèle ChronoModel avec deux phases, Phase ancienne puis Phase récente. US 12 (phase ancienne) : date gaussienne -520 ± 35. US 10 (phase récente) : date gaussienne -430 ± 40. US 12 est plus ancienne que US 10.</a></li>
+  <li><a class="ex">Quelles informations te faut-il pour construire un modèle de ma stratigraphie ?</a></li>
+</ul>
+<p>Ce qui est exporté aujourd'hui : événements, phases, dates <b>gaussiennes</b>, <b>uniformes</b>, <b>luminescence (TL/OSL)</b> et <b>archéomagnétiques</b>, bornes, contraintes entre événements et entre phases. Les dates radiocarbone et les densités tabulées ne sont pas encore exportées : saisissez-les dans ChronoModel (plugins 14C et Density) après avoir ouvert le fichier.</p>
+<table><tr><td class="warn"><b>À vérifier :</b> ouvrez toujours le <code>.chr</code> dans ChronoModel et contrôlez les événements, les phases et le sens des contraintes avant de lancer le calcul.</td></tr></table>
+
+<h2 id="interpreter">6. Interpréter des résultats</h2>
+<ol>
+  <li>Joignez avec <b>📎</b> le projet <code>.chr</code> ou un export CSV de ChronoModel (les fichiers très longs sont tronqués : joignez de préférence un export ciblé).</li>
+  <li>Posez votre question :</li>
+</ol>
+<ul>
+  <li><a class="ex">Comment interpréter une HPD à 95 % en plusieurs intervalles ?</a></li>
+  <li><a class="ex">Mon modèle donne une phase de 300 ans pour des dates très proches : est-ce normal ?</a></li>
+  <li><a class="ex">Que veut dire un faible taux d'acceptation dans l'algorithme MCMC ?</a></li>
+</ul>
+<p>Le modèle s'appuie sur les compétences de SeldonH (HPD, traces MCMC, contraintes, durées de phase…) mais reste un assistant : vérifiez toute conclusion importante.</p>
+
+<h2 id="graphiques">7. Graphiques et images</h2>
+<ul>
+  <li>Chaque calcul ajoute un onglet de courbe. Demandez aussi un tracé : <a class="ex">Trace une gaussienne de moyenne -500 et d'écart-type 40</a></li>
+  <li><b>Glissez-déposez</b> une image sur le panneau, ou utilisez <i>Ouvrir une image…</i>.</li>
+  <li><i>Enregistrer…</i> exporte la courbe ou l'image affichée en PNG.</li>
+  <li>Fermez un onglet avec sa croix ; <code>F4</code> masque ou affiche tout le panneau.</li>
+</ul>
+
+<h2 id="competences">8. Enrichir les compétences</h2>
+<p>Les connaissances de l'assistant sont des fiches Markdown. À chaque question, SeldonH ajoute au message les fiches dont les mots-clés correspondent (dans la limite du « budget des compétences » des Préférences). Vous pouvez en ajouter ou en corriger sans recompiler :</p>
+<ol>
+  <li>Menu <i>Compétences &gt; Ouvrir le dossier des compétences</i>.</li>
+  <li>Déposez-y un fichier <code>.md</code>. Un fichier du <b>même nom</b> qu'une fiche intégrée la remplace.</li>
+  <li>Menu <i>Compétences &gt; Recharger les compétences</i>.</li>
+</ol>
+<p>Format d'une fiche :</p>
+<pre><code>---
+name: Mon sujet
+description: Une ligne qui dit quand l'utiliser
+keywords: mot, autre mot, expression plus longue
+priority: 5
+---
+Les règles et connaissances, en Markdown, courtes et précises.
+</code></pre>
+<ul>
+  <li><code>keywords</code> : sans accents ni majuscules, séparés par des virgules. Une expression de plusieurs mots compte davantage.</li>
+  <li><code>always: true</code> injecte la fiche à chaque question (à réserver à l'essentiel).</li>
+  <li>Soyez concis : un petit modèle suit mieux une règle courte qu'un long exposé. Ne mettez jamais de valeurs de courbes ni de résultats inventés.</li>
+</ul>
+
+<h2 id="reglages">9. Préférences</h2>
+<p>Menu <i>Édition &gt; Préférences…</i> :</p>
+<table>
+  <tr><th>Réglage</th><th>Effet</th></tr>
+  <tr><td>Moteur</td><td><b>Modèle local</b> (fichier GGUF, tout reste sur votre ordinateur) ou <b>modèle distant</b> : un service qui propose une API compatible OpenAI (OpenAI, Mistral, OpenRouter, Groq, Together, Ollama, LM Studio, llama-server…).</td></tr>
+  <tr><td>Base URL, Clé API, Nom du modèle</td><td>Pour le moteur distant. Base URL : l'adresse de l'API, en général terminée par <code>/v1</code> (par exemple <code>https://api.openai.com/v1</code> ou <code>http://localhost:11434/v1</code> pour Ollama). Clé API : laissez vide pour un serveur local sans clé ; elle est enregistrée en clair dans les réglages de SeldonH sur cet ordinateur, ou lue dans la variable d'environnement <code>SELDONH_API_KEY</code> si le champ est vide. <i>Lister les modèles</i> teste la connexion et propose les noms disponibles.</td></tr>
+  <tr><td>Modèle (.gguf)</td><td>Fichier du modèle de langage local.</td></tr>
+  <tr><td>Taille du contexte</td><td>Quantité de texte (conversation + compétences + fichier joint) que le modèle voit. Plus grand = plus de mémoire vive et plus lent.</td></tr>
+  <tr><td>Threads CPU</td><td>« Automatique » convient en général.</td></tr>
+  <tr><td>Utiliser le GPU (Metal)</td><td>Accélère le modèle sur un Mac avec un GPU compatible. À décocher si le chargement échoue.</td></tr>
+  <tr><td>Température</td><td>0 : réponses reproductibles ; 0,3 à 0,7 recommandé pour des données chiffrées.</td></tr>
+  <tr><td>Longueur max. d'une réponse</td><td>Nombre maximal de tokens générés.</td></tr>
+  <tr><td>Mode réflexion</td><td>Le modèle raisonne avant de répondre : plus lent, utile pour les cas complexes.</td></tr>
+  <tr><td>Appel d'outils (modèle distant)</td><td>Case cochée par défaut. Le modèle distant peut alors <b>demander lui-même</b> un calcul (calibration, HPD, archéomagnétisme…) : SeldonH l'exécute sur votre ordinateur avec les méthodes de ChronoModel, puis lui renvoie les valeurs exactes. Seuls la demande (âge, erreur, courbe) et le résultat sont transmis au serveur. Si le serveur ou le modèle ne gère pas les outils, SeldonH le détecte, vous le dit et utilise à la place un bloc de calcul dans la réponse. Le modèle local fonctionne toujours avec ce bloc.</td></tr>
+  <tr><td>Budget des compétences</td><td>Texte maximal de fiches ajouté à chaque question.</td></tr>
+  <tr><td>Dossier des compétences</td><td>Où SeldonH lit vos fiches personnelles.</td></tr>
+  <tr><td>Format des dates</td><td>Comme dans ChronoModel : BC/AD (défaut), BCE/CE, âge cal. BP (1950 − année), âge cal. B2K, date cal. BP/B2K, ka, Ma. Il s'applique aux fiches de résultat et aux graphiques (l'axe est alors inversé pour garder l'ordre chronologique). Une demande dans la question le remplace pour cette question : <a class="ex" data-method="c14">C14 de 3560 ± 20 BP, donne le résultat en cal BP</a></td></tr>
+  <tr><td>Enregistrer automatiquement les conversations</td><td>Case cochée par défaut : alimente le volet Historique. Décochée, rien de nouveau n'est conservé ; les conversations déjà enregistrées restent jusqu'à leur suppression.</td></tr>
+  <tr><td>Consignes personnelles</td><td>Texte libre ajouté à chaque question : <i>Réponds en trois phrases au maximum</i>, <i>Donne les âges en BP</i>, <i>Tutoie-moi</i>… Il règle la présentation des réponses du modèle ; il ne change pas les résultats de calcul de SeldonH. 1 500 caractères maximum, pris en compte tout de suite, sans relancer le modèle.</td></tr>
+</table>
+
+<h2 id="limites">10. Limites connues</h2>
+<ul>
+  <li>Le modèle de langage peut se tromper ; les <b>valeurs de calcul</b> (intervalles, HPD) sont celles de l'application et font foi sur celles du texte.</li>
+  <li>Export <code>.chr</code> : pas encore de dates radiocarbone ni de densités tabulées ; vérifier le fichier dans ChronoModel.</li>
+  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04, les combinaisons et wiggle matching.</li>
+  <li>Une datation isolée n'est pas un modèle : l'effet des contraintes stratigraphiques (a posteriori) se calcule dans ChronoModel.</li>
+</ul>
+
+<h2 id="faq">11. Questions fréquentes</h2>
+<h3>Le résultat diffère de ChronoModel</h3>
+<p>Pour une date isolée, les valeurs doivent concorder à quelques millièmes près. Vérifiez la courbe (IntCal13 ou IntCal20 ?), le ΔR et l'hémisphère. Si l'écart persiste, signalez la phrase exacte et le résultat de ChronoModel.</p>
+<h3>Le texte du modèle contredit la fiche de calcul</h3>
+<p>Fiez-vous à la fiche de calcul de SeldonH (encadré « Calcul fait par SeldonH ») et demandez au modèle de s'y conformer.</p>
+<h3>Utiliser un modèle distant : qu'est-ce qui quitte mon ordinateur ?</h3>
+<p>Avec un modèle distant, SeldonH envoie au serveur vos questions, la conversation, les compétences sélectionnées pour la question et les fichiers joints. Les <b>calculs de datation restent faits sur votre ordinateur</b>, avec leurs courbes. Le nom du serveur est rappelé en bas de la fenêtre (☁) et un message vous demande confirmation quand vous activez ce mode. Pour travailler hors ligne ou avec des données sensibles, gardez le modèle local.</p>
+<h3>Qu'est-ce que l'appel d'outils ?</h3>
+<p>Un « outil » est une fonction de SeldonH que le modèle peut demander : <code>calibrer_radiocarbone</code>, <code>calibrer_f14c</code>, <code>dater_luminescence</code>, <code>densite_gauss</code>, <code>densite_uniforme</code>, <code>dater_archeomagnetisme</code> et <code>courbes_disponibles</code>. Ce sont les mêmes calculs, sur votre ordinateur, quel que soit le modèle. Avec un modèle distant, la demande passe par le mécanisme standard d'appel d'outils de l'API ; avec le modèle local, par un bloc <code>calcul</code> écrit dans la réponse. Dans les deux cas, la fiche de résultat et la courbe apparaissent dans SeldonH, et le serveur ne reçoit que le texte du résultat. Si un modèle distant se trompe d'outil ou en abuse, décochez l'appel d'outils dans les Préférences.</p>
+<h3>Le modèle distant ne répond pas</h3>
+<p>Vérifiez la Base URL (<i>Lister les modèles</i> la teste), la clé API (une erreur 401 la désigne) et le nom exact du modèle (404). Le mode réflexion de SeldonH ne s'applique qu'au modèle local : chez un fournisseur, choisissez un modèle de raisonnement si vous en voulez un.</p>
+<h3>Les formules s'affichent avec des signes bizarres</h3>
+<p>Le modèle écrit ses formules en LaTeX (<code>$\sigma = \sqrt{a^2+b^2}$</code>) ; SeldonH les met en forme (lettres grecques, racines, exposants, indices, fractions). L'affichage reste une approximation : les formules très complexes (matrices, alignements) sont seulement mises en lignes. Le texte brut d'une réponse reste copiable avec le lien <i>copier</i>.</p>
+<h3>Les réponses sont lentes</h3>
+<p>Sans GPU, la génération se fait sur le processeur. Essayez un modèle plus petit, un contexte plus court, ou désactivez le mode réflexion. Les calculs de datation, eux, restent instantanés.</p>
+<h3>SeldonH n'a pas compris ma phrase</h3>
+<p>Reprenez la forme des exemples ci-dessus : <i>méthode + valeur ± erreur + unité</i>. Pour 14C, écrivez « BP » ; pour l'archéomagnétisme, écrivez « archéomagnétisme » avec « inclinaison » et « alpha95 ».</p>
+<h3>Je veux des réponses plus courtes, ou des âges en BP</h3>
+<p>Écrivez-le une fois pour toutes dans <i>Édition &gt; Préférences… &gt; Consignes personnelles</i>. Les fiches de résultat de SeldonH, elles, restent en années calendaires (négatif = avant J.-C.) : c'est le commentaire du modèle qui suit vos consignes.</p>
+<h3>Où est mon historique ?</h3>
+<p>La conversation n'est pas conservée entre deux lancements. Utilisez <i>Fichier &gt; Enregistrer la conversation (HTML)…</i>.</p>
+
+<p class="small">Ce fichier est aussi disponible hors de l'application : <code>resources/help/aide.html</code> dans le dossier du projet.</p>
+
+<script>
+  // Navigateur uniquement (l'application n'exécute pas de scripts) : un clic sur un exemple copie la phrase.
+  document.querySelectorAll('a.ex').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      var t = a.textContent.trim();
+      var done = function () { a.classList.add('done'); a.title = 'Copié dans le presse-papiers'; };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, done);
+      else done();
+    });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,437 @@
+#include "FigurePanel.h"
+
+#include <QApplication>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QJsonArray>
+#include <QLabel>
+#include <QMimeData>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPair>
+#include <QPushButton>
+#include <QTabWidget>
+#include <QVBoxLayout>
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+#include "../methods/common/Density.h"
+
+namespace seldon {
+
+// ---------------------------------------------------------------- CurveSpec
+
+bool CurveSpec::fromJson(const QJsonObject& o, CurveSpec& out, QString* err)
+{
+    out = CurveSpec();
+    out.title  = o.value("title").toString();
+    out.xlabel = o.value("xlabel").toString();
+    out.ylabel = o.value("ylabel").toString();
+    out.fill   = o.value("fill").toBool(false);
+    if (o.contains("hpd")) {
+        const QJsonValue hv = o.value("hpd");
+        if (hv.isBool()) out.hpdLevel = hv.toBool() ? 95.0 : 0.0;
+        else out.hpdLevel = std::clamp(hv.toDouble(95.0), 0.0, 100.0);
+    }
+
+    out.xReverse = o.value("xreverse").toBool(false);
+    out.showYAxis = o.contains("yaxis") ? o.value("yaxis").toBool(true) : !out.fill;
+
+    auto toVec = [](const QJsonValue& v) {
+        QVector<double> r;
+        for (const QJsonValue& x : v.toArray()) r.append(x.toDouble(std::nan("")));
+        return r;
+    };
+    const QVector<double> sharedX = toVec(o.value("x"));
+    for (const QJsonValue& sv : o.value("series").toArray()) {
+        const QJsonObject s = sv.toObject();
+        CurveSeries cs;
+        cs.name = s.value("name").toString();
+        if (s.contains("color")) {
+            const QColor col(s.value("color").toString());
+            if (col.isValid()) cs.color = col;
+        }
+        cs.y = toVec(s.value("y"));
+        cs.x = s.contains("x") ? toVec(s.value("x")) : sharedX;
+        if (cs.x.isEmpty() && !cs.y.isEmpty()) {            // sans x : indices
+            for (int i = 0; i < cs.y.size(); ++i) cs.x.append(i);
+        }
+        if (cs.x.size() != cs.y.size() || cs.y.size() < 2) {
+            if (err) *err = QObject::tr("Série « %1 » : x et y doivent avoir la même longueur (≥ 2).").arg(cs.name);
+            return false;
+        }
+        out.series.append(cs);
+    }
+    if (out.series.isEmpty()) {
+        if (err) *err = QObject::tr("Aucune série à tracer.");
+        return false;
+    }
+    return true;
+}
+
+// -------------------------------------------------------------- CurveWidget
+
+namespace {
+
+double niceStep(double range, int target)
+{
+    const double raw = range / std::max(1, target);
+    const double mag = std::pow(10.0, std::floor(std::log10(raw)));
+    const double f = raw / mag;
+    const double nice = f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10;
+    return nice * mag;
+}
+
+// Couleurs de ChronoModel (Painting::mainColorDark / mainColorLight, vue de calibration : trait foncé, remplissage clair
+// avec une opacité de 100/255). Les séries suivantes utilisent cette palette.
+const QColor kCmPen(31, 80, 128);
+const QColor kCmBrush(49, 112, 176);
+const QColor kPalette[] = { kCmPen, QColor("#e1572a"), QColor("#2aa876"),
+                            QColor("#a52ae1"), QColor("#d9a400"), QColor("#2ac3d9") };
+
+// Trait et remplissage de la série d'indice i.
+void seriesColors(const CurveSeries& s, int i, QColor& pen, QColor& brush)
+{
+    if (s.color.isValid())  { pen = s.color; brush = s.color; }
+    else if (i == 0)        { pen = kCmPen;  brush = kCmBrush; }
+    else                    { pen = kPalette[i % 6]; brush = pen; }
+    brush.setAlpha(100);
+}
+
+
+// Valeur interpolée linéairement d'une série (x croissant ou non) en xv.
+double valueAt(const CurveSeries& s, double xv)
+{
+    for (int i = 1; i < s.x.size(); ++i) {
+        const double a = s.x[i - 1], b = s.x[i];
+        if (std::isnan(a) || std::isnan(b) || std::isnan(s.y[i - 1]) || std::isnan(s.y[i])) continue;
+        if ((xv >= a && xv <= b) || (xv >= b && xv <= a))
+            return b == a ? s.y[i] : s.y[i - 1] + (s.y[i] - s.y[i - 1]) * (xv - a) / (b - a);
+    }
+    return 0.0;
+}
+
+// Régions HPD (niveau en %) d'une série considérée comme une densité. Vide si le niveau est 0 ou si la série
+// n'est pas une densité (valeurs négatives, aire nulle).
+QVector<QPair<double, double>> hpdRegions(const CurveSeries& s, double level)
+{
+    QVector<QPair<double, double>> out;
+    if (!(level > 0.0) || level >= 100.0) return out;
+    std::vector<std::pair<double, double>> pts;
+    for (int i = 0; i < s.x.size(); ++i) {
+        if (std::isnan(s.x[i]) || std::isnan(s.y[i])) continue;
+        if (s.y[i] < 0.0) return out;
+        pts.emplace_back(s.x[i], s.y[i]);
+    }
+    if (pts.size() < 3) return out;
+    std::sort(pts.begin(), pts.end());
+    seldon::Density d;
+    for (const auto& pt : pts) { d.t.push_back(pt.first); d.v.push_back(pt.second); }
+    if (!(seldon::densityArea(d) > 0.0)) return out;
+    for (const seldon::Interval& iv : seldon::hpdIntervals(d, level)) out.append({ iv.from, iv.to });
+    return out;
+}
+
+} // namespace
+
+CurveWidget::CurveWidget(const CurveSpec& spec, QWidget* parent) : QWidget(parent), spec_(spec)
+{
+    setMinimumSize(280, 200);
+}
+
+void CurveWidget::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    paintTo(p, rect());
+}
+
+QImage CurveWidget::render(const QSize& size) const
+{
+    QImage img(size, QImage::Format_ARGB32);
+    img.fill(Qt::white);
+    QPainter p(&img);
+    paintTo(p, QRect(QPoint(0, 0), size));
+    return img;
+}
+
+void CurveWidget::paintTo(QPainter& p, const QRect& r) const
+{
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const bool exporting = p.device() != this;
+    const QColor bg  = exporting ? Qt::white : palette().color(QPalette::Base);
+    const QColor fg  = exporting ? Qt::black : palette().color(QPalette::Text);
+    QColor grid = fg; grid.setAlphaF(0.12);
+    p.fillRect(r, bg);
+
+    // Bornes des données
+    double xmin = 1e300, xmax = -1e300, ymin = 0, ymax = -1e300;
+    for (const CurveSeries& s : spec_.series)
+        for (int i = 0; i < s.x.size(); ++i) {
+            if (std::isnan(s.x[i]) || std::isnan(s.y[i])) continue;
+            xmin = std::min(xmin, s.x[i]); xmax = std::max(xmax, s.x[i]);
+            ymin = std::min(ymin, s.y[i]); ymax = std::max(ymax, s.y[i]);
+        }
+    if (!(xmax > xmin)) { xmax = xmin + 1; }
+    if (!(ymax > ymin)) { ymax = ymin + 1; }
+    ymax += 0.05 * (ymax - ymin);
+
+    const int left = spec_.showYAxis ? 56 : 26, right = 26, top = spec_.title.isEmpty() ? 14 : 34, bottom = 46;
+    const QRect pr(r.left() + left, r.top() + top, r.width() - left - right, r.height() - top - bottom);
+    if (pr.width() < 20 || pr.height() < 20) return;
+
+    auto X = [&](double x) {
+        const double t = (x - xmin) / (xmax - xmin);
+        return pr.left() + (spec_.xReverse ? 1.0 - t : t) * pr.width();
+    };
+    auto Y = [&](double y) { return pr.bottom() - (y - ymin) / (ymax - ymin) * pr.height(); };
+
+    QFont f = p.font();
+    p.setPen(fg);
+    if (!spec_.title.isEmpty()) {
+        QFont tf = f; tf.setBold(true); tf.setPointSizeF(f.pointSizeF() + 1);
+        p.setFont(tf);
+        p.drawText(QRect(r.left(), r.top() + 4, r.width(), 24), Qt::AlignCenter, spec_.title);
+        p.setFont(f);
+    }
+
+    // Grille et graduations
+    const double sx = niceStep(xmax - xmin, std::max(2, pr.width() / 80));
+    const double sy = niceStep(ymax - ymin, std::max(2, pr.height() / 50));
+    for (double x = std::ceil(xmin / sx) * sx; x <= xmax + 1e-9; x += sx) {
+        p.setPen(grid); p.drawLine(QPointF(X(x), pr.top()), QPointF(X(x), pr.bottom()));
+        p.setPen(fg);
+        p.drawText(QRectF(X(x) - 30, pr.bottom() + 4, 60, 16), Qt::AlignCenter, QString::number(x, 'g', 6));
+    }
+    for (double y = std::ceil(ymin / sy) * sy; spec_.showYAxis && y <= ymax + 1e-9; y += sy) {
+        p.setPen(grid); p.drawLine(QPointF(pr.left(), Y(y)), QPointF(pr.right(), Y(y)));
+        p.setPen(fg);
+        p.drawText(QRectF(r.left() + 2, Y(y) - 8, left - 8, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
+    }
+    p.setPen(fg);
+    p.drawRect(pr);
+    if (!spec_.xlabel.isEmpty())
+        p.drawText(QRect(pr.left(), r.bottom() - 20, pr.width(), 18), Qt::AlignCenter, spec_.xlabel);
+    if (spec_.showYAxis && !spec_.ylabel.isEmpty()) {
+        p.save();
+        p.translate(r.left() + 12, pr.center().y());
+        p.rotate(-90);
+        p.drawText(QRect(-pr.height() / 2, -10, pr.height(), 20), Qt::AlignCenter, spec_.ylabel);
+        p.restore();
+    }
+
+    // Courbes
+    p.setClipRect(pr.adjusted(-1, -1, 1, 1));
+    int ci = 0;
+    for (const CurveSeries& s : spec_.series) {
+        QColor c, bc;
+        seriesColors(s, ci++, c, bc);
+        QPainterPath path;
+        bool started = false;
+        for (int i = 0; i < s.x.size(); ++i) {
+            if (std::isnan(s.x[i]) || std::isnan(s.y[i])) { started = false; continue; }
+            const QPointF pt(X(s.x[i]), Y(s.y[i]));
+            if (!started) { path.moveTo(pt); started = true; } else path.lineTo(pt);
+        }
+        if (spec_.fill) {
+            const QColor fc = bc;
+            const auto intervals = hpdRegions(s, spec_.hpdLevel);
+            std::vector<int> order(s.x.size());
+            for (int i = 0; i < int(order.size()); ++i) order[i] = i;
+            std::sort(order.begin(), order.end(), [&](int a, int b) { return s.x[a] < s.x[b]; });
+            if (intervals.isEmpty()) {                     // pas de HPD (niveau 0 ou série non positive) : toute l'aire
+                QPainterPath area = path;
+                area.lineTo(X(s.x.last()), Y(0));
+                area.lineTo(X(s.x.first()), Y(0));
+                area.closeSubpath();
+                p.fillPath(area, fc);
+            } else {
+                for (const auto& iv : intervals) {
+                    QPainterPath area;
+                    area.moveTo(X(iv.first), Y(0));
+                    area.lineTo(X(iv.first), Y(valueAt(s, iv.first)));
+                    for (int i : order)       // par x croissant, même si la série est en ordre décroissant (axe d'âges)
+                        if (s.x[i] > iv.first && s.x[i] < iv.second && !std::isnan(s.y[i])) area.lineTo(X(s.x[i]), Y(s.y[i]));
+                    area.lineTo(X(iv.second), Y(valueAt(s, iv.second)));
+                    area.lineTo(X(iv.second), Y(0));
+                    area.closeSubpath();
+                    p.fillPath(area, fc);
+                }
+            }
+        }
+        p.setPen(QPen(c, 1.8));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(path);
+    }
+    p.setClipping(false);
+
+    // Légende (séries nommées), largeur adaptée au texte le plus long
+    int legendW = 60;
+    for (const CurveSeries& s : spec_.series)
+        legendW = std::max(legendW, p.fontMetrics().horizontalAdvance(s.name));
+    legendW = std::min(legendW, pr.width() / 2);
+    int ly = pr.top() + 6;
+    ci = 0;
+    for (const CurveSeries& s : spec_.series) {
+        QColor c, bc;
+        seriesColors(s, ci++, c, bc);
+        if (s.name.isEmpty()) continue;
+        const int x0 = pr.right() - legendW - 30;
+        p.setPen(QPen(c, 3));
+        p.drawLine(x0, ly + 7, x0 + 18, ly + 7);
+        p.setPen(fg);
+        p.drawText(QRect(x0 + 22, ly, legendW + 4, 14), Qt::AlignLeft | Qt::AlignVCenter,
+                   p.fontMetrics().elidedText(s.name, Qt::ElideRight, legendW));
+        ly += 16;
+    }
+}
+
+// ---------------------------------------------------------------- ImageView
+
+ImageView::ImageView(const QImage& img, QWidget* parent) : QWidget(parent), img_(img)
+{
+    setMinimumSize(200, 150);
+}
+
+void ImageView::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.fillRect(rect(), palette().color(QPalette::Base));
+    if (img_.isNull()) return;
+    const QSize s = img_.size().scaled(size() - QSize(8, 8), Qt::KeepAspectRatio);
+    p.drawImage(QRect(QPoint((width() - s.width()) / 2, (height() - s.height()) / 2), s), img_);
+}
+
+// -------------------------------------------------------------- FigurePanel
+
+FigurePanel::FigurePanel(QWidget* parent) : QWidget(parent)
+{
+    setAcceptDrops(true);
+    auto* lay = new QVBoxLayout(this);
+    lay->setContentsMargins(0, 0, 0, 0);
+
+    auto* bar = new QHBoxLayout;
+    auto* title = new QLabel(tr("<b>Graphiques et images</b>"));
+    auto* openBtn = new QPushButton(tr("Ouvrir une image…"));
+    auto* saveBtn = new QPushButton(tr("Enregistrer…"));
+    bar->addWidget(title);
+    bar->addStretch();
+    bar->addWidget(openBtn);
+    bar->addWidget(saveBtn);
+    lay->addLayout(bar);
+
+    tabs_ = new QTabWidget;
+    tabs_->setTabsClosable(true);
+    tabs_->setDocumentMode(true);
+    lay->addWidget(tabs_, 1);
+
+    placeholder_ = new QLabel(tr("Aucune figure.\nGlissez une image ici, ou demandez à l'assistant de tracer une courbe."));
+    static_cast<QLabel*>(placeholder_)->setAlignment(Qt::AlignCenter);
+    static_cast<QLabel*>(placeholder_)->setWordWrap(true);
+    lay->addWidget(placeholder_, 1);
+
+    connect(tabs_, &QTabWidget::tabCloseRequested, this, [this](int i) {
+        QWidget* w = tabs_->widget(i);
+        tabs_->removeTab(i);
+        delete w;
+        updatePlaceholder();
+    });
+    connect(openBtn, &QPushButton::clicked, this, &FigurePanel::openImage);
+    connect(saveBtn, &QPushButton::clicked, this, &FigurePanel::saveCurrent);
+    updatePlaceholder();
+}
+
+int FigurePanel::count() const { return tabs_->count(); }
+
+void FigurePanel::clearCurves()
+{
+    for (int i = tabs_->count() - 1; i >= 0; --i) {
+        if (!qobject_cast<CurveWidget*>(tabs_->widget(i))) continue;
+        QWidget* w = tabs_->widget(i);
+        tabs_->removeTab(i);
+        delete w;
+    }
+    updatePlaceholder();
+}
+
+void FigurePanel::updatePlaceholder()
+{
+    const bool empty = tabs_->count() == 0;
+    tabs_->setVisible(!empty);
+    placeholder_->setVisible(empty);
+}
+
+void FigurePanel::showPage(QWidget* page, const QString& title)
+{
+    int i = tabs_->indexOf(page);
+    if (i < 0) i = tabs_->addTab(page, title);
+    tabs_->setCurrentIndex(i);
+    updatePlaceholder();
+}
+
+void FigurePanel::addImage(const QImage& img, const QString& title)
+{
+    const int i = tabs_->addTab(new ImageView(img), title);
+    tabs_->setCurrentIndex(i);
+    updatePlaceholder();
+}
+
+bool FigurePanel::addImageFile(const QString& path)
+{
+    QImage img(path);
+    if (img.isNull()) return false;
+    addImage(img, QFileInfo(path).fileName());
+    return true;
+}
+
+void FigurePanel::addCurves(const CurveSpec& spec)
+{
+    const int i = tabs_->addTab(new CurveWidget(spec), spec.title.isEmpty() ? tr("Courbe") : spec.title);
+    tabs_->setCurrentIndex(i);
+    updatePlaceholder();
+}
+
+bool FigurePanel::addCurvesJson(const QJsonObject& o, QString* err)
+{
+    CurveSpec spec;
+    if (!CurveSpec::fromJson(o, spec, err)) return false;
+    addCurves(spec);
+    return true;
+}
+
+void FigurePanel::openImage()
+{
+    const QStringList files = QFileDialog::getOpenFileNames(
+        this, tr("Ouvrir des images"), QString(), tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.svg *.webp)"));
+    for (const QString& f : files) addImageFile(f);
+}
+
+void FigurePanel::saveCurrent()
+{
+    QWidget* w = tabs_->currentWidget();
+    if (!qobject_cast<CurveWidget*>(w) && !qobject_cast<ImageView*>(w)) return;     // ex. onglet d'aide : rien à enregistrer
+    const QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer la figure"), tabs_->tabText(tabs_->currentIndex()) + ".png",
+                                                      tr("Image PNG (*.png)"));
+    if (path.isEmpty()) return;
+    QImage img;
+    if (auto* c = qobject_cast<CurveWidget*>(w)) img = c->render(QSize(1600, 1000));
+    else if (auto* v = qobject_cast<ImageView*>(w)) img = v->image();
+    if (!img.isNull()) img.save(path, "PNG");
+}
+
+void FigurePanel::dragEnterEvent(QDragEnterEvent* e)
+{
+    if (e->mimeData()->hasUrls()) e->acceptProposedAction();
+}
+
+void FigurePanel::dropEvent(QDropEvent* e)
+{
+    for (const QUrl& u : e->mimeData()->urls())
+        if (u.isLocalFile()) addImageFile(u.toLocalFile());
+}
+
+} // namespace seldon

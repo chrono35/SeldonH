@@ -1,0 +1,89 @@
+#include "F14cMethod.h"
+
+#include <cmath>
+
+#include "../c14/C14Method.h"
+#include "../common/CurveStore.h"
+#include "../common/TextUtil.h"
+
+namespace seldon {
+
+QStringList F14cMethod::curveNames() const { return CurveStore::names(id()) + CurveStore::names("c14"); }
+
+const RefCurve* F14cMethod::resolveCurve(const QString& name)
+{
+    if (const RefCurve* c = CurveStore::get("f14c", name, CurveFormat::Radiocarbon, true)) return c;
+    return CurveStore::get("c14", name, CurveFormat::Radiocarbon, true);
+}
+
+QVector<QJsonObject> F14cMethod::parse(const QString& question) const
+{
+    QVector<QJsonObject> out;
+    const QString q = text::fold(question);
+    static const QRegularExpression ctx(R"((f\s?-?14\s?c|fraction moderne|fraction 14c|post[- ]?bombe|bomb curve|\bpmc\b))");
+    if (!ctx.match(q).hasMatch()) return out;
+
+    // Courbe
+    QString curve;
+    static const QRegularExpression named(R"((bomb(?:21|13)(?:nhz|shz|nh|sh)\d{1,2}))");
+    const auto nm = named.match(q);
+    if (nm.hasMatch()) {
+        curve = nm.captured(1);
+    } else {
+        const bool south = q.contains("hemisphere sud") || q.contains("australe") || q.contains("shcal");
+        QString zone = "1";
+        static const QRegularExpression z(R"(zone\s*([123]))");
+        const auto zm = z.match(q);
+        if (zm.hasMatch()) zone = zm.captured(1);
+        curve = south ? QString("bomb21shz%1").arg(zone == "2" ? "1" : zone) : QString("bomb21nhz%1").arg(zone);
+    }
+
+    for (const text::ValueError& ve : text::findValueErrors(q)) {
+        if (out.size() >= 6) break;
+        QJsonObject o;
+        o["f14c"] = ve.value;
+        o["error"] = ve.error;
+        // F14C < 1 (avant la bombe) : courbe d'âge convertie, sauf courbe explicitement nommée
+        o["curve"] = (ve.value < 1.0 && !nm.hasMatch()) ? C14Method::defaultCurve(q) : curve;
+        out << o;
+    }
+    return out;
+}
+
+MethodResult F14cMethod::compute(const QJsonObject& p) const
+{
+    const double F = p.value("f14c").toDouble();
+    const double e = p.value("error").toDouble();
+    const QString name = p.value("curve").toString("bomb21nhz1").toLower();
+    if (!(e > 0.0)) return MethodResult::failure("l'erreur doit être strictement positive");
+    if (!(F > 0.0)) return MethodResult::failure("le F14C doit être strictement positif");
+
+    const RefCurve* c = resolveCurve(name);
+    if (!c) return MethodResult::failure(QStringLiteral("courbe inconnue : « %1 » (disponibles : %2)").arg(name, curveNames().join(", ")));
+
+    const double meas2 = e * e;
+    const auto L = [&](double t) -> long double {
+        double mu, sg;
+        c->at(t, mu, sg);
+        const long double v = static_cast<long double>(sg) * sg + meas2;
+        const long double d = F - mu;
+        return expl(-0.5L * d * d / v) / sqrtl(v);
+    };
+    const Density d = buildDensity(c->tmin(), c->tmax(), c->minStep / 3.0, L, true);
+    if (!d.valid())
+        return MethodResult::failure(QStringLiteral("F14C = %1 incompatible avec la courbe « %2 » (%3 → %4)")
+                                         .arg(text::numAuto(F), name, text::yearLabel(c->tmin()), text::yearLabel(c->tmax())));
+    QStringList warn;
+    if (F > 1.0) warn << "un F14C > 1 donne souvent deux solutions (montée puis descente de la courbe de la bombe)";
+    return MethodResult::fromDensity(d, warn, true);
+}
+
+QString F14cMethod::describe(const QJsonObject& p) const
+{
+    const QString name = p.value("curve").toString("bomb21nhz1");
+    return QStringLiteral("F14C : %1 ± %2 — %3")
+        .arg(text::numAuto(p.value("f14c").toDouble(), 5), text::numAuto(p.value("error").toDouble(), 5),
+             name.startsWith("bomb") ? name : C14Method::curveTitle(name));
+}
+
+} // namespace seldon

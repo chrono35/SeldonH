@@ -1,0 +1,14 @@
+<RCC>
+    <qresource prefix="/methods/f14c">
+        <file alias="curves/bomb13nh1.14c">curves/bomb13nh1.14c</file>
+        <file alias="curves/bomb13nh2.14c">curves/bomb13nh2.14c</file>
+        <file alias="curves/bomb13nh3.14c">curves/bomb13nh3.14c</file>
+        <file alias="curves/bomb13sh12.14c">curves/bomb13sh12.14c</file>
+        <file alias="curves/bomb13sh3.14c">curves/bomb13sh3.14c</file>
+        <file alias="curves/bomb21NHZ1.14c">curves/bomb21NHZ1.14c</file>
+        <file alias="curves/bomb21NHZ2.14c">curves/bomb21NHZ2.14c</file>
+        <file alias="curves/bomb21NHZ3.14c">curves/bomb21NHZ3.14c</file>
+        <file alias="curves/bomb21SHZ1.14c">curves/bomb21SHZ1.14c</file>
+        <file alias="curves/bomb21SHZ3.14c">curves/bomb21SHZ3.14c</file>
+    </qresource>
+</RCC>

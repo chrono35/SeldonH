@@ -1,0 +1,10 @@
+<RCC>
+    <qresource prefix="/methods/am">
+        <file alias="curves/Bulgaria_D.ref">curves/Bulgaria_D.ref</file>
+        <file alias="curves/Bulgaria_F.ref">curves/Bulgaria_F.ref</file>
+        <file alias="curves/Bulgaria_I.ref">curves/Bulgaria_I.ref</file>
+        <file alias="curves/GAL2002sph2014_D.ref">curves/GAL2002sph2014_D.ref</file>
+        <file alias="curves/GAL2002sph2014_I.ref">curves/GAL2002sph2014_I.ref</file>
+        <file alias="curves/GwH2013uni_F.ref">curves/GwH2013uni_F.ref</file>
+    </qresource>
+</RCC>
