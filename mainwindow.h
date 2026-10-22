@@ -115,6 +115,10 @@ private:
     void logUser(const QString& shown);
     void logNotice(const QString& html);
     bool logPlot(const QJsonObject& plot, QString* err = nullptr);   // false (et err) si le tracé est inexploitable
+    // Courbes d'une datation calculée : toutes les datations d'une même question vont dans UNE figure (superposées),
+    // même si elles arrivent en plusieurs fois (calcul automatique, puis bloc « calcul » ou outils de l'assistant).
+    void logDatingPlot(const QJsonObject& plot, int questionTurn);
+    int  currentQuestionTurn() const;            // dernier tour posé par l'utilisateur (non synthétique)
     int  newAssistantBubble();                 // bulle du prochain tour (index = turns_.size())
     void logAssistantText(int turn, const QString& markdown, const QString& thinking);
     void setTurnActions(int turn);             // liens « Enregistrer le modèle » / « Copier » sous la réponse
@@ -132,9 +136,9 @@ private:
     seldon::ChatView*    chat_ = nullptr;
     seldon::FigurePanel* figures_ = nullptr;
     seldon::HistoryPanel* history_ = nullptr;
-    seldon::CollapseStrip* historyStrip_ = nullptr;   // bande toujours visible à gauche : replie/déplie l'historique
+    seldon::CollapseStrip* historyStrip_ = nullptr;   // bande toujours visible (à droite du volet ouvert) : replie/déplie l'historique
     QAction*             historyAction_ = nullptr;
-    QSplitter*           outer_ = nullptr;            // [historique | (dialogue | graphiques)]
+    QSplitter*           outer_ = nullptr;            // [historique | bande | (dialogue | graphiques)]
     QPointer<seldon::HelpView> help_;       // onglet d'aide (supprimé si l'utilisateur ferme l'onglet)
     QAction*             figAction_ = nullptr;
     seldon::InputEdit*   input_ = nullptr;
@@ -153,6 +157,9 @@ private:
     QString              convId_;              // vide tant que rien n'a été demandé
     QDateTime            convCreated_;
     QVector<seldon::DisplayItem> display_;     // journal d'affichage de la conversation
+    int                  datingPlotTurn_ = -1;     // question dont la figure de datations est datingPlotPage_
+    int                  datingPlotItem_ = -1;     // son entrée dans display_
+    QPointer<QWidget>    datingPlotPage_;
 
     QVector<Turn>        turns_;
     QString              raw_;                 // sortie brute du modèle pour le tour en cours

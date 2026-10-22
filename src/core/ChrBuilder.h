@@ -22,6 +22,8 @@
 //   "settings": {"tmin": -1000, "tmax": 200, "step": 1},
 //   "mcmc": {"num_iter": 100000}
 // }
+// Archéomagnétisme : "process" = I (inclinaison), D (déclinaison), F (intensité), ID (directionnel), IF ou IDF (vectoriel).
+// I demande inc + alpha95 ; D demande dec + inc + alpha95 (l'erreur sur D dépend de I) ; F demande field + error_f.
 // Les âges gauss/unif sont en années calendaires (négatif = avant J.-C.) ; pour « tl », « age » est un âge en années
 // avant « ref_year » (année de la mesure). Les champs écrits (échantillonneurs, MCMC, courbe, clés des dates et des
 // événements) reprennent ceux de projets ChronoModel 4.0 réels.

@@ -4,6 +4,7 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <cmath>
+#include <random>
 
 #include <QImage>
 #include <QJsonObject>
@@ -28,9 +29,11 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QFile>
 #include "../src/skills/SkillManager.h"
 #include "../src/methods/common/CurveStore.h"
 #include "../src/methods/common/DateFormat.h"
+#include "../src/methods/common/EventMcmc.h"
 #include "../src/methods/common/MethodRegistry.h"
 #include "../src/methods/common/MethodRunner.h"
 #include "../src/methods/common/Tools.h"
@@ -353,11 +356,58 @@ private slots:
             R"({"events":[{"name":"E","dates":[{"type":"tl","age":500,"error":20}]}]})", nullptr).object());
         QVERIFY2(t.ok, qPrintable(t.errors.join("; ")));
         QVERIFY(!t.warnings.filter("ref_year").isEmpty());
-        // code de processus non vérifié (ID) : avertissement
+        // les six codes de processus sont vérifiés : plus d'avertissement
         const ChrResult p = ChrBuilder::build(QJsonDocument::fromJson(
             R"({"events":[{"name":"E","dates":[{"type":"am","process":"ID","inc":65,"dec":3,"alpha95":1}]}]})", nullptr).object());
         QVERIFY2(p.ok, qPrintable(p.errors.join("; ")));
-        QVERIFY(!p.warnings.filter("vérifié").isEmpty());
+        QVERIFY(p.warnings.filter("vérifié").isEmpty());
+    }
+
+    // Les six types de datation du plugin AM, avec les valeurs du projet réel tous_type_AM.chr (ChronoModel 4.0) :
+    // codes process_type et champs utiles de « data ».
+    void chrAmAllProcessTypes()
+    {
+        const QString spec = R"J({"settings":{"tmin":-1000,"tmax":2000},"events":[
+          {"name":"date intensité","dates":[{"type":"am","name":"Intensité A","process":"F","field":54.22,"error_f":0.83,
+             "curve_i":"bulgaria_i","curve_d":"gal2002sph2014_d","curve_f":"eurw_2017_f"}]},
+          {"name":"date inclinaison","dates":[{"type":"am","name":"Inclinaison A","process":"I","inc":65.2,"alpha95":1.2}]},
+          {"name":"date déclinaison","dates":[{"type":"am","name":"declinaison A","process":"D","inc":65.3,"dec":5.2,"alpha95":1.3}]},
+          {"name":"date (i, d)","dates":[{"type":"am","name":"directionnel A","process":"ID","inc":65.2,"dec":3.2,"alpha95":1.4}]},
+          {"name":"date (i, f)","dates":[{"type":"am","name":"vectorielle A","process":"IF","inc":65.2,"alpha95":1.2,
+             "field":55.3,"error_f":2.4,"curve_f":"gwh2013uni_f"}]},
+          {"name":"date (i, d, f)","dates":[{"type":"am","name":"vectorielle (i, d, f)","process":"IDF","inc":65.2,"dec":5.2,
+             "alpha95":1.4,"field":55.3,"error_f":2.2,"curve_f":"gwh2013uni_f"}]}]})J";   // délimiteur J : les noms contiennent « )" »
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        QVERIFY(r.warnings.filter("vérifié").isEmpty());
+        const QJsonArray evs = r.chr["events"].toArray();
+        QCOMPARE(evs.size(), 6);
+        auto data = [&](int i) { return evs[i].toObject()["dates"].toArray()[0].toObject()["data"].toObject(); };
+        const int codes[] = { 3, 1, 2, 4, 5, 6 };
+        for (int i = 0; i < 6; ++i) QCOMPARE(data(i)["process_type"].toInt(), codes[i]);
+        // F
+        QCOMPARE(data(0)["field"].toDouble(), 54.22);
+        QCOMPARE(data(0)["error_f"].toDouble(), 0.83);
+        QCOMPARE(data(0)["refF_curve"].toString(), QString("eurw_2017_f.ref"));
+        QCOMPARE(data(0)["refI_curve"].toString(), QString("bulgaria_i.ref"));
+        QVERIFY(data(0)["alpha95"].toDouble() > 0);              // erreur non utilisée : jamais nulle
+        // I
+        QCOMPARE(data(1)["inc"].toDouble(), 65.2);
+        QCOMPARE(data(1)["alpha95"].toDouble(), 1.2);
+        QVERIFY(data(1)["error_f"].toDouble() > 0);
+        // D : l'inclinaison est écrite (σD = α95 / (2,448 cos I))
+        QCOMPARE(data(2)["inc"].toDouble(), 65.3);
+        QCOMPARE(data(2)["dec"].toDouble(), 5.2);
+        QCOMPARE(data(2)["alpha95"].toDouble(), 1.3);
+        // ID, IF, IDF
+        QCOMPARE(data(3)["dec"].toDouble(), 3.2);
+        QCOMPARE(data(4)["field"].toDouble(), 55.3);
+        QCOMPARE(data(4)["refF_curve"].toString(), QString("gwh2013uni_f.ref"));
+        QCOMPARE(data(5)["error_f"].toDouble(), 2.2);
+        QCOMPARE(data(5)["dec"].toDouble(), 5.2);
+        const QString sum = ChrBuilder::summarize(r.chr);
+        QVERIFY(sum.contains("archéomag. D (I=65.3, D=5.2"));
+        QVERIFY(sum.contains("archéomag. IDF"));
     }
 
 
@@ -609,6 +659,7 @@ private slots:
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"am","process":"I","inc":65}]}]})").ok);          // alpha95 manquant
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"am","process":"F","field":50}]}]})").ok);        // error_f manquant
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"am","process":"X","inc":65,"alpha95":1}]}]})").ok);
+        QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"am","process":"D","dec":5,"alpha95":1}]}]})").ok);      // D sans inc
         QVERIFY(!bad(R"({"events":[{"name":"a"},{"name":"a"}]})").ok);
         QVERIFY(!bad(R"({"events":[{"name":"b","type":"bound"}]})").ok);
     }
@@ -899,6 +950,16 @@ private slots:
         for (const auto& e : ex) {
             QVERIFY2(!e.text.isEmpty(), "exemple vide");
             if (e.method.isEmpty()) continue;
+            if (e.method == "event") {                     // événement : au moins deux datations calculables, combinées en MCMC
+                QVERIFY2(MethodRunner::asksEvent(e.text), qPrintable("événement non reconnu : " + e.text));
+                const auto d = MethodRegistry::instance().parse(e.text);
+                QVERIFY2(d.size() >= 2, qPrintable("datations de l'événement non comprises : " + e.text));
+                for (const QJsonObject& o : d)
+                    QVERIFY2(MethodRegistry::instance().compute(o).ok, qPrintable("calcul impossible : " + e.text));
+                methods << e.method;
+                ++checked;
+                continue;
+            }
             const auto v = MethodRegistry::instance().parse(e.text);
             QVERIFY2(!v.isEmpty(), qPrintable("exemple non compris : " + e.text));
             QCOMPARE(v[0].value("method").toString(), e.method);
@@ -908,7 +969,7 @@ private slots:
             ++checked;
         }
         QVERIFY(checked >= 10);
-        for (const QString& m : { "c14", "f14c", "tl", "am", "gauss", "unif" })
+        for (const QString& m : { "c14", "f14c", "tl", "am", "gauss", "unif", "event" })
             QVERIFY2(methods.contains(m), qPrintable("pas d'exemple pour " + m));
 
         const QString qt = seldon::HelpView::toQtHtml(html);
@@ -1148,9 +1209,9 @@ private slots:
     void toolsSchema()
     {
         const auto& all = seldon::tools::all();
-        QCOMPARE(all.size(), 7);
+        QCOMPARE(all.size(), 8);
         const QJsonArray api = seldon::tools::schemaForApi();
-        QCOMPARE(api.size(), 7);
+        QCOMPARE(api.size(), 8);
         static const QRegularExpression okName("^[a-z0-9_]{1,64}$");
         QStringList seen;
         for (const QJsonValue& v : api) {
@@ -1164,7 +1225,8 @@ private slots:
         }
         // chaque outil de calcul vise une méthode qui existe
         for (const auto& d : all)
-            if (!d.methodId.isEmpty()) QVERIFY2(seldon::MethodRegistry::instance().byId(d.methodId) != nullptr, qPrintable(d.name));
+            if (!d.methodId.isEmpty() && d.methodId != "event")      // « event » combine les autres méthodes (MCMC)
+                QVERIFY2(seldon::MethodRegistry::instance().byId(d.methodId) != nullptr, qPrintable(d.name));
     }
 
     void toolsExecute()
@@ -1292,7 +1354,7 @@ private slots:
         const RemoteConfig cfg{ "http://x/v1", "", "m" };
         const QJsonObject b1 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
                                                                            tools::schemaForApi(), QJsonArray{ am, tm })).object();
-        QCOMPARE(b1.value("tools").toArray().size(), 7);
+        QCOMPARE(b1.value("tools").toArray().size(), 8);
         QCOMPARE(b1.value("tool_choice").toString(), QString("auto"));
         QCOMPARE(b1.value("messages").toArray().size(), 3);
         const QJsonObject b2 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
@@ -1335,7 +1397,7 @@ private slots:
 
         // 1re requête : outils déclarés
         const QJsonObject first = QJsonDocument::fromJson(srv.bodies_[0]).object();
-        QCOMPARE(first.value("tools").toArray().size(), 7);
+        QCOMPARE(first.value("tools").toArray().size(), 8);
 
         eng.submitToolResults({ { cs[0].id, cs[0].name, out.content } });
         QTRY_COMPARE_WITH_TIMEOUT(fin.count(), 1, 5000);
@@ -1603,6 +1665,375 @@ private slots:
         // Pour une gaussienne la HPD 95 % = ±1,96σ : la part de l'aire remplie reste très proche de celle de l'aire totale
         // (les queues sont fines) mais strictement inférieure.
         QVERIFY(nHpd < nAll);
+    }
+
+    // Niveau de confiance : 95 % par défaut ; un autre niveau demandé est calculé en plus des HPD 95 % et 68 %.
+    void datingConfidenceLevel()
+    {
+        QCOMPARE(MethodRunner::requestedLevel("C14 de 2500 ± 30 BP à 99 %"), 99.0);
+        QCOMPARE(MethodRunner::requestedLevel("donne la HPD 90 pour 2500 ± 30 BP"), 90.0);
+        QCOMPARE(MethodRunner::requestedLevel("avec un niveau de confiance de 99,7 %"), 99.7);
+        QCOMPARE(MethodRunner::requestedLevel("intervalle de crédibilité à 80 pour cent"), 80.0);
+        QCOMPARE(MethodRunner::requestedLevel("C14 de 2500 ± 30 BP"), 0.0);
+        QCOMPARE(MethodRunner::requestedLevel("inclinaison 65°, alpha95 = 1"), 0.0);
+        QCOMPARE(MethodRunner::requestedLevel("inclinaison 65, cône de confiance α95 de 2"), 0.0);
+        QCOMPARE(MethodRunner::requestedLevel("charbon du niveau 3, 2500 ± 30 BP"), 0.0);
+        QCOMPARE(MethodRunner::requestedLevel("erreur à 5 %"), 0.0);                       // hors [50 ; 100[
+
+        const RunOutcome def = MethodRunner::analyzeQuestion("C14 de 2500 ± 30 BP");
+        QVERIFY(def.found);
+        QCOMPARE(def.plot["hpd"].toDouble(), 95.0);
+        QVERIFY(def.noticeHtml.contains("HPD 95 %") && def.noticeHtml.contains("HPD 68 %"));
+        QVERIFY(!def.noticeHtml.contains("demandé"));
+
+        const RunOutcome o = MethodRunner::analyzeQuestion("C14 de 2500 ± 30 BP, donne la HPD à 99 %");
+        QVERIFY(o.found);
+        QCOMPARE(o.plot["hpd"].toDouble(), 99.0);
+        QVERIFY(o.noticeHtml.contains("HPD 99 %"));
+        QVERIFY(o.noticeHtml.contains("HPD 95 %") && o.noticeHtml.contains("HPD 68 %"));
+        QVERIFY(o.noticeHtml.indexOf("HPD 99 %") < o.noticeHtml.indexOf("HPD 95 %"));     // du plus large au plus étroit
+        QVERIFY(o.promptBlock.contains("Intervalles HPD à 99 % (niveau demandé"));
+
+        // La HPD à 99 % contient celle à 95 %.
+        const MethodResult r = MethodRegistry::instance().compute({ { "method", "c14" }, { "age", 2500 }, { "error", 30 } });
+        QVERIFY(r.ok);
+        const auto h99 = hpdIntervals(r.density, 99.0);
+        QVERIFY(h99.front().from <= r.hpd95.front().from && h99.back().to >= r.hpd95.back().to);
+
+        // Bloc « calcul » ou outil : clé level ; valeur décimale ; valeur invalide -> 95 % et avertissement.
+        const RunOutcome dec = MethodRunner::run({ QJsonObject{ { "method", "gauss" }, { "age", 1200 }, { "error", 50 }, { "level", 99.7 } } });
+        QVERIFY(dec.noticeHtml.contains("HPD 99,7 %"));
+        const RunOutcome bad = MethodRunner::run({ QJsonObject{ { "method", "gauss" }, { "age", 1200 }, { "error", 50 }, { "level", 150 } } });
+        QVERIFY(bad.noticeHtml.contains("invalide"));
+        QCOMPARE(bad.plot["hpd"].toDouble(), 95.0);
+        const auto t = tools::execute("calibrer_radiocarbone", R"({"age":2500,"error":30,"level":"90"})", DateFormat::BcAd);
+        QVERIFY2(t.executed, qPrintable(t.content));
+        QVERIFY(t.content.contains("Intervalles HPD à 90 %"));
+    }
+
+    // Plusieurs datations dans une question : toutes calculées, de méthodes différentes si besoin, sur UNE figure.
+    void severalDatingsOneFigure()
+    {
+        auto methods = [](const QVector<QJsonObject>& v) { QStringList m; for (const QJsonObject& o : v) m << o["method"].toString(); return m; };
+        const MethodRegistry& reg = MethodRegistry::instance();
+
+        // Même méthode : inchangé
+        QCOMPARE(methods(reg.parse("C14 de 2500 ± 30 BP et 3000 ± 40 BP")), QStringList({ "c14", "c14" }));
+        // Méthodes mélangées : chaque paire va à sa méthode, dans l'ordre de la question
+        QVector<QJsonObject> v = reg.parse("TL 488 ± 19 ans mesuré en 2015 et C14 2500 ± 30 BP");
+        QCOMPARE(methods(v), QStringList({ "tl", "c14" }));
+        QCOMPARE(v[0]["age"].toDouble(), 488.0);
+        QCOMPARE(v[0]["refYear"].toInt(), 2015);
+        QCOMPARE(v[1]["age"].toDouble(), 2500.0);
+        v = reg.parse("C14 : 2500 ± 30, 3000 ± 40 ; TL : 488 ± 19 (mesure en 2015)");
+        QCOMPARE(methods(v), QStringList({ "c14", "c14", "tl" }));
+        v = reg.parse("C14 2500 ± 30 BP et inclinaison 65°, alpha95 = 1");
+        QCOMPARE(methods(v), QStringList({ "c14", "am" }));
+        v = reg.parse("F14C 1,2345 ± 0,003 et C14 2500 ± 30 BP");             // « 14c » de « f14c » ignoré
+        QCOMPARE(methods(v), QStringList({ "f14c", "c14" }));
+
+        // Une seule figure, une courbe par datation
+        const RunOutcome o = MethodRunner::analyzeQuestion("TL 488 ± 19 ans mesuré en 2015 et C14 2500 ± 30 BP");
+        QCOMPARE(o.count, 2);
+        QCOMPARE(o.plot["series"].toArray().size(), 2);
+
+        // Fusion de figures arrivées en plusieurs fois : courbes ajoutées, doublons ignorés
+        const RunOutcome a = MethodRunner::run({ QJsonObject{ { "method", "c14" }, { "age", 2500 }, { "error", 30 } } });
+        const RunOutcome b = MethodRunner::run({ QJsonObject{ { "method", "c14" }, { "age", 2500 }, { "error", 30 } },
+                                                 QJsonObject{ { "method", "gauss" }, { "age", 1200 }, { "error", 50 } } });
+        const QJsonObject m = tools::mergePlots({ a.plot, b.plot });
+        QCOMPARE(m["series"].toArray().size(), 2);
+        seldon::FigurePanel panel;
+        QVERIFY(panel.addCurvesJson(a.plot));
+        QWidget* page = panel.lastCurves();
+        QVERIFY(page);
+        QVERIFY(panel.replaceCurvesJson(page, m));
+        QCOMPARE(panel.count(), 1);                                                 // pas de nouvel onglet
+    }
+
+    // Événement à plusieurs datations (MCMC de ChronoModel) : diagnostics, combinaison, reconnaissance, outil.
+    void eventMcmcDiagnostics()
+    {
+        std::mt19937 g(7);
+        std::normal_distribution<double> n01;
+        std::vector<std::vector<double>> iid(4, std::vector<double>(2000));
+        for (auto& c : iid) for (double& x : c) x = n01(g);
+        const auto ok = mcmcdiag::computeRhatAndEss(iid);
+        QVERIFY2(ok.rhat < 1.01, qPrintable(QString::number(ok.rhat)));
+        QVERIFY2(ok.bulkEss > 6000 && ok.bulkEss < 10000, qPrintable(QString::number(ok.bulkEss)));
+        auto shifted = iid;
+        for (double& x : shifted[0]) x += 3.0;                       // une chaîne bloquée ailleurs
+        QVERIFY(mcmcdiag::computeRhatAndEss(shifted).rhat > 1.1);
+    }
+
+    void eventMcmcCombination()
+    {
+        const MethodRegistry& reg = MethodRegistry::instance();
+        auto dens = [&](double age, double err) {
+            return reg.compute({ { "method", "gauss" }, { "age", age }, { "error", err }, { "mode", "none" } }).density;
+        };
+        McmcSettings ms;
+        ms.numIter = 30000;
+        ms.seeds = { 1, 2, 3, 4 };
+        // Deux dates concordantes : θ ≈ moyenne pondérée, écart-type ≈ 30/√2
+        const EventMcmcResult r = runEventMcmc({ { "A", dens(1000, 30), {} }, { "B", dens(1020, 30), {} } }, ms, 0, 2000);
+        QVERIFY2(r.ok, r.error.c_str());
+        const DensityStats st = densityStats(r.theta);
+        QVERIFY2(std::abs(st.mean - 1010) < 4, qPrintable(QString::number(st.mean)));
+        QVERIFY2(std::abs(st.sd - 21.2) < 3, qPrintable(QString::number(st.sd)));
+        QCOMPARE(int(r.chains.size()), 4);
+        QCOMPARE(r.chains[0].seed, 1u);
+        QCOMPARE(int(r.diagnostics.size()), 2 + 2 * 2);                 // θ, S0, (t, σ) par date
+        QVERIFY(r.maxRhat < 1.05);
+        QVERIFY(r.status != Convergence::Unknown);
+        QCOMPARE(int(r.thetaTraces.size()), 4);
+        QCOMPARE(int(r.thetaTraces[0].size()), 3000);                   // 30000 / thinning 10
+        // Reproductible avec les mêmes graines
+        const EventMcmcResult r2 = runEventMcmc({ { "A", dens(1000, 30), {} }, { "B", dens(1020, 30), {} } }, ms, 0, 2000);
+        QCOMPARE(r2.thetaTraces[2], r.thetaTraces[2]);
+        // Une date discordante reçoit une grande dispersion σ et pèse peu
+        const EventMcmcResult o = runEventMcmc({ { "A", dens(1000, 30), {} }, { "B", dens(1010, 30), {} }, { "C", dens(1400, 30), {} } },
+                                               ms, 0, 2000);
+        QVERIFY(o.ok);
+        QVERIFY2(std::abs(densityStats(o.theta).mean - 1005) < 30, qPrintable(QString::number(densityStats(o.theta).mean)));
+        QVERIFY(o.sigmaMedian[2] > 10 * o.sigmaMedian[0]);
+        // Décalage fixe δ = +100 (y = t + δ) : l'événement suit les dates décalées
+        Wiggle w; w.type = Wiggle::Fixed; w.fixed = 100;
+        const EventMcmcResult d = runEventMcmc({ { "A", dens(1000, 30), w }, { "B", dens(1100, 30), {} } }, ms, 0, 2000);
+        QVERIFY(d.ok);
+        QVERIFY2(std::abs(densityStats(d.theta).mean - 1100) < 5, qPrintable(QString::number(densityStats(d.theta).mean)));
+    }
+
+    void eventFromQuestionAndTool()
+    {
+        QVERIFY(MethodRunner::asksEvent("Calcule l'événement avec ces deux dates"));
+        QVERIFY(MethodRunner::asksEvent("combine ces datations"));
+        QVERIFY(!MethodRunner::asksEvent("C14 de 2500 ± 30 BP"));
+        const QJsonObject m = MethodRunner::mcmcFromQuestion("avec 20 000 itérations, un burn-in de 500, 2 chaînes, graines 11;12");
+        QCOMPARE(m["num_iter"].toInt(), 20000);
+        QCOMPARE(m["num_burn"].toInt(), 500);
+        QCOMPARE(m["num_proc"].toInt(), 2);
+        QCOMPARE(m["seeds"].toString(), QString("11;12"));
+
+        int calls = 0;
+        MethodRunner::setProgressHandler([&](const QString&, double) { ++calls; return true; });
+        const RunOutcome o = MethodRunner::analyzeQuestion(
+            "Calcule l'événement « US 12 » avec C14 2500 ± 30 BP et TL 2560 ± 80 ans mesuré en 2015, 20000 itérations, graines 1;2;3;4");
+        MethodRunner::setProgressHandler({});
+        QVERIFY(o.found);
+        QCOMPARE(o.count, 1);
+        QVERIFY2(o.noticeHtml.contains("Événement « US 12 »"), qPrintable(o.noticeHtml.left(300)));
+        QVERIFY(o.noticeHtml.contains("θ a posteriori"));
+        QVERIFY(o.noticeHtml.contains("R̂"));
+        QVERIFY(o.noticeHtml.contains("1;2;3;4"));
+        QVERIFY(!o.noticeHtml.contains("Calcul impossible"));
+        QVERIFY(calls > 0);
+        QCOMPARE(o.plot["series"].toArray().size(), 3);                 // θ + 2 calibrations
+        QVERIFY(!o.plot["series"].toArray()[1].toObject()["fill"].toBool(true));
+        QCOMPARE(o.extraPlots.size(), 1);                               // traces des chaînes
+        QCOMPARE(o.extraPlots[0]["series"].toArray().size(), 4);
+        seldon::CurveSpec sp;
+        QVERIFY(seldon::CurveSpec::fromJson(o.extraPlots[0], sp));
+        QVERIFY(!sp.yFromZero);
+        QVERIFY(o.promptBlock.contains("Convergence"));
+
+        // Outil du modèle distant
+        const auto t = tools::execute("calculer_evenement",
+            R"({"name":"Four","dates":[{"method":"gauss","age":1200,"error":40},{"method":"gauss","age":1230,"error":40,"wiggle":{"type":"range","min":0,"max":20}}],
+                "mcmc":{"num_iter":10000,"seeds":[5,6,7,8]}})", DateFormat::BcAd);
+        QVERIFY2(t.executed, qPrintable(t.content));
+        QVERIFY(t.content.contains("Événement « Four »"));
+        QVERIFY(t.content.contains("décalage δ ∈ [0 ; 20] ans"));
+        QVERIFY(!tools::execute("calculer_evenement", R"({"dates":[]})", DateFormat::BcAd).executed);
+        QVERIFY(!tools::execute("calculer_evenement", R"({"dates":[{"age":1}]})", DateFormat::BcAd).executed);
+        // Erreur d'une datation : message explicite
+        const RunOutcome bad = MethodRunner::run({ QJsonObject{ { "method", "event" }, { "dates", QJsonArray{ QJsonObject{ { "method", "c14" }, { "age", 2500 } } } } } });
+        QVERIFY(bad.noticeHtml.contains("Calcul impossible"));
+    }
+
+    // Fragment JSON collé dans la question (bloc chronomodel / .chr) : l'application lance l'événement elle-même ;
+    // blocs ```calcul tolérants (nombres en texte, alias, nom d'outil, objets séparés par des virgules, format .chr).
+    void eventFromJsonFragment()
+    {
+        const QString q = "calcul Event avec ces deux dates, 10000 itérations\n"
+                          "{\"method\": \"c14\", \"age\": 2570, \"error\": 35},\n{\"method\": \"c14\", \"age\": 2770, \"error\": 35}";
+        const RunOutcome o = MethodRunner::analyzeQuestion(q);
+        QVERIFY(o.found);
+        QVERIFY2(o.promptBlock.contains("combinaison bayésienne de 2 datations"), qPrintable(o.promptBlock.left(400)));
+        QVERIFY(o.promptBlock.contains("2570 ± 35 BP"));
+        QVERIFY(!o.promptBlock.contains("Calcul impossible"));
+
+        // Normalisation
+        QJsonObject n = MethodRunner::normalizeRequest(QJsonObject{ { "method", "14C" }, { "age", "2 570" }, { "error", "35" } });
+        QCOMPARE(n["method"].toString(), QString("c14"));
+        QCOMPARE(n["age"].toDouble(), 2570.0);
+        QCOMPARE(n["error"].toDouble(), 35.0);
+        n = MethodRunner::normalizeRequest(QJsonObject{ { "plugin_id", "14c" }, { "name", "Ly-1" },
+                                                        { "data", QJsonObject{ { "age", 2570 }, { "error", 35 }, { "ref_curve", "IntCal20.14c" } } } });
+        QCOMPARE(n["method"].toString(), QString("c14"));
+        QCOMPARE(n["error"].toDouble(), 35.0);
+        QCOMPARE(n["curve"].toString(), QString("intcal20"));
+        QCOMPARE(MethodRunner::normalizeRequest(QJsonObject{ { "method", "calculer_evenement" } })["method"].toString(), QString("event"));
+
+        // Objets séparés par une virgule (copiés tels quels) : deux calibrations
+        auto v = MethodRunner::extractCalcBlocks("```calcul\n{\"method\": \"c14\", \"age\": 2570, \"error\": 35},\n"
+                                                 "{\"method\": \"c14\", \"age\": 2770, \"error\": 35}\n```\n");
+        QCOMPARE(v.size(), 2);
+        // Événement avec nombres en texte : plus de « l'erreur doit être strictement positive »
+        v = MethodRunner::extractCalcBlocks("```calcul\n{\"method\":\"event\",\"mcmc\":{\"num_iter\":10000},\"dates\":["
+                                            "{\"method\":\"c14\",\"age\":\"2570\",\"error\":\"35\"},{\"method\":\"c14\",\"age\":2770,\"error\":35}]}\n```\n");
+        QCOMPARE(v.size(), 1);
+        const RunOutcome e = MethodRunner::run(v);
+        QVERIFY2(!e.promptBlock.contains("Calcul impossible"), qPrintable(e.promptBlock.left(400)));
+        QCOMPARE(e.plot["series"].toArray().size(), 3);
+        // Bloc ```json avec une demande de calcul : accepté ; sans « method » : ignoré
+        QCOMPARE(MethodRunner::extractCalcBlocks("```json\n{\"method\":\"c14\",\"age\":2570,\"error\":35}\n```\n").size(), 1);
+        QCOMPARE(MethodRunner::extractCalcBlocks("```json\n{\"events\":[]}\n```\n").size(), 0);
+        // Outil distant : datations au format .chr
+        const auto t = tools::execute("calculer_evenement",
+            R"({"mcmc":{"num_iter":10000},"dates":[{"plugin_id":"14c","data":{"age":2570,"error":35}},{"method":"14C","age":"2770","error":"35"}]})",
+            DateFormat::BcAd);
+        QVERIFY2(t.executed, qPrintable(t.content));
+        QVERIFY(!t.content.contains("Calcul impossible"));
+    }
+
+    // Wiggle : date seule = densité de t + δ (convolution, Date::calibrateWiggle) ; dans un événement, δ est une variable
+    // du MCMC (y = t + δ ~ N(θ, σ²)), la vraisemblance reste celle de la date sans décalage.
+    void wiggleSingleDateAndEvent()
+    {
+        // Date seule, décalage fixe : translation exacte de la densité
+        const QJsonObject g{ { "method", "gauss" }, { "age", 1000 }, { "error", 20 } };
+        QJsonObject gw = g; gw["wiggle"] = QJsonObject{ { "type", "fixed" }, { "value", 50 } };
+        const RunOutcome a = MethodRunner::run({ g }), b = MethodRunner::run({ gw });
+        QVERIFY(b.promptBlock.contains("densité de t + δ"));
+        QVERIFY(!b.promptBlock.contains("Calcul impossible"));
+        QVERIFY(a.promptBlock.contains("Moyenne : 1000") && b.promptBlock.contains("Moyenne : 1050"));
+        // Range et gaussian : même centre, densité plus large
+        QJsonObject gr = g; gr["wiggle"] = QJsonObject{ { "type", "range" }, { "min", 40 }, { "max", 60 } };
+        QJsonObject gg = g; gg["wiggle"] = QJsonObject{ { "type", "gaussian" }, { "mean", 50 }, { "error", 30 } };
+        QVERIFY(MethodRunner::run({ gr }).promptBlock.contains("Moyenne : 1050"));
+        QVERIFY(MethodRunner::run({ gg }).promptBlock.contains("Moyenne : 1050"));
+        QJsonObject bad = g; bad["wiggle"] = QJsonObject{ { "type", "range" }, { "min", 60 }, { "max", 40 } };
+        QVERIFY(MethodRunner::run({ bad }).promptBlock.contains("Calcul impossible"));
+        // Outil distant : paramètre « wiggle » des datations simples
+        QVERIFY(tools::execute("densite_gauss", R"({"age":1000,"error":20,"wiggle":{"type":"fixed","value":50}})", DateFormat::BcAd)
+                    .content.contains("densité de t + δ"));
+
+        // Événement : N(950)+50 et N(1000) concordent ; t + δ a posteriori est donné pour la date décalée
+        QJsonObject e2{ { "method", "gauss" }, { "age", 950 }, { "error", 20 }, { "wiggle", QJsonObject{ { "type", "fixed" }, { "value", 50 } } } };
+        const RunOutcome e = MethodRunner::run({ QJsonObject{ { "method", "event" }, { "mcmc", QJsonObject{ { "num_iter", 10000 } } },
+                                                              { "dates", QJsonArray{ g, e2 } } } });
+        QVERIFY2(e.promptBlock.contains("t + δ a posteriori"), qPrintable(e.promptBlock.left(600)));
+        QVERIFY(e.promptBlock.contains("calibration de t + δ"));
+        QCOMPARE(e.plot["series"].toArray().size(), 3);
+    }
+
+    // Date collée au format du bloc chronomodel ({"type":"gauss",…}) + wiggle écrit dans la question.
+    void wiggleFromQuestionText()
+    {
+        const QString q = QString::fromUtf8("cette date\n{\n\"type\": \"gauss\",\n\"name\": \"Date Gaussienne\",\n\"age\": 250,\n\"error\": 10\n}\n"
+                                            "avec un wiggle entre 100 et 300");
+        const RunOutcome o = MethodRunner::analyzeQuestion(q);
+        QVERIFY(o.found);
+        QVERIFY2(o.promptBlock.contains("densité de t + δ"), qPrintable(o.promptBlock.left(400)));
+        QVERIFY(o.promptBlock.contains("Moyenne : 450"));
+        QCOMPARE(MethodRunner::wiggleFromQuestion("avec un décalage de 20 ± 5 ans")["type"].toString(), QString("gaussian"));
+        QCOMPARE(MethodRunner::wiggleFromQuestion("wiggle de 20 ans")["value"].toDouble(), 20.0);
+        QVERIFY(MethodRunner::wiggleFromQuestion("calibre 2500 ± 30 BP avec delta R = 50").isEmpty());   // ΔR n'est pas un wiggle
+    }
+
+    // Wiggle au format .chr (delta_type -1/0/1/2) : lecture des dates d'un projet ChronoModel, export du bloc chronomodel.
+    void wiggleChrFormat()
+    {
+        // Dates de l'événement « AM » de test_AM_Gauss_wiggle.chr (archéomag. I + trois gauss avec les trois types de wiggle)
+        const QJsonArray ds = QJsonDocument::fromJson(R"([
+          {"plugin_id":"am","name":"Inclinaison","delta_type":-1,"delta_fixed":0,
+           "data":{"alpha95":1,"dec":0,"error_f":2,"field":65,"inc":65,"integration_steps":500,"process_type":1,
+                   "refD_curve":"bulgaria_d.ref","refF_curve":"gwh2013uni_f.ref","refI_curve":"gal2002sph2014_i.ref"}},
+          {"plugin_id":"gauss","name":"N(3000; 50)","delta_type":1,"delta_average":1000,"delta_error":200,
+           "data":{"a":0,"age":0,"b":1,"c":0,"curve":"example_csv_ref.csv","error":50,"mode":"none"}},
+          {"plugin_id":"gauss","name":"G(0, 100)","delta_type":2,"delta_min":-10,"delta_max":10,
+           "data":{"a":0,"age":0,"b":1,"c":0,"curve":"courbe_a.csv","error":100,"mode":"none"}},
+          {"plugin_id":"gauss","name":"G(10, 50)","delta_type":0,"delta_fixed":-10,
+           "data":{"a":0,"age":10,"b":1,"c":0,"curve":"courbe_a.csv","error":50,"mode":"none"}},
+          {"plugin_id":"gauss","name":"ancien","delta_type":-1,"delta_min":1000,"delta_max":1500,"data":{"age":0,"error":50}}])").array();
+        const QJsonObject am = MethodRunner::normalizeRequest(ds[0].toObject());
+        QCOMPARE(am["method"].toString(), QString("am"));
+        QCOMPARE(am["process"].toString(), QString("I"));
+        QCOMPARE(am["curveI"].toString(), QString("gal2002sph2014_i"));
+        QVERIFY(!am.contains("wiggle"));
+        QCOMPARE(MethodRunner::normalizeRequest(ds[1].toObject())["wiggle"].toObject()["type"].toString(), QString("gaussian"));
+        QCOMPARE(MethodRunner::normalizeRequest(ds[2].toObject())["wiggle"].toObject()["max"].toDouble(), 10.0);
+        QCOMPARE(MethodRunner::normalizeRequest(ds[3].toObject())["wiggle"].toObject()["value"].toDouble(), -10.0);
+        QVERIFY(!MethodRunner::normalizeRequest(ds[4].toObject()).contains("wiggle"));     // delta_type -1 : valeurs résiduelles ignorées
+
+        QJsonArray four; for (int k = 0; k < 4; ++k) four.append(ds[k]);
+        const RunOutcome e = MethodRunner::run({ QJsonObject{ { "method", "event" }, { "name", "AM" },
+                                                              { "mcmc", QJsonObject{ { "num_iter", 10000 } } }, { "dates", four } } });
+        QVERIFY2(!e.promptBlock.contains("Calcul impossible"), qPrintable(e.promptBlock.left(600)));
+        QVERIFY(e.promptBlock.contains("δ ~ N(1000 ; 200)") && e.promptBlock.contains("δ ∈ [-10 ; 10]") && e.promptBlock.contains("δ = -10"));
+
+        // Export : bloc chronomodel → champs delta_* ; plage d'étude couvrant t + δ
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(R"({"name":"W","events":[{"name":"E","dates":[
+            {"type":"gauss","name":"A","age":0,"error":50,"wiggle":{"type":"gaussian","mean":1000,"error":200}},
+            {"type":"gauss","name":"B","age":0,"error":100,"wiggle":{"type":"range","min":-10,"max":10}},
+            {"type":"gauss","name":"C","age":10,"error":50,"wiggle":{"type":"fixed","value":-10}},
+            {"type":"gauss","name":"D","age":0,"error":50}]}]})").object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        const QJsonArray od = r.chr["events"].toArray()[0].toObject()["dates"].toArray();
+        QCOMPARE(od[0].toObject()["delta_type"].toInt(), 1);
+        QCOMPARE(od[0].toObject()["delta_average"].toDouble(), 1000.0);
+        QCOMPARE(od[0].toObject()["delta_error"].toDouble(), 200.0);
+        QCOMPARE(od[1].toObject()["delta_type"].toInt(), 2);
+        QCOMPARE(od[1].toObject()["delta_min"].toDouble(), -10.0);
+        QCOMPARE(od[2].toObject()["delta_type"].toInt(), 0);
+        QCOMPARE(od[2].toObject()["delta_fixed"].toDouble(), -10.0);
+        QCOMPARE(od[3].toObject()["delta_type"].toInt(), -1);
+        QVERIFY(r.chr["settings"].toObject()["tmax"].toDouble() >= 1600);            // 0 + 1000 + 3×200
+        QVERIFY(ChrBuilder::summarize(r.chr).contains("[wiggle δ ~ N(1000 ; 200)]"));
+        const ChrResult bad = ChrBuilder::build(QJsonDocument::fromJson(
+            R"({"events":[{"name":"E","dates":[{"type":"gauss","age":0,"error":5,"wiggle":{"type":"range","min":5,"max":1}}]}]})").object());
+        QVERIFY(bad.errors.join(" ").contains("min < max"));
+    }
+
+    // Export SVG : courbe en vecteurs, image SVG réenregistrée telle quelle, image matricielle incorporée.
+    void figureSvgExport()
+    {
+        seldon::CurveSpec sp;
+        sp.title = "Densité test";
+        seldon::CurveSeries s; s.name = "E";
+        for (int i = 0; i <= 100; ++i) { s.x << i; s.y << std::exp(-0.5 * std::pow((i - 50) / 10.0, 2)); }
+        sp.series << s;
+        const QByteArray svg = seldon::CurveWidget(sp).renderSvg(QSize(800, 500));
+        QVERIFY(svg.contains("<svg"));
+        QVERIFY(svg.contains("<path") || svg.contains("<polyline"));
+        QVERIFY(svg.contains("Densité test"));                       // titre écrit en texte, pas en pixels
+        QVERIFY(!svg.contains("<image"));                            // aucune image matricielle
+
+        QTemporaryDir dir;
+        seldon::FigurePanel panel;
+        panel.addCurves(sp);
+        const QString curvePath = dir.filePath("courbe.svg");
+        QVERIFY(panel.saveCurrentTo(curvePath));
+        QFile cf(curvePath); QVERIFY(cf.open(QIODevice::ReadOnly)); QVERIFY(cf.readAll().contains("<svg"));
+        QVERIFY(panel.saveCurrentTo(dir.filePath("courbe.png")));
+        QVERIFY(!QImage(dir.filePath("courbe.png")).isNull());
+
+        // Image venant d'un fichier SVG : contenu d'origine conservé à l'identique.
+        const QByteArray src = R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#3060c0"/></svg>)";
+        const QString srcPath = dir.filePath("source.svg");
+        { QFile f(srcPath); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(src); }
+        QVERIFY(panel.addImageFile(srcPath));
+        const QString copy = dir.filePath("copie.svg");
+        QVERIFY(panel.saveCurrentTo(copy));
+        QFile cp(copy); QVERIFY(cp.open(QIODevice::ReadOnly)); QCOMPARE(cp.readAll(), src);
+
+        // Image matricielle : incorporée dans un SVG.
+        QImage img(30, 20, QImage::Format_ARGB32); img.fill(Qt::red);
+        panel.addImage(img, "rouge");
+        const QString raster = dir.filePath("rouge.svg");
+        QVERIFY(panel.saveCurrentTo(raster));
+        QFile rf(raster); QVERIFY(rf.open(QIODevice::ReadOnly)); QVERIFY(rf.readAll().contains("<image"));
     }
 
 };

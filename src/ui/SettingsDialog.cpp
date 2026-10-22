@@ -88,7 +88,11 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     threads_->setValue(s.nThreads);
     form->addRow(tr("Threads CPU"), threads_);
 
+#ifdef Q_OS_MACOS
     gpu_ = new QCheckBox(tr("Utiliser le GPU (Metal)"));
+#else
+    gpu_ = new QCheckBox(tr("Utiliser le GPU (Vulkan ou CUDA, selon la version installée)"));
+#endif
     gpu_->setChecked(s.nGpuLayers != 0);
     form->addRow(QString(), gpu_);
 

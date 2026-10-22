@@ -99,12 +99,52 @@ QVector<ToolDef> build()
                       { "process" }),
                "am" });
 
+    v.append({ "calculer_evenement",
+               QStringLiteral("Estime la date θ d'un ÉVÉNEMENT (Event de ChronoModel) à partir de plusieurs datations du même "
+                              "événement, éventuellement de méthodes différentes (14C, F14C, TL/OSL, archéomagnétisme, Gauss, uniforme), "
+                              "par MCMC avec le modèle d'événement de ChronoModel (dispersion individuelle σ_i de chaque date). "
+                              "Paramètres MCMC par défaut de ChronoModel si l'utilisateur n'en précise pas. Renvoie la densité a posteriori "
+                              "de θ, ses HPD, les valeurs a posteriori de chaque date et les critères de convergence (R̂, ESS)."),
+               schema({ { "name", str(QStringLiteral("Nom de l'événement (ex. « US 12 »).")) },
+                        { "dates", QJsonObject{ { "type", "array" },
+                                                { "description", QStringLiteral("Datations : objets avec « method » (c14, f14c, tl, gauss, unif, am) et les "
+                                                                                "paramètres de cette méthode (mêmes noms que les autres outils, ex. "
+                                                                                "{\"method\":\"c14\",\"age\":2500,\"error\":30}), et facultativement "
+                                                                                "« name » et « wiggle » ({\"type\":\"fixed\",\"value\":20}, "
+                                                                                "{\"type\":\"range\",\"min\":10,\"max\":30} ou "
+                                                                                "{\"type\":\"gaussian\",\"mean\":20,\"error\":5}) pour un décalage δ entre "
+                                                                                "l'échantillon et l'événement.") },
+                                                { "items", QJsonObject{ { "type", "object" } } } } },
+                        { "tmin", num(QStringLiteral("Début de la période d'étude (année signée). Facultatif : calculé d'après les datations.")) },
+                        { "tmax", num(QStringLiteral("Fin de la période d'étude (année signée). Facultatif.")) },
+                        { "mcmc", QJsonObject{ { "type", "object" },
+                                               { "description", QStringLiteral("Facultatif, seulement si l'utilisateur le demande : num_iter (100000), num_burn (1000), "
+                                                                               "num_proc = nombre de chaînes (4), max_batches (200), iter_per_batch (100), "
+                                                                               "thinning_interval (10), mixing_level (0.99), anneal_temp (10), "
+                                                                               "anneal_recurrence (1000), anneal_dwell (1000), seeds (liste d'entiers).") } } } },
+                      { "dates" }),
+               "event" });
+
     v.append({ "courbes_disponibles",
                QStringLiteral("Liste les courbes de référence intégrées à SeldonH (calibration 14C, F14C bombe, archéomagnétisme). "
                               "À appeler avant un calcul quand l'utilisateur nomme une courbe dont tu n'es pas sûr."),
                schema({ { "method", str(QStringLiteral("Méthode : c14, f14c ou am. Vide = toutes."), { "c14", "f14c", "am" }) } }, {}),
                QString() });
 
+    // Niveau de confiance facultatif, commun à toutes les datations.
+    for (ToolDef& d : v) {
+        if (d.methodId.isEmpty()) continue;
+        QJsonObject props = d.parameters.value("properties").toObject();
+        props["level"] = num(QStringLiteral("Niveau de confiance des intervalles HPD, en % (défaut 95). À donner seulement si "
+                                            "l'utilisateur demande un autre niveau (ex. 99 ou 90) ; les HPD à 95 % et 68 % sont toujours fournies."));
+        if (d.methodId != "event")
+            props["wiggle"] = QJsonObject{ { "type", "object" },
+                                           { "description", QStringLiteral("Facultatif, seulement si l'utilisateur donne un décalage δ (wiggle-matching) entre "
+                                                                           "l'échantillon et ce qu'on veut dater : {\"type\":\"fixed\",\"value\":20}, "
+                                                                           "{\"type\":\"range\",\"min\":10,\"max\":30} ou "
+                                                                           "{\"type\":\"gaussian\",\"mean\":20,\"error\":5}. Le résultat est la densité de t + δ.") } };
+        d.parameters["properties"] = props;
+    }
     return v;
 }
 
@@ -233,6 +273,22 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
         return r;
     }
 
+    if (def->methodId == "event") {
+        // Datations normalisées (alias de méthode, format .chr, nombres en texte) avant la vérification.
+        QJsonArray ds;
+        for (const QJsonValue& v : args.value("dates").toArray())
+            ds.append(v.isObject() ? QJsonValue(MethodRunner::normalizeRequest(v.toObject())) : v);
+        args["dates"] = ds;
+        if (ds.isEmpty()) {
+            r.content = QStringLiteral("Calcul non lancé : « dates » doit contenir au moins une datation (objets avec « method »).");
+            return r;
+        }
+        for (int i = 0; i < ds.size(); ++i)
+            if (!ds[i].isObject() || ds[i].toObject().value("method").toString().isEmpty()) {
+                r.content = QStringLiteral("Calcul non lancé : la datation %1 n'a pas de « method » (c14, f14c, tl, gauss, unif ou am).").arg(i + 1);
+                return r;
+            }
+    }
     if (def->methodId == "am" && args.contains("process")) args["process"] = args.value("process").toString().toUpper();
     if (args.contains("curve")) args["curve"] = args.value("curve").toString().toLower();
 
@@ -259,12 +315,23 @@ QJsonObject mergePlots(const QVector<QJsonObject>& plots)
 {
     QJsonObject merged;
     QJsonArray series;
+    QStringList names;
+    bool sameLevel = true;
     for (const QJsonObject& p : plots) {
         if (p.isEmpty()) continue;
         if (merged.isEmpty()) merged = p;
-        for (const QJsonValue& s : p.value("series").toArray()) series.append(s);
+        else if (p.value("hpd").toDouble(95) != merged.value("hpd").toDouble(95)) sameLevel = false;
+        for (const QJsonValue& s : p.value("series").toArray()) {
+            const QString n = s.toObject().value("name").toString();
+            if (!n.isEmpty() && names.contains(n)) continue;          // même datation déjà tracée
+            names << n;
+            series.append(s);
+        }
     }
-    if (!merged.isEmpty()) merged["series"] = series;
+    if (!merged.isEmpty()) {
+        merged["series"] = series;
+        if (!sameLevel) merged["hpd"] = 95;                            // niveaux différents : 95 % pour toutes
+    }
     return merged;
 }
 

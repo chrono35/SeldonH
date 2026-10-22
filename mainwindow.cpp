@@ -30,6 +30,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 #include <QJsonObject>
 
 #include "src/core/ChatText.h"
@@ -102,6 +103,13 @@ MainWindow::MainWindow(QWidget *parent)
     refreshHistory();
     connect(qApp, &QCoreApplication::aboutToQuit, this, &MainWindow::saveCurrent);
 
+    // Calculs longs (MCMC d'un événement) : avancement dans la barre d'état, interface redessinée pendant le calcul.
+    MethodRunner::setProgressHandler([this](const QString& what, double f) {
+        statsLabel_->setText(tr("%1 : %2 %").arg(what).arg(int(std::lround(f * 100.0))));
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+        return true;
+    });
+
     QString model = settings_.modelPath;
     if (model.isEmpty() || !QFileInfo::exists(model)) model = AppSettings::findEmbeddedModel();
     if (remoteActive()) activateRemote();
@@ -115,6 +123,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    MethodRunner::setProgressHandler({});
     if (remote_) remote_->stop();
     if (engine_) engine_->stop();
     if (thread_) {
@@ -187,27 +196,27 @@ void MainWindow::buildUi()
     splitter_->setSizes({ 760, 520 });
 
     // Volet « Historique » à gauche, repliable : une fine bande reste toujours visible pour le rouvrir.
+    // [historique | bande | (dialogue | graphiques)] : volet ouvert, la bande est à DROITE de l'historique ;
+    // volet replié (historique masqué), elle se retrouve au bord gauche de la fenêtre.
     history_ = new HistoryPanel;
-    outer_ = new QSplitter(Qt::Horizontal);
-    outer_->addWidget(history_);
-    outer_->addWidget(splitter_);
-    outer_->setStretchFactor(0, 0);
-    outer_->setStretchFactor(1, 1);
-    outer_->setCollapsible(0, false);
-    outer_->setCollapsible(1, false);
-    outer_->setSizes({ 270, 1010 });
     history_->setMinimumWidth(200);
-
     historyStrip_ = new CollapseStrip(tr("Historique des conversations"));
     historyStrip_->setToolTip(tr("Afficher ou replier l'historique des conversations (Ctrl+Maj+H)"));
+    historyStrip_->setFixedWidth(historyStrip_->sizeHint().width());
 
-    auto* central = new QWidget;
-    auto* centralLay = new QHBoxLayout(central);
-    centralLay->setContentsMargins(0, 0, 0, 0);
-    centralLay->setSpacing(0);
-    centralLay->addWidget(historyStrip_);
-    centralLay->addWidget(outer_, 1);
-    setCentralWidget(central);
+    outer_ = new QSplitter(Qt::Horizontal);
+    outer_->addWidget(history_);
+    outer_->addWidget(historyStrip_);
+    outer_->addWidget(splitter_);
+    outer_->setStretchFactor(0, 0);
+    outer_->setStretchFactor(1, 0);
+    outer_->setStretchFactor(2, 1);
+    for (int i = 0; i < 3; ++i) outer_->setCollapsible(i, false);
+    outer_->setSizes({ 270, historyStrip_->width(), 988 });
+    // Seule la poignée entre l'historique et la bande redimensionne le volet ; celle d'après est inerte.
+    outer_->handle(2)->setEnabled(false);
+    outer_->handle(2)->setCursor(Qt::ArrowCursor);
+    setCentralWidget(outer_);
     connect(historyStrip_, &QAbstractButton::clicked, this, [this] { setHistoryVisible(historyStrip_->isChecked()); });
     connect(history_, &HistoryPanel::openRequested, this, &MainWindow::openConversation);
     connect(history_, &HistoryPanel::deleteRequested, this, &MainWindow::deleteConversation);
@@ -524,7 +533,8 @@ void MainWindow::sendMessage()
     logUser(shown);
     if (dating.found) {
         logNotice(dating.noticeHtml);
-        if (!dating.plot.isEmpty()) logPlot(dating.plot);
+        if (!dating.plot.isEmpty()) logDatingPlot(dating.plot, turns_.size());     // le tour t est ajouté juste après
+        for (const QJsonObject& p : dating.extraPlots) logPlot(p);
     }
     t.view = newAssistantBubble();
     turns_.append(t);
@@ -576,7 +586,8 @@ bool MainWindow::runRequestedCalculations()
     const RunOutcome out = MethodRunner::run(blocks, displayFormat());
     if (!out.found) return false;
     logNotice(out.noticeHtml);
-    if (!out.plot.isEmpty()) logPlot(out.plot);
+    if (!out.plot.isEmpty()) logDatingPlot(out.plot, currentQuestionTurn());
+    for (const QJsonObject& p : out.extraPlots) logPlot(p);
 
     Turn t;
     t.question = tr("(résultat du calcul demandé par l'assistant)");
@@ -654,7 +665,7 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
 
     const DateFormat fmt = displayFormat();
     QVector<ToolResult> results;
-    QVector<QJsonObject> plots;
+    QVector<QJsonObject> plots, extra;
     QStringList forModel;
     QString blocks;
     for (const ToolCall& c : calls) {
@@ -663,6 +674,7 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
         if (o.executed) {
             logNotice(o.run.noticeHtml);
             plots << o.run.plot;
+            extra += o.run.extraPlots;
             blocks += QStringLiteral("\n\n```calcul\n%1\n```").arg(QString::fromUtf8(QJsonDocument(o.request).toJson(QJsonDocument::Compact)));
             forModel << o.content;
         } else {
@@ -673,7 +685,8 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
         }
     }
     const QJsonObject plot = tools::mergePlots(plots);
-    if (!plot.isEmpty()) logPlot(plot);
+    if (!plot.isEmpty()) logDatingPlot(plot, currentQuestionTurn());
+    for (const QJsonObject& p : extra) logPlot(p);
     turns_.last().toolBlocks = blocks;
 
     Turn t;
@@ -712,6 +725,8 @@ void MainWindow::resetConversation(bool clearFigures)
 {
     turns_.clear();
     display_.clear();
+    datingPlotTurn_ = datingPlotItem_ = -1;
+    datingPlotPage_ = nullptr;
     convId_.clear();
     convCreated_ = QDateTime();
     chat_->clearAll();
@@ -850,6 +865,29 @@ bool MainWindow::logPlot(const QJsonObject& plot, QString* err)
     DisplayItem d; d.kind = DisplayItem::Plot; d.plot = plot;
     display_.append(d);
     return true;
+}
+
+int MainWindow::currentQuestionTurn() const
+{
+    for (int i = turns_.size() - 1; i >= 0; --i)
+        if (!turns_[i].synthetic) return i;
+    return -1;
+}
+
+void MainWindow::logDatingPlot(const QJsonObject& plot, int questionTurn)
+{
+    if (questionTurn >= 0 && questionTurn == datingPlotTurn_ && datingPlotPage_
+        && datingPlotItem_ >= 0 && datingPlotItem_ < display_.size() && display_[datingPlotItem_].kind == DisplayItem::Plot) {
+        const QJsonObject merged = tools::mergePlots({ display_[datingPlotItem_].plot, plot });
+        if (figures_->replaceCurvesJson(datingPlotPage_, merged)) {
+            display_[datingPlotItem_].plot = merged;
+            return;
+        }
+    }
+    if (!logPlot(plot)) return;
+    datingPlotTurn_ = questionTurn;
+    datingPlotItem_ = display_.size() - 1;
+    datingPlotPage_ = figures_->lastCurves();
 }
 
 int MainWindow::newAssistantBubble()

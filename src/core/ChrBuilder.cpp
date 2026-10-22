@@ -14,6 +14,60 @@ namespace seldon {
 
 namespace {
 
+// Décalage (wiggle) d'une date du bloc chronomodel → champs delta_* du .chr (Date::DeltaType de ChronoModel :
+// -1 aucun, 0 fixe, 1 gaussien, 2 intervalle). Accepte {"type":"fixed","value":v}, {"type":"range","min":a,"max":b},
+// {"type":"gaussian","mean":m,"error":e} ou un nombre (fixe). Renvoie false (avec `why`) si le décalage est invalide ;
+// [lo, hi] = étendue du décalage (pour la plage d'étude).
+bool wiggleToChr(const QJsonValue& v, QJsonObject& out, QString& why, double& lo, double& hi)
+{
+    lo = hi = 0.0;
+    if (v.isUndefined() || v.isNull()) return true;
+    auto num = [](const QJsonObject& o, std::initializer_list<const char*> keys) {
+        for (const char* k : keys) {
+            const QJsonValue x = o.value(k);
+            if (x.isDouble()) return x.toDouble();
+            if (x.isString()) { bool ok = false; const double d = x.toString().trimmed().replace(',', '.').toDouble(&ok); if (ok) return d; }
+        }
+        return std::nan("");
+    };
+    QJsonObject o;
+    if (v.isDouble()) o = QJsonObject{ { "type", "fixed" }, { "value", v.toDouble() } };
+    else o = v.toObject();
+    const QString t = o.value("type").toString().trimmed().toLower();
+    if (t.isEmpty() || t == "none" || t == "aucun") return true;
+    if (t == "fixed" || t == "fixe") {
+        const double f = num(o, { "value", "fixed", "delta" });
+        if (std::isnan(f)) { why = QStringLiteral("décalage fixe sans « value »"); return false; }
+        out["delta_type"] = 0; out["delta_fixed"] = f;
+        lo = hi = f;
+    } else if (t == "gaussian" || t == "gauss" || t == "normal") {
+        const double m = num(o, { "mean", "average", "value" }), e = num(o, { "error", "sd" });
+        if (std::isnan(m) || !(e > 0)) { why = QStringLiteral("décalage gaussien : « mean » et « error » > 0 requis"); return false; }
+        out["delta_type"] = 1; out["delta_average"] = m; out["delta_error"] = e;
+        lo = m - 3 * e; hi = m + 3 * e;
+    } else if (t == "range" || t == "intervalle" || t == "uniform") {
+        const double a = num(o, { "min" }), b = num(o, { "max" });
+        if (std::isnan(a) || std::isnan(b) || !(a < b)) { why = QStringLiteral("décalage « range » : min < max requis"); return false; }
+        out["delta_type"] = 2; out["delta_min"] = a; out["delta_max"] = b;
+        lo = a; hi = b;
+    } else {
+        why = QStringLiteral("type de décalage inconnu « %1 » (fixed, range ou gaussian)").arg(t);
+        return false;
+    }
+    return true;
+}
+
+// Description du décalage d'une date d'un .chr (champs delta_*), vide sans décalage.
+QString wiggleOfChr(const QJsonObject& d)
+{
+    switch (d.value("delta_type").toInt(-1)) {
+    case 0:  return QStringLiteral("δ = %1").arg(d.value("delta_fixed").toDouble());
+    case 1:  return QStringLiteral("δ ~ N(%1 ; %2)").arg(d.value("delta_average").toDouble()).arg(d.value("delta_error").toDouble());
+    case 2:  return QStringLiteral("δ ∈ [%1 ; %2]").arg(d.value("delta_min").toDouble()).arg(d.value("delta_max").toDouble());
+    default: return QString();
+    }
+}
+
 // Valeurs observées dans des projets ChronoModel 4.0 réels.
 constexpr int kDateSampler  = 4;     // « sampler » de toutes les dates (gauss, unif, tl/osl, am, density)
 constexpr int kEventSampler = 1;     // « sampler » des événements
@@ -61,14 +115,13 @@ QString refName(QString n)
     return n.endsWith(".ref", Qt::CaseInsensitive) ? n : n + ".ref";
 }
 
-// Code « process_type » du plugin archéomagnétisme de ChronoModel. 1 (I) et 3 (F) sont vérifiés sur des
-// projets réels ; les autres codes suivent l'ordre I, D, F, ID, IF, IDF et restent à confirmer.
-int amProcessCode(const QString& p, bool* verified)
+// Code « process_type » du plugin archéomagnétisme de ChronoModel 4.0. Les six codes sont vérifiés sur un projet
+// réel contenant tous les types de datation AM (tous_type_AM.chr) :
+//   1 = inclinaison, 2 = déclinaison, 3 = intensité, 4 = directionnel (I, D), 5 = vectoriel (I, F), 6 = vectoriel (I, D, F).
+int amProcessCode(const QString& p)
 {
-    const QString k = p.trimmed().toUpper();
     static const QHash<QString, int> m = { { "I", 1 }, { "D", 2 }, { "F", 3 }, { "ID", 4 }, { "IF", 5 }, { "IDF", 6 } };
-    if (verified) *verified = (k == "I" || k == "F");
-    return m.value(k, 0);
+    return m.value(p.trimmed().toUpper(), 0);
 }
 
 struct Range { double lo =  std::numeric_limits<double>::infinity();
@@ -192,6 +245,16 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
             out["delta_type"] = -1;
             out["delta_average"] = 0; out["delta_error"] = 0; out["delta_fixed"] = 0;
             out["delta_max"] = 0;     out["delta_min"] = 0;
+            double wlo = 0.0, whi = 0.0;
+            {
+                QString why;
+                if (!wiggleToChr(d.value("wiggle"), out, why, wlo, whi)) {
+                    R.errors << QStringLiteral("Date « %1 » (événement « %2 ») : %3.").arg(out["name"].toString(), name, why);
+                    continue;
+                }
+            }
+            // Plage d'étude : la date t ET l'événement t + δ doivent y tenir.
+            auto addSpan = [&](double a, double b) { span.add(a); span.add(b); span.add(a + wlo); span.add(b + whi); };
 
             if (type == "gauss") {
                 const double age = d.value("age").toDouble(std::nan(""));
@@ -204,7 +267,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                 out["sampler"] = kDateSampler;
                 out["data"] = QJsonObject{ { "age", age }, { "error", err }, { "mode", "none" },
                                            { "curve", "" }, { "a", 0 }, { "b", 1 }, { "c", 0 } };
-                span.add(age - 3 * err); span.add(age + 3 * err);
+                addSpan(age - 3 * err, age + 3 * err);
             } else if (type == "unif" || type == "uniform") {
                 const double mn = d.value("min").toDouble(std::nan(""));
                 const double mx = d.value("max").toDouble(std::nan(""));
@@ -215,7 +278,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                 out["plugin_id"] = "unif";
                 out["sampler"] = kDateSampler;
                 out["data"] = QJsonObject{ { "min", mn }, { "max", mx } };
-                span.add(mn); span.add(mx);
+                addSpan(mn, mx);
             } else if (type == "tl" || type == "osl" || type == "tl/osl") {
                 // Luminescence : âge « avant ref_year » (années), erreur 1σ. L'année de référence est l'année du prélèvement/de la mesure.
                 const double age = d.value("age").toDouble(std::nan(""));
@@ -232,20 +295,21 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                 out["plugin_id"] = "tl/osl";
                 out["sampler"] = kDateSampler;
                 out["data"] = QJsonObject{ { "age", age }, { "error", err }, { "ref_year", ref } };
-                span.add(ref - age - 3 * err); span.add(ref - age + 3 * err);
+                addSpan(ref - age - 3 * err, ref - age + 3 * err);
             } else if (type == "am" || type == "archeomagnetisme") {
                 // Archéomagnétisme : mesure(s) comparée(s) aux courbes de référence de ChronoModel.
-                bool procVerified = true;
                 const QString proc = d.value("process").toString("I").trimmed().toUpper();
-                const int code = amProcessCode(proc, &procVerified);
+                const int code = amProcessCode(proc);
                 if (code == 0) {
                     R.errors << QStringLiteral("Date archéomagnétique « %1 » : « process » doit valoir I, D, F, ID, IF ou IDF.").arg(out["name"].toString());
                     continue;
                 }
                 const bool needI = proc.contains('I'), needD = proc.contains('D'), needF = proc.contains('F');
+                // La déclinaison seule demande aussi l'inclinaison : son erreur vaut α95 / (2,448 · cos I).
+                const bool useInc = needI || needD;
                 auto num = [&](const char* k) { return d.value(k).toDouble(std::nan("")); };
                 QString missing;
-                if (needI && std::isnan(num("inc")))  missing += " inc";
+                if (useInc && std::isnan(num("inc"))) missing += " inc";
                 if (needD && std::isnan(num("dec")))  missing += " dec";
                 if ((needI || needD) && !(num("alpha95") > 0)) missing += " alpha95";
                 if (needF && std::isnan(num("field"))) missing += " field";
@@ -255,9 +319,6 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                                     .arg(out["name"].toString(), proc, missing);
                     continue;
                 }
-                if (!procVerified)
-                    R.warnings << QStringLiteral("Date archéomagnétique « %1 » : le code du processus %2 n'a pas été vérifié sur un projet réel ; "
-                                                 "contrôlez-le dans ChronoModel.").arg(out["name"].toString(), proc);
                 const bool hasCurves = d.contains("curve_i") || d.contains("curve_d") || d.contains("curve_f");
                 if (!hasCurves)
                     R.warnings << QStringLiteral("Date archéomagnétique « %1 » : courbes de référence par défaut (%2, %3, %4). "
@@ -268,11 +329,13 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                 out["sampler"] = kDateSampler;
                 out["data"] = QJsonObject{
                     { "process_type", code },
-                    { "inc",     needI ? num("inc") : 0.0 },
+                    // Grandeurs non utilisées par le processus : 0, erreurs non utilisées : 1 (jamais d'erreur nulle,
+                    // comme les valeurs par défaut que ChronoModel laisse dans ces champs).
+                    { "inc",     useInc ? num("inc") : 0.0 },
                     { "dec",     needD ? num("dec") : 0.0 },
-                    { "alpha95", (needI || needD) ? num("alpha95") : 0.0 },
+                    { "alpha95", useInc ? num("alpha95") : 1.0 },
                     { "field",   needF ? num("field") : 0.0 },
-                    { "error_f", needF ? num("error_f") : 0.0 },
+                    { "error_f", needF ? num("error_f") : 1.0 },
                     { "integration_steps", d.value("integration_steps").toInt(500) },
                     { "refI_curve", cur("curve_i", kAmCurveI) },
                     { "refD_curve", cur("curve_d", kAmCurveD) },
@@ -474,13 +537,14 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
                 const int pt = dd.value("process_type").toInt();
                 const QString pr = (pt >= 1 && pt <= 6) ? QString::fromLatin1(names[pt]) : QString::number(pt);
                 QStringList v;
-                if (pr.contains('I')) v << QStringLiteral("I=%1").arg(dd.value("inc").toDouble());
+                if (pr.contains('I') || pr.contains('D')) v << QStringLiteral("I=%1").arg(dd.value("inc").toDouble());
                 if (pr.contains('D')) v << QStringLiteral("D=%1").arg(dd.value("dec").toDouble());
                 if (pr.contains('I') || pr.contains('D')) v << QStringLiteral("α95=%1").arg(dd.value("alpha95").toDouble());
                 if (pr.contains('F')) v << QStringLiteral("F=%1±%2").arg(dd.value("field").toDouble()).arg(dd.value("error_f").toDouble());
                 ds << QStringLiteral("archéomag. %1 (%2)").arg(pr, v.join(", "));
             }
             else                    ds << pl;
+            if (const QString w = wiggleOfChr(d); !w.isEmpty()) ds.last() += QStringLiteral(" [wiggle %1]").arg(w);
         }
         if (!ds.isEmpty()) s += " : " + ds.join("; ");
         s += "\n";

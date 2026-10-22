@@ -16,11 +16,18 @@ const RefCurve* F14cMethod::resolveCurve(const QString& name)
     return CurveStore::get("c14", name, CurveFormat::Radiocarbon, true);
 }
 
+// Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
+QRegularExpression F14cMethod::context() const
+{
+    static const QRegularExpression re(R"((f\s?-?14\s?c|fraction moderne|fraction 14c|post[- ]?bombe|bomb curve|\bpmc\b))");
+    return re;
+}
+
 QVector<QJsonObject> F14cMethod::parse(const QString& question) const
 {
     QVector<QJsonObject> out;
     const QString q = text::fold(question);
-    static const QRegularExpression ctx(R"((f\s?-?14\s?c|fraction moderne|fraction 14c|post[- ]?bombe|bomb curve|\bpmc\b))");
+    const QRegularExpression ctx = context();
     if (!ctx.match(q).hasMatch()) return out;
 
     // Courbe

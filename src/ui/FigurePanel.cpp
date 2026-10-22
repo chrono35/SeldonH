@@ -4,10 +4,14 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QBuffer>
+#include <QFile>
 #include <QFileInfo>
+#include <QSvgGenerator>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
 #include <QPainterPath>
@@ -39,6 +43,7 @@ bool CurveSpec::fromJson(const QJsonObject& o, CurveSpec& out, QString* err)
     }
 
     out.xReverse = o.value("xreverse").toBool(false);
+    out.yFromZero = o.value("yzero").toBool(true);
     out.showYAxis = o.contains("yaxis") ? o.value("yaxis").toBool(true) : !out.fill;
 
     auto toVec = [](const QJsonValue& v) {
@@ -55,6 +60,8 @@ bool CurveSpec::fromJson(const QJsonObject& o, CurveSpec& out, QString* err)
             const QColor col(s.value("color").toString());
             if (col.isValid()) cs.color = col;
         }
+        cs.fill = s.value("fill").toBool(true);
+        cs.width = std::clamp(s.value("width").toDouble(1.8), 0.3, 6.0);
         cs.y = toVec(s.value("y"));
         cs.x = s.contains("x") ? toVec(s.value("x")) : sharedX;
         if (cs.x.isEmpty() && !cs.y.isEmpty()) {            // sans x : indices
@@ -158,6 +165,24 @@ QImage CurveWidget::render(const QSize& size) const
     return img;
 }
 
+QByteArray CurveWidget::renderSvg(const QSize& size, const QString& title) const
+{
+    QByteArray out;
+    QBuffer buf(&out);
+    buf.open(QIODevice::WriteOnly);
+    QSvgGenerator gen;
+    gen.setOutputDevice(&buf);
+    gen.setSize(size);
+    gen.setViewBox(QRect(QPoint(0, 0), size));
+    gen.setResolution(96);                       // tailles de police cohérentes avec l'écran
+    gen.setTitle(title.isEmpty() ? spec_.title : title);
+    gen.setDescription(QStringLiteral("SeldonH"));
+    QPainter p(&gen);
+    paintTo(p, QRect(QPoint(0, 0), size));       // p.device() != this : rendu « export » (fond blanc, texte noir)
+    p.end();
+    return out;
+}
+
 void CurveWidget::paintTo(QPainter& p, const QRect& r) const
 {
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -168,7 +193,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     p.fillRect(r, bg);
 
     // Bornes des données
-    double xmin = 1e300, xmax = -1e300, ymin = 0, ymax = -1e300;
+    double xmin = 1e300, xmax = -1e300, ymin = spec_.yFromZero ? 0.0 : 1e300, ymax = -1e300;
     for (const CurveSeries& s : spec_.series)
         for (int i = 0; i < s.x.size(); ++i) {
             if (std::isnan(s.x[i]) || std::isnan(s.y[i])) continue;
@@ -177,6 +202,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
         }
     if (!(xmax > xmin)) { xmax = xmin + 1; }
     if (!(ymax > ymin)) { ymax = ymin + 1; }
+    if (!spec_.yFromZero) ymin -= 0.05 * (ymax - ymin);
     ymax += 0.05 * (ymax - ymin);
 
     const int left = spec_.showYAxis ? 56 : 26, right = 26, top = spec_.title.isEmpty() ? 14 : 34, bottom = 46;
@@ -236,7 +262,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
             const QPointF pt(X(s.x[i]), Y(s.y[i]));
             if (!started) { path.moveTo(pt); started = true; } else path.lineTo(pt);
         }
-        if (spec_.fill) {
+        if (spec_.fill && s.fill) {
             const QColor fc = bc;
             const auto intervals = hpdRegions(s, spec_.hpdLevel);
             std::vector<int> order(s.x.size());
@@ -262,7 +288,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
                 }
             }
         }
-        p.setPen(QPen(c, 1.8));
+        p.setPen(QPen(c, s.width));
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
     }
@@ -291,9 +317,28 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
 
 // ---------------------------------------------------------------- ImageView
 
-ImageView::ImageView(const QImage& img, QWidget* parent) : QWidget(parent), img_(img)
+ImageView::ImageView(const QImage& img, const QByteArray& svgSource, QWidget* parent)
+    : QWidget(parent), img_(img), svg_(svgSource)
 {
     setMinimumSize(200, 150);
+}
+
+QByteArray ImageView::toSvg(const QString& title) const
+{
+    if (!svg_.isEmpty()) return svg_;
+    QByteArray out;
+    if (img_.isNull()) return out;
+    QBuffer buf(&out);
+    buf.open(QIODevice::WriteOnly);
+    QSvgGenerator gen;
+    gen.setOutputDevice(&buf);
+    gen.setSize(img_.size());
+    gen.setViewBox(QRect(QPoint(0, 0), img_.size()));
+    gen.setTitle(title);
+    QPainter p(&gen);
+    p.drawImage(QPoint(0, 0), img_);             // image matricielle incorporée (PNG en base64)
+    p.end();
+    return out;
 }
 
 void ImageView::paintEvent(QPaintEvent*)
@@ -373,9 +418,9 @@ void FigurePanel::showPage(QWidget* page, const QString& title)
     updatePlaceholder();
 }
 
-void FigurePanel::addImage(const QImage& img, const QString& title)
+void FigurePanel::addImage(const QImage& img, const QString& title, const QByteArray& svgSource)
 {
-    const int i = tabs_->addTab(new ImageView(img), title);
+    const int i = tabs_->addTab(new ImageView(img, svgSource), title);
     tabs_->setCurrentIndex(i);
     updatePlaceholder();
 }
@@ -384,15 +429,35 @@ bool FigurePanel::addImageFile(const QString& path)
 {
     QImage img(path);
     if (img.isNull()) return false;
-    addImage(img, QFileInfo(path).fileName());
+    QByteArray svg;
+    if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
+        QFile f(path);
+        if (f.open(QIODevice::ReadOnly)) svg = f.readAll();
+    }
+    addImage(img, QFileInfo(path).fileName(), svg);
     return true;
 }
 
 void FigurePanel::addCurves(const CurveSpec& spec)
 {
-    const int i = tabs_->addTab(new CurveWidget(spec), spec.title.isEmpty() ? tr("Courbe") : spec.title);
+    auto* w = new CurveWidget(spec);
+    lastCurves_ = w;
+    const int i = tabs_->addTab(w, spec.title.isEmpty() ? tr("Courbe") : spec.title);
     tabs_->setCurrentIndex(i);
     updatePlaceholder();
+}
+
+bool FigurePanel::replaceCurvesJson(QWidget* page, const QJsonObject& o, QString* err)
+{
+    auto* w = qobject_cast<CurveWidget*>(page);
+    const int i = w ? tabs_->indexOf(w) : -1;
+    if (i < 0) { if (err) *err = tr("onglet de courbes introuvable"); return false; }
+    CurveSpec spec;
+    if (!CurveSpec::fromJson(o, spec, err)) return false;
+    w->setSpec(spec);
+    tabs_->setTabText(i, spec.title.isEmpty() ? tr("Courbe") : spec.title);
+    tabs_->setCurrentIndex(i);
+    return true;
 }
 
 bool FigurePanel::addCurvesJson(const QJsonObject& o, QString* err)
@@ -414,13 +479,39 @@ void FigurePanel::saveCurrent()
 {
     QWidget* w = tabs_->currentWidget();
     if (!qobject_cast<CurveWidget*>(w) && !qobject_cast<ImageView*>(w)) return;     // ex. onglet d'aide : rien à enregistrer
-    const QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer la figure"), tabs_->tabText(tabs_->currentIndex()) + ".png",
-                                                      tr("Image PNG (*.png)"));
+    const QString pngFilter = tr("Image PNG (*.png)"), svgFilter = tr("Image vectorielle SVG (*.svg)");
+    QString selected = pngFilter;
+    QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer la figure"), tabs_->tabText(tabs_->currentIndex()) + ".png",
+                                                pngFilter + ";;" + svgFilter, &selected);
     if (path.isEmpty()) return;
-    QImage img;
-    if (auto* c = qobject_cast<CurveWidget*>(w)) img = c->render(QSize(1600, 1000));
-    else if (auto* v = qobject_cast<ImageView*>(w)) img = v->image();
-    if (!img.isNull()) img.save(path, "PNG");
+    // Sans extension (ou extension inconnue), le filtre choisi décide.
+    const QString suf = QFileInfo(path).suffix().toLower();
+    if (suf != "png" && suf != "svg") path += (selected == svgFilter) ? ".svg" : ".png";
+    QString err;
+    if (!saveCurrentTo(path, &err))
+        QMessageBox::warning(this, tr("Enregistrer la figure"), err);
+}
+
+bool FigurePanel::saveCurrentTo(const QString& path, QString* err) const
+{
+    QWidget* w = tabs_->currentWidget();
+    auto* c = qobject_cast<CurveWidget*>(w);
+    auto* v = qobject_cast<ImageView*>(w);
+    if (!c && !v) { if (err) *err = tr("Aucune figure à enregistrer."); return false; }
+    const QString title = tabs_->tabText(tabs_->currentIndex());
+    const QSize size(1600, 1000);
+    if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
+        const QByteArray svg = c ? c->renderSvg(QSize(800, 500), title) : v->toSvg(title);
+        QFile f(path);
+        if (svg.isEmpty() || !f.open(QIODevice::WriteOnly) || f.write(svg) != svg.size()) {
+            if (err) *err = tr("Impossible d'écrire %1.").arg(path);
+            return false;
+        }
+        return true;
+    }
+    const QImage img = c ? c->render(size) : v->image();
+    if (img.isNull() || !img.save(path, "PNG")) { if (err) *err = tr("Impossible d'écrire %1.").arg(path); return false; }
+    return true;
 }
 
 void FigurePanel::dragEnterEvent(QDragEnterEvent* e)

@@ -6,6 +6,13 @@
 
 namespace seldon {
 
+// Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
+QRegularExpression UnifMethod::context() const
+{
+    static const QRegularExpression re(R"((uniforme|\bunif\s*\())");
+    return re;
+}
+
 QVector<QJsonObject> UnifMethod::parse(const QString& question) const
 {
     QVector<QJsonObject> out;

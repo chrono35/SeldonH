@@ -17,6 +17,7 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -49,6 +50,12 @@ public:
 
     // Reconnaît les demandes de cette méthode dans une question. Chaque objet contient "method": id().
     virtual QVector<QJsonObject> parse(const QString& question) const = 0;
+
+    // Mots-clés de la méthode (« c14 », « bp », « tl »…) ; vide = aucun. Sert à répartir les dates d'une question qui
+    // mélange plusieurs méthodes (MethodRegistry::parse).
+    virtual QRegularExpression context() const { return QRegularExpression(); }
+    // Vrai si parse() lit des paires « valeur ± erreur » (14C, F14C, TL, Gauss).
+    virtual bool usesValueErrors() const { return false; }
 
     virtual MethodResult compute(const QJsonObject& params) const = 0;
 

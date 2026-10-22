@@ -46,7 +46,7 @@
 <body>
 
 <h1>SeldonH — mode d'emploi</h1>
-<p class="lead">Assistant local d'aide à la datation et à la modélisation chronologique. Tout se passe sur votre ordinateur : aucune donnée ne le quitte.</p>
+<p class="lead">Assistant d'aide à la datation et à la modélisation chronologique. Les calculs de datation se font toujours sur votre ordinateur. Avec le modèle de langage local (réglage par défaut), rien ne le quitte. Si vous choisissez un modèle distant, vos questions et la conversation sont envoyées à ce service (voir <a href="#faq">Questions fréquentes</a>).</p>
 
 <p><b>Les exemples en pointillés sont cliquables</b> : dans SeldonH, un clic recopie la phrase dans la zone de question (vous pouvez la modifier avant d'appuyer sur Entrée) ; dans un navigateur, elle est copiée dans le presse-papiers.</p>
 
@@ -55,6 +55,7 @@
   <li><a href="#interface">2. L'interface</a></li>
   <li><a href="#dater">3. Faire une datation</a></li>
   <li><a href="#resultats">4. Lire un résultat (HPD)</a></li>
+  <li><a href="#evenement">4 bis. Combiner des datations en un événement</a></li>
   <li><a href="#modele">5. Créer un modèle ChronoModel</a></li>
   <li><a href="#interpreter">6. Interpréter des résultats</a></li>
   <li><a href="#graphiques">7. Graphiques et images</a></li>
@@ -70,14 +71,14 @@
   <li>Attendez la fin du chargement (barre de progression sous la conversation). La zone de question est active quand le nom du modèle s'affiche.</li>
   <li>Posez votre question en français. <code>Entrée</code> envoie, <code>Maj+Entrée</code> ajoute une ligne.</li>
 </ol>
-<table><tr><td class="note">Les <b>calculs de datation</b> (calibration, HPD…) sont faits par l'application elle-même, avec les méthodes de ChronoModel, <b>pas par le modèle de langage</b> : ils sont exacts et instantanés. Le modèle sert à expliquer, commenter, structurer un modèle ou interpréter des résultats. Sur un ordinateur sans GPU, ses réponses peuvent prendre de longues secondes.</td></tr></table>
+<table><tr><td class="note">Les <b>calculs de datation</b> (calibration, HPD…) sont faits par l'application elle-même, avec les méthodes de ChronoModel, <b>pas par le modèle de langage</b> : ils sont exacts et instantanés (quelques secondes pour un événement calculé par MCMC). Le modèle sert à expliquer, commenter, structurer un modèle ou interpréter des résultats. Sur un ordinateur sans GPU, ses réponses peuvent prendre de longues secondes.</td></tr></table>
 
 <h2 id="interface">2. L'interface</h2>
 <ul>
   <li><b>Zone de dialogue</b> (à gauche, en haut) : vos questions et les réponses. Sous une réponse, des liens permettent de la copier ou, pour un modèle ChronoModel, de l'enregistrer en <code>.chr</code>.</li>
   <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code> ou une image).</li>
   <li><b>Panneau graphiques</b> (à droite) : une courbe par calcul, vos images, et cet onglet d'aide. <code>F4</code> l'affiche ou le masque.</li>
-  <li><b>Volet Historique</b> (à gauche, repliable) : vos conversations, la plus récente en haut (voir plus bas). <code>Ctrl+Maj+H</code> (<code>⌘⇧H</code> sur Mac) ou la croix du volet le masque, le menu <i>Affichage</i> le réaffiche.</li>
+  <li><b>Volet Historique</b> (à gauche, repliable) : vos conversations, la plus récente en haut (voir plus bas). Une fine bande avec une flèche le replie ou le déplie : <b>volet ouvert, elle est à sa droite</b> (◀ pour le replier) ; volet replié, elle reste au bord gauche de la fenêtre (▶ pour le rouvrir). Raccourci : <code>Ctrl+Maj+H</code> (<code>⌘⇧H</code> sur Mac), ou le menu <i>Affichage</i>.</li>
   <li><b>Menus</b> : <i>Fichier</i> (nouvelle conversation, modèle, enregistrer la conversation en HTML), <i>Édition</i> (Préférences), <i>Compétences</i>, <i>Affichage</i>, <i>Aide</i>.</li>
 </ul>
 <p>Commandes dans la zone de question : <code>/aide</code> ouvre ce mode d'emploi (même sans modèle chargé).</p>
@@ -122,7 +123,7 @@
     <td><a class="ex" data-method="am">archéomagnétisme : inclinaison 65°, alpha95 = 1</a><br>
         <a class="ex" data-method="am">archéomagnétisme : inclinaison 62, déclinaison -3, α95 = 2</a><br>
         <a class="ex" data-method="am">archéomagnétisme : intensité 52 ± 3 µT</a></td>
-    <td>Inclinaison (I), déclinaison (D) et/ou intensité (F), avec α95 pour les directions. Courbes intégrées : Paris (Gallet 2002) pour I et D, GwH2013 pour F, Bulgarie. La déclinaison seule n'est pas calculable (son erreur dépend de l'inclinaison).</td>
+    <td>Inclinaison (I), déclinaison (D) et/ou intensité (F), avec α95 pour les directions. Courbes intégrées : Paris (Gallet 2002) pour I et D, GwH2013 pour F, Bulgarie. La déclinaison seule demande aussi l'inclinaison : son erreur vaut α95 / (2,448 · cos I).</td>
   </tr>
   <tr>
     <td><b>Gaussienne</b></td>
@@ -135,6 +136,14 @@
     <td>Terminus post quem / ante quem.</td>
   </tr>
 </table>
+
+<h3>Plusieurs datations dans la même question</h3>
+<p>Citez-les à la suite : toutes sont calculées, chacune avec sa fiche, et leurs densités sont <b>superposées sur une seule figure</b> (une couleur par date, avec la légende). Les méthodes peuvent être mélangées : chaque valeur ± erreur est rattachée au mot-clé qui la précède (« C14 », « TL »…) ou à l'unité qui la suit (« BP »).</p>
+<ul>
+  <li><a class="ex" data-method="c14">C14 de 2500 ± 30 BP et 3000 ± 40 BP</a></li>
+  <li><a class="ex" data-method="tl">TL 488 ± 19 ans mesuré en 2015 et C14 2500 ± 30 BP</a></li>
+</ul>
+<p>Si l'assistant calcule ensuite d'autres dates pour la même question, elles s'ajoutent à cette figure au lieu d'ouvrir un nouvel onglet. Pour estimer <b>une date commune</b> à partir de ces datations, voir <a href="#evenement">Combiner des datations en un événement</a>.</p>
 
 <h3>Dates et échelles de temps</h3>
 <ul>
@@ -152,7 +161,40 @@
   <li>le <b>MAP</b> (valeur la plus probable), la <b>moyenne ; écart-type</b> et les <b>quartiles</b> de la densité ;</li>
   <li>des avertissements, par exemple si la densité touche la limite ancienne ou récente de la courbe.</li>
 </ul>
-<table><tr><td class="note">Sur le graphique, <b>seule la région HPD est remplie</b> (95 % par défaut) ; la courbe entière reste tracée. Les résultats sont ceux de ChronoModel : pour 3560 ± 20 BP avec IntCal13, SeldonH et ChronoModel donnent les mêmes valeurs.</td></tr></table>
+<h3>Un autre niveau de confiance</h3>
+<p>Le niveau est de <b>95 % par défaut</b>. Demandez-en un autre dans la question : la fiche donne alors la HPD à ce niveau (marquée <i>demandé</i>), puis celles à 95 % et 68 % pour comparaison, et le graphique remplit la région au niveau demandé. Niveaux acceptés : de 50 à 99,99 %. L'α95 de l'archéomagnétisme n'est jamais pris pour un niveau de confiance.</p>
+<ul>
+  <li><a class="ex" data-method="c14">C14 de 3560 ± 20 BP, donne la HPD à 99 %</a></li>
+  <li><a class="ex" data-method="tl">TL 800 ± 60 ans, mesuré en 2015, avec un niveau de confiance de 90 %</a></li>
+</ul>
+
+<table><tr><td class="note">Sur le graphique, <b>seule la région HPD est remplie</b> (95 % par défaut, ou le niveau demandé) ; la courbe entière reste tracée. Les résultats sont ceux de ChronoModel : pour 3560 ± 20 BP avec IntCal13, SeldonH et ChronoModel donnent les mêmes valeurs.</td></tr></table>
+
+<h2 id="evenement">4 bis. Combiner des datations en un événement</h2>
+<p>Quand plusieurs datations, éventuellement de <b>méthodes différentes</b>, datent le même événement (un foyer, un niveau, une construction), SeldonH estime sa date θ avec le <b>modèle d'événement de ChronoModel</b>, par MCMC : chaque date a sa propre dispersion σ<sub>i</sub> autour de θ, de sorte qu'une date discordante pèse peu. Le moteur reprend celui de ChronoModel 4 (échantillonneur par bloc, recuit, adaptation des pas) et ses paramètres MCMC par défaut : 4 chaînes, burn-in 1 000, adaptation par lots de 100 (200 lots au plus), 100 000 itérations d'acquisition, thinning 10.</p>
+<p>Employez le mot <b>événement</b> (ou « event », « combine », « regroupe ») avec au moins deux datations :</p>
+<ul>
+  <li><a class="ex" data-method="event">Calcule l'événement « US 12 » avec C14 2500 ± 30 BP, C14 2470 ± 35 BP et TL 2600 ± 90 ans mesuré en 2015</a></li>
+  <li><a class="ex" data-method="event">Combine en un événement : C14 3560 ± 20 BP et archéomagnétisme : inclinaison 65°, alpha95 = 1</a></li>
+  <li><a class="ex" data-method="event">Calcule l'événement avec C14 2500 ± 30 BP et C14 2530 ± 25 BP, 200 000 itérations, 8 chaînes, graines 1;2;3;4;5;6;7;8</a></li>
+</ul>
+<p>Réglages possibles dans la phrase : nombre d'<b>itérations</b>, de <b>chaînes</b>, <b>burn-in</b>, <b>thinning</b>, <b>graines</b> (pour reproduire exactement un calcul) et <b>période d'étude</b> (« période d'étude -1000 à 0 ») ; sans indication, la période d'étude, loi a priori uniforme de θ, est calculée d'après les datations. Un niveau de confiance autre que 95 % se demande comme pour une date seule. Le décalage δ entre l'échantillon et l'événement (wiggle : fixe, intervalle ou gaussien) se donne à l'assistant, qui le transmet au calcul.</p>
+<p>La fiche de résultat donne :</p>
+<ul>
+  <li><b>θ a posteriori</b> : HPD, MAP, moyenne, quartiles ;</li>
+  <li>pour chaque datation : sa calibration seule, sa valeur a posteriori t<sub>i</sub> dans l'événement et sa dispersion σ médiane (petite : la date s'accorde avec les autres ; grande : elle est discordante) ;</li>
+  <li>les <b>critères de convergence</b> et les paramètres MCMC, avec les graines utilisées et l'état de l'adaptation de chaque chaîne.</li>
+</ul>
+<p>Deux figures : la densité de θ (remplie) avec les calibrations des datations (en traits), et dans un autre onglet les <b>traces de θ</b> de chaque chaîne, qui doivent se superposer sans dérive.</p>
+<h3>Critères de convergence</h3>
+<table>
+  <tr><th>Critère</th><th>Ce qu'il mesure</th><th>Seuils (ceux de ChronoModel)</th></tr>
+  <tr><td><b>R̂</b> (split, rang-normalisé)</td><td>Accord entre les chaînes et dans chaque chaîne (Vehtari et al., 2021).</td><td>&lt; 1,01 satisfaisant ; &lt; 1,05 à surveiller ; au-delà, non convergé.</td></tr>
+  <tr><td><b>ESS</b> bulk et tail</td><td>Nombre de tirages effectivement indépendants, au centre et dans les queues de la loi.</td><td>≥ 500 par chaîne satisfaisant ; ≥ 100 par chaîne à surveiller (pour 4 chaînes : 2 000 et 400).</td></tr>
+  <tr><td><b>Acceptation</b></td><td>Part des propositions acceptées (bloc t/σ des dates, décalage de θ).</td><td>Cible d'environ 30 à 46 %.</td></tr>
+</table>
+<p>Le verdict porte sur toutes les variables, θ compris, mais aussi les dispersions σ<sub>i</sub> et S0, qui se mélangent souvent moins bien : la fiche liste les variables sous les seuils. Si θ est bon mais pas les σ<sub>i</sub>, la date de l'événement reste lisible ; sinon augmentez le nombre d'itérations ou de chaînes, et vérifiez que les datations datent bien le même événement.</p>
+<table><tr><td class="warn"><b>Limites :</b> un seul événement, sans contrainte ni phase (pour cela, créez un modèle et lancez-le dans ChronoModel). La densité de θ est lissée avec la largeur de Silverman, et non celle de Sheather-Jones de ChronoModel : de petites différences d'arrondi des HPD sont normales.</td></tr></table>
 
 <h2 id="modele">5. Créer un modèle ChronoModel</h2>
 <p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage propose alors une spécification, que SeldonH transforme en fichier <code>.chr</code> en un clic (lien <i>Enregistrer en .chr</i> sous la réponse).</p>
@@ -180,7 +222,8 @@
 <ul>
   <li>Chaque calcul ajoute un onglet de courbe. Demandez aussi un tracé : <a class="ex">Trace une gaussienne de moyenne -500 et d'écart-type 40</a></li>
   <li><b>Glissez-déposez</b> une image sur le panneau, ou utilisez <i>Ouvrir une image…</i>.</li>
-  <li><i>Enregistrer…</i> exporte la courbe ou l'image affichée en PNG.</li>
+  <li>Les datations d'une même question sont superposées sur une seule figure ; un événement ajoute un onglet de traces MCMC.</li>
+  <li><i>Enregistrer…</i> exporte la courbe ou l'image affichée en <b>PNG</b> ou en <b>SVG</b> (choisissez le type dans la boîte d'enregistrement) : une courbe devient un SVG vectoriel, modifiable dans Inkscape ou Illustrator ; une image ouverte depuis un fichier SVG est réenregistrée telle quelle ; une photo reste une image en pixels, placée dans le SVG.</li>
   <li>Fermez un onglet avec sa croix ; <code>F4</code> masque ou affiche tout le panneau.</li>
 </ul>
 
@@ -231,8 +274,8 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <ul>
   <li>Le modèle de langage peut se tromper ; les <b>valeurs de calcul</b> (intervalles, HPD) sont celles de l'application et font foi sur celles du texte.</li>
   <li>Export <code>.chr</code> : pas encore de dates radiocarbone ni de densités tabulées ; vérifier le fichier dans ChronoModel.</li>
-  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04, les combinaisons et wiggle matching.</li>
-  <li>Une datation isolée n'est pas un modèle : l'effet des contraintes stratigraphiques (a posteriori) se calcule dans ChronoModel.</li>
+  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04, la combinaison de dates (bouton « Combine ») et la calibration wiggle d'une date seule. Le décalage δ (wiggle) est en revanche pris en compte dans un <a href="#evenement">événement</a>.</li>
+  <li>Une datation isolée, ou un événement seul, n'est pas un modèle : l'effet des contraintes stratigraphiques et des phases se calcule dans ChronoModel.</li>
 </ul>
 
 <h2 id="faq">11. Questions fréquentes</h2>
@@ -243,19 +286,19 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <h3>Utiliser un modèle distant : qu'est-ce qui quitte mon ordinateur ?</h3>
 <p>Avec un modèle distant, SeldonH envoie au serveur vos questions, la conversation, les compétences sélectionnées pour la question et les fichiers joints. Les <b>calculs de datation restent faits sur votre ordinateur</b>, avec leurs courbes. Le nom du serveur est rappelé en bas de la fenêtre (☁) et un message vous demande confirmation quand vous activez ce mode. Pour travailler hors ligne ou avec des données sensibles, gardez le modèle local.</p>
 <h3>Qu'est-ce que l'appel d'outils ?</h3>
-<p>Un « outil » est une fonction de SeldonH que le modèle peut demander : <code>calibrer_radiocarbone</code>, <code>calibrer_f14c</code>, <code>dater_luminescence</code>, <code>densite_gauss</code>, <code>densite_uniforme</code>, <code>dater_archeomagnetisme</code> et <code>courbes_disponibles</code>. Ce sont les mêmes calculs, sur votre ordinateur, quel que soit le modèle. Avec un modèle distant, la demande passe par le mécanisme standard d'appel d'outils de l'API ; avec le modèle local, par un bloc <code>calcul</code> écrit dans la réponse. Dans les deux cas, la fiche de résultat et la courbe apparaissent dans SeldonH, et le serveur ne reçoit que le texte du résultat. Si un modèle distant se trompe d'outil ou en abuse, décochez l'appel d'outils dans les Préférences.</p>
+<p>Un « outil » est une fonction de SeldonH que le modèle peut demander : <code>calibrer_radiocarbone</code>, <code>calibrer_f14c</code>, <code>dater_luminescence</code>, <code>densite_gauss</code>, <code>densite_uniforme</code>, <code>dater_archeomagnetisme</code>, <code>calculer_evenement</code> (événement à plusieurs datations, MCMC) et <code>courbes_disponibles</code>. Ce sont les mêmes calculs, sur votre ordinateur, quel que soit le modèle. Avec un modèle distant, la demande passe par le mécanisme standard d'appel d'outils de l'API ; avec le modèle local, par un bloc <code>calcul</code> écrit dans la réponse. Dans les deux cas, la fiche de résultat et la courbe apparaissent dans SeldonH, et le serveur ne reçoit que le texte du résultat. Si un modèle distant se trompe d'outil ou en abuse, décochez l'appel d'outils dans les Préférences.</p>
 <h3>Le modèle distant ne répond pas</h3>
 <p>Vérifiez la Base URL (<i>Lister les modèles</i> la teste), la clé API (une erreur 401 la désigne) et le nom exact du modèle (404). Le mode réflexion de SeldonH ne s'applique qu'au modèle local : chez un fournisseur, choisissez un modèle de raisonnement si vous en voulez un.</p>
 <h3>Les formules s'affichent avec des signes bizarres</h3>
 <p>Le modèle écrit ses formules en LaTeX (<code>$\sigma = \sqrt{a^2+b^2}$</code>) ; SeldonH les met en forme (lettres grecques, racines, exposants, indices, fractions). L'affichage reste une approximation : les formules très complexes (matrices, alignements) sont seulement mises en lignes. Le texte brut d'une réponse reste copiable avec le lien <i>copier</i>.</p>
 <h3>Les réponses sont lentes</h3>
-<p>Sans GPU, la génération se fait sur le processeur. Essayez un modèle plus petit, un contexte plus court, ou désactivez le mode réflexion. Les calculs de datation, eux, restent instantanés.</p>
+<p>Sans GPU, la génération se fait sur le processeur. Essayez un modèle plus petit, un contexte plus court, ou désactivez le mode réflexion. Les calculs de datation, eux, restent instantanés ; un événement (MCMC) prend quelques secondes, avec l'avancement dans la barre d'état.</p>
 <h3>SeldonH n'a pas compris ma phrase</h3>
-<p>Reprenez la forme des exemples ci-dessus : <i>méthode + valeur ± erreur + unité</i>. Pour 14C, écrivez « BP » ; pour l'archéomagnétisme, écrivez « archéomagnétisme » avec « inclinaison » et « alpha95 ».</p>
+<p>Reprenez la forme des exemples ci-dessus : <i>méthode + valeur ± erreur + unité</i>. Pour 14C, écrivez « BP » ; pour l'archéomagnétisme, écrivez « archéomagnétisme » avec « inclinaison » et « alpha95 » ; pour un événement, écrivez « événement » avec au moins deux datations.</p>
 <h3>Je veux des réponses plus courtes, ou des âges en BP</h3>
 <p>Écrivez-le une fois pour toutes dans <i>Édition &gt; Préférences… &gt; Consignes personnelles</i>. Les fiches de résultat de SeldonH, elles, restent en années calendaires (négatif = avant J.-C.) : c'est le commentaire du modèle qui suit vos consignes.</p>
 <h3>Où est mon historique ?</h3>
-<p>La conversation n'est pas conservée entre deux lancements. Utilisez <i>Fichier &gt; Enregistrer la conversation (HTML)…</i>.</p>
+<p>Dans le volet <a href="#historique">Historique</a>, à gauche : chaque conversation y est enregistrée automatiquement (sauf si vous l'avez désactivé dans les Préférences). Pour garder une copie lisible ailleurs, utilisez <i>Fichier &gt; Enregistrer la conversation (HTML)…</i>.</p>
 
 <p class="small">Ce fichier est aussi disponible hors de l'application : <code>resources/help/aide.html</code> dans le dossier du projet.</p>
 

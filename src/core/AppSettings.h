@@ -12,11 +12,13 @@ struct AppSettings {
     QString modelPath;               // fichier .gguf ; vide = recherche automatique
     int     nCtx        = 8192;      // contexte (tokens)
     int     nThreads    = 0;         // 0 = automatique
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__APPLE__) && (defined(__x86_64__) || defined(_M_X64))
     // Macs Intel : le backend Metal produit souvent un texte incohérent (GPU AMD/Intel) -> CPU par défaut.
     int     nGpuLayers  = 0;         // 0 = CPU seul, 999 = tout sur le GPU (Metal)
 #else
-    int     nGpuLayers  = 999;       // 0 = CPU seul, 999 = tout sur le GPU (Metal)
+    // 999 = tout sur le GPU (Metal sur Mac Apple Silicon ; Vulkan ou CUDA sous Windows / Linux si llama.cpp a été
+    // compilé avec). Avec une version « cpu » de llama.cpp, aucun GPU n'est trouvé et tout reste sur le processeur.
+    int     nGpuLayers  = 999;       // 0 = CPU seul
 #endif
     double  temperature = 0.7;
     int     maxTokens   = 1200;
@@ -26,12 +28,16 @@ struct AppSettings {
     QString dateFormat  = "bcad";    // format d'affichage des dates (comme ChronoModel) : bcad, bcece, calbp, calb2k, datbp, datb2k, ka, ma
     // Modèle distant (API compatible OpenAI). Quand useRemote est vrai, les questions sont envoyées au serveur indiqué.
     bool    useRemote   = false;
-    QString remoteUrl;               // Base URL, ex. https://api.openai.com/v1
-    QString remoteKey;               // clé API (stockée en clair dans les réglages de l'utilisateur)
-    QString remoteModel;             // nom du modèle chez le fournisseur
+    QString remoteUrl   = defaultRemoteUrl();    // Base URL, ex. https://api.openai.com/v1
+    QString remoteKey;               // clé API (stockée en clair dans les réglages de l'utilisateur) ; vide = sans clé
+    QString remoteModel = defaultRemoteModel();  // nom du modèle chez le fournisseur
     bool    remoteTools = true;      // appel d'outils natif (les calculs de SeldonH sont appelés par le modèle)
     QString userPrompt;              // consignes personnelles ajoutées à chaque question (ex. « réponses courtes »)
     bool    keepHistory = true;      // enregistre automatiquement les conversations (volet Historique), sur cet ordinateur
+
+    // Serveur distant proposé par défaut (API compatible OpenAI, sans clé)
+    static QString defaultRemoteUrl()   { return QStringLiteral("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"); }
+    static QString defaultRemoteModel() { return QStringLiteral("Mistral-Small-3.2-24B-Instruct-2506"); }
 
     static QString dataDir()
     {
@@ -56,8 +62,13 @@ struct AppSettings {
         const QString app = QCoreApplication::applicationDirPath();
         QStringList d;
         if (!projectModelsDir().isEmpty()) d << projectModelsDir();
-        d << app + "/../Resources/models"          // bundle macOS : SeldonH.app/Contents/Resources/models
-          << app + "/models"                       // à côté de l'exécutable (Linux / Windows)
+        d << app + "/../Resources/models";         // bundle macOS : SeldonH.app/Contents/Resources/models
+#ifdef Q_OS_MACOS
+        // macOS installé par QtIFW : /Applications/SeldonH/models, à côté de SeldonH.app
+        // (hors du bundle, pour ne pas invalider sa signature)
+        d << QDir::cleanPath(app + "/../../../models");
+#endif
+        d << app + "/models"                       // à côté de l'exécutable (Linux / Windows)
           << defaultModelsDir();
         return d;
     }
@@ -93,9 +104,11 @@ struct AppSettings {
         a.skillsDir   = s.value("skills/dir", defaultSkillsDir()).toString();
         a.userPrompt  = s.value("gen/userPrompt").toString();
         a.useRemote   = s.value("remote/enabled", false).toBool();
-        a.remoteUrl   = s.value("remote/url").toString();
+        a.remoteUrl   = s.value("remote/url").toString().trimmed();
+        if (a.remoteUrl.isEmpty()) a.remoteUrl = defaultRemoteUrl();          // champ vide = serveur par défaut
         a.remoteKey   = s.value("remote/key").toString();
-        a.remoteModel = s.value("remote/model").toString();
+        a.remoteModel = s.value("remote/model").toString().trimmed();
+        if (a.remoteModel.isEmpty()) a.remoteModel = defaultRemoteModel();
         a.remoteTools = s.value("remote/tools", true).toBool();
         a.dateFormat  = s.value("display/dateFormat", a.dateFormat).toString();
         a.keepHistory = s.value("history/keep", true).toBool();

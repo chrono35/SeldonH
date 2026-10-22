@@ -1,5 +1,6 @@
 #include "LlmEngine.h"
 
+#include <QCoreApplication>
 #include <QFileInfo>
 
 namespace seldon {
@@ -25,6 +26,11 @@ void LlmEngine::loadModel(const QString& path, int nCtx, int nThreads, int nGpuL
     p.nCtx       = nCtx;
     p.nThreads   = nThreads;
     p.nGpuLayers = nGpuLayers;
+#if defined(Q_OS_LINUX)
+    p.backendDir = (QCoreApplication::applicationDirPath() + "/lib").toUtf8().toStdString();   // installé : lib/
+#else
+    p.backendDir = QCoreApplication::applicationDirPath().toUtf8().toStdString();              // Windows : à côté du .exe
+#endif
 
     std::string err;
     const bool ok = core_.load(p, err, [this](float v) {

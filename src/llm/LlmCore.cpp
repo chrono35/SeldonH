@@ -1,6 +1,9 @@
 #include "LlmCore.h"
 
 #include "llama.h"
+#ifdef SELDON_GGML_DL
+#include "ggml-backend.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -44,6 +47,21 @@ size_t utf8CompletePrefix(const std::string& s)
 
 } // namespace
 
+#ifdef SELDON_GGML_DL
+// llama.cpp compilé avec GGML_BACKEND_DL : les backends sont des bibliothèques séparées, chargées ici.
+//   CPU    : une variante par jeu d'instructions (x64, sse42, haswell, skylakex, zen4…), la meilleure est choisie ;
+//   Vulkan : chargé seulement si le pilote graphique fournit vulkan-1.dll / libvulkan.so.1, sinon ignoré.
+// Recherche : dossier demandé, puis dossier llama.cpp de développement, puis dossier de l'exécutable.
+static void loadBackends(const std::string& dir)
+{
+    if (!dir.empty()) ggml_backend_load_all_from_path(dir.c_str());
+#ifdef SELDON_LLAMA_DIR
+    if (ggml_backend_reg_count() == 0) ggml_backend_load_all_from_path(SELDON_LLAMA_DIR);
+#endif
+    if (ggml_backend_reg_count() == 0) ggml_backend_load_all();
+}
+#endif
+
 LlmCore::LlmCore() = default;
 LlmCore::~LlmCore() { unload(); }
 
@@ -52,10 +70,19 @@ bool LlmCore::load(const LlmParams& p, std::string& err, const std::function<boo
     unload();
 
     static std::once_flag once;
-    std::call_once(once, [] {
-        llama_backend_init();
+    std::call_once(once, [&p] {
         llama_log_set(logCallback, nullptr);
+#ifdef SELDON_GGML_DL
+        loadBackends(p.backendDir);
+#endif
+        llama_backend_init();
     });
+#ifdef SELDON_GGML_DL
+    if (ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU) == nullptr) {
+        err = "Bibliothèques de calcul introuvables (ggml-cpu-*) : réinstaller SeldonH.";
+        return false;
+    }
+#endif
 
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = p.nGpuLayers;

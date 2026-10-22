@@ -4,6 +4,8 @@
 // Domaine : age ± 5 σ (mode none) ou intervalle où g(t) ∈ age ± 5 σ (mode eq).
 #pragma once
 
+#include <QRegularExpression>
+
 #include "../common/Method.h"
 
 namespace seldon {
@@ -13,6 +15,8 @@ public:
     QString id() const override { return QStringLiteral("gauss"); }
     QString title() const override { return QStringLiteral("Gauss"); }
     QVector<QJsonObject> parse(const QString& question) const override;
+    QRegularExpression context() const override;
+    bool usesValueErrors() const override { return true; }
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
 };

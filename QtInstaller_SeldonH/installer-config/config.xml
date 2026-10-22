@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Installer>
+    <Name>SeldonH</Name>
+    <Version>1.0.0</Version>
+    <Title>SeldonH</Title>
+    <Publisher>ChronoModel Team</Publisher>
+    <ProductUrl>https://chronomodel.com</ProductUrl>
+
+    <!-- Windows : C:\Program Files\SeldonH. Linux : remplacé par ~/SeldonH dans controlscript.qs
+         (/opt demanderait les droits root). -->
+    <TargetDir>@ApplicationsDir@/SeldonH</TargetDir>
+    <StartMenuDir>SeldonH</StartMenuDir> <!-- Uniquement sur Windows -->
+
+    <!-- Icône de la fenêtre (PNG) et de l'exécutable de l'installeur (.ico sous Windows, .icns sous macOS ; sans extension) -->
+    <InstallerWindowIcon>seldonh_256.png</InstallerWindowIcon>
+    <InstallerApplicationIcon>SeldonH</InstallerApplicationIcon>
+    <Logo>seldonh_128.png</Logo>
+    <MaintenanceToolName>SeldonH_uninstaller</MaintenanceToolName>
+
+    <!-- Case « Lancer SeldonH » en fin d'installation (Linux : remplacé par le lanceur SeldonH.sh dans controlscript.qs) -->
+    <RunProgram>@TargetDir@/SeldonH</RunProgram>
+    <RunProgramDescription>Lancer SeldonH</RunProgramDescription>
+
+    <ControlScript>controlscript.qs</ControlScript>
+    <WizardShowPageList>true</WizardShowPageList>
+    <WizardStyle>Modern</WizardStyle>
+</Installer>

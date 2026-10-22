@@ -7,11 +7,18 @@
 
 namespace seldon {
 
+// Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
+QRegularExpression TlMethod::context() const
+{
+    static const QRegularExpression re(R"((\btl\b|\bosl\b|\birsl\b|thermoluminescen|luminescence|\bt\.l\.))");
+    return re;
+}
+
 QVector<QJsonObject> TlMethod::parse(const QString& question) const
 {
     QVector<QJsonObject> out;
     const QString q = text::fold(question);
-    static const QRegularExpression ctx(R"((\btl\b|\bosl\b|\birsl\b|thermoluminescen|luminescence|\bt\.l\.))");
+    const QRegularExpression ctx = context();
     if (!ctx.match(q).hasMatch()) return out;
 
     static const QRegularExpression refRe(

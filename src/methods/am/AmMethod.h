@@ -5,6 +5,8 @@
 // Paramètres : process, inc, dec, alpha95, field, errorF, curveI, curveD, curveF, steps (défaut 500).
 #pragma once
 
+#include <QRegularExpression>
+
 #include "../common/Method.h"
 
 namespace seldon {
@@ -15,6 +17,7 @@ public:
     QString title() const override { return QStringLiteral("Archéomagnétisme"); }
     QStringList curveNames() const override;
     QVector<QJsonObject> parse(const QString& question) const override;
+    QRegularExpression context() const override;
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
 };

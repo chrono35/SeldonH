@@ -1,0 +1,12 @@
+Modèle de langage embarqué par SeldonH
+======================================
+
+Modèle   : Qwen3.5-4B (équipe Qwen, Alibaba Cloud)
+Fichier  : version quantifiée GGUF publiée par Unsloth
+           https://huggingface.co/unsloth/Qwen3.5-4B-GGUF
+Original : https://huggingface.co/Qwen/Qwen3.5-4B
+
+Ce modèle est distribué selon la licence choisie par ses auteurs, indiquée sur
+la page du modèle original ci-dessus. Il est installé dans le sous-dossier
+« models » de SeldonH et peut être remplacé par tout autre fichier .gguf
+(Préférences ou Fichier > Ouvrir un modèle).

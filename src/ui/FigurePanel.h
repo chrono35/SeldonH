@@ -10,6 +10,7 @@
 
 #include <QImage>
 #include <QJsonObject>
+#include <QPointer>
 #include <QColor>
 #include <QString>
 #include <QVector>
@@ -26,6 +27,8 @@ struct CurveSeries {
     QString          name;
     QVector<double>  x, y;
     QColor           color;          // facultatif ("color": "#rrggbb") ; sinon bleu de ChronoModel pour la 1re série
+    bool             fill = true;    // "fill": false -> trait seul, même si le graphique remplit les HPD
+    double           width = 1.8;    // épaisseur du trait ("width")
 };
 
 struct CurveSpec {
@@ -39,6 +42,8 @@ struct CurveSpec {
     bool                 showYAxis = true;
     // Axe horizontal inversé (les valeurs décroissent vers la droite) : formats d'âge (cal BP…) en ordre chronologique.
     bool                 xReverse = false;
+    // Échelle verticale partant de 0 (densités) ; "yzero": false -> ajustée aux données (traces MCMC…).
+    bool                 yFromZero = true;
     QVector<CurveSeries> series;
 
     // Retourne false (et err) si le JSON est inexploitable.
@@ -50,6 +55,9 @@ class CurveWidget : public QWidget {
 public:
     explicit CurveWidget(const CurveSpec& spec, QWidget* parent = nullptr);
     QImage render(const QSize& size) const;      // pour l'export PNG
+    // Export vectoriel : document SVG de la courbe (taille en pixels, texte et tracés en vecteurs).
+    QByteArray renderSvg(const QSize& size, const QString& title = QString()) const;
+    void setSpec(const CurveSpec& spec) { spec_ = spec; update(); }
 protected:
     void paintEvent(QPaintEvent*) override;
 private:
@@ -60,12 +68,17 @@ private:
 class ImageView : public QWidget {
     Q_OBJECT
 public:
-    explicit ImageView(const QImage& img, QWidget* parent = nullptr);
+    // `svgSource` : contenu d'origine quand l'image vient d'un fichier SVG (réenregistré tel quel en SVG).
+    explicit ImageView(const QImage& img, const QByteArray& svgSource = QByteArray(), QWidget* parent = nullptr);
     QImage image() const { return img_; }
+    QByteArray svgSource() const { return svg_; }
+    // SVG de l'image : le source d'origine s'il existe, sinon l'image matricielle incorporée dans un SVG.
+    QByteArray toSvg(const QString& title = QString()) const;
 protected:
     void paintEvent(QPaintEvent*) override;
 private:
     QImage img_;
+    QByteArray svg_;
 };
 
 class FigurePanel : public QWidget {
@@ -74,9 +87,15 @@ public:
     explicit FigurePanel(QWidget* parent = nullptr);
 
     bool addImageFile(const QString& path);
-    void addImage(const QImage& img, const QString& title);
+    void addImage(const QImage& img, const QString& title, const QByteArray& svgSource = QByteArray());
+    // Enregistre l'onglet courant (courbe ou image) en PNG ou en SVG selon l'extension de `path`.
+    bool saveCurrentTo(const QString& path, QString* err = nullptr) const;
     bool addCurvesJson(const QJsonObject& o, QString* err = nullptr);
     void addCurves(const CurveSpec& spec);
+    // Onglet de courbes ajouté en dernier (nul s'il a été fermé).
+    QWidget* lastCurves() const { return lastCurves_; }
+    // Remplace le contenu d'un onglet de courbes existant (ex. datations supplémentaires de la même question).
+    bool replaceCurvesJson(QWidget* page, const QJsonObject& o, QString* err = nullptr);
     int  count() const;
     void clearCurves();                  // retire les onglets de courbes (garde les images et l'aide)
     // Ajoute (ou active si déjà présent) un onglet quelconque, par ex. l'aide. Le panneau en prend la propriété.
@@ -92,6 +111,7 @@ private slots:
 
 private:
     QTabWidget* tabs_;
+    QPointer<CurveWidget> lastCurves_;
     QWidget*    placeholder_;
     void updatePlaceholder();
 };

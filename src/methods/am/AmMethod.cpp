@@ -37,11 +37,18 @@ QString defaultCurve(char kind, const QString& foldedQuestion)
 
 QStringList AmMethod::curveNames() const { return CurveStore::names(id()); }
 
+// Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
+QRegularExpression AmMethod::context() const
+{
+    static const QRegularExpression re(R"((archeomag|archaeomag|paleomag|inclinaison|declinaison|alpha|α|\ba95\b))");
+    return re;
+}
+
 QVector<QJsonObject> AmMethod::parse(const QString& question) const
 {
     QVector<QJsonObject> out;
     const QString q = text::fold(question);
-    static const QRegularExpression ctx(R"((archeomag|archaeomag|paleomag|inclinaison|declinaison|alpha|α|\ba95\b))");
+    const QRegularExpression ctx = context();
     if (!ctx.match(q).hasMatch()) return out;
 
     auto grab = [&](const QString& pattern, double& v) {

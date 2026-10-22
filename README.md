@@ -2,7 +2,7 @@
 
 Assistant local (Qt/C++ + llama.cpp) d'aide à la datation pour archéologues :
 datations simples, **création de modèles ChronoModel** (export `.chr`) et **interprétation des résultats**.
-Tout s'exécute sur la machine : aucune donnée n'est envoyée sur Internet.
+Les calculs de datation s'exécutent toujours sur la machine. Avec le modèle local (llama.cpp), aucune donnée n'est envoyée sur Internet ; avec un modèle distant (API compatible OpenAI, en option), les questions, la conversation, les compétences sélectionnées et les fichiers joints sont envoyés au service choisi.
 
 ## Architecture
 

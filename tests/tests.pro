@@ -1,5 +1,5 @@
 # Tests unitaires : qmake tests/tests.pro && make && ./tst_core
-QT += core gui widgets network testlib
+QT += core gui widgets network svg testlib
 CONFIG += c++17 console testcase
 TARGET = tst_core
 INCLUDEPATH += ..

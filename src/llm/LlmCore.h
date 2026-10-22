@@ -35,7 +35,10 @@ struct LlmParams {
     int  nCtx       = 8192;   // taille du contexte (tokens)
     int  nBatch     = 512;    // taille de lot pour l'évaluation du prompt
     int  nThreads   = 0;      // 0 = automatique
-    int  nGpuLayers = 999;    // 999 = tout sur le GPU (Metal) ; 0 = CPU seul
+    int  nGpuLayers = 999;    // 999 = tout sur le GPU (Metal, Vulkan) ; 0 = CPU seul
+    // Windows / Linux : dossier des backends llama.cpp chargés dynamiquement (ggml-cpu-*.dll, ggml-vulkan.dll /
+    // libggml-*.so). Vide = dossier de l'exécutable. Sans effet avec llama.cpp statique (macOS).
+    std::string backendDir;
 };
 
 struct SamplingParams {

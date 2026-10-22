@@ -3,6 +3,8 @@
 // Le modèle de langage peut aussi demander un calcul lui-même avec un bloc de code « calcul » (JSON).
 #pragma once
 
+#include <functional>
+
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
@@ -18,6 +20,7 @@ struct RunOutcome {
     QString     noticeHtml;         // fiche affichée dans le dialogue
     QString     promptBlock;        // valeurs exactes transmises au modèle
     QJsonObject plot;               // bloc « plot » (vide si rien à tracer)
+    QVector<QJsonObject> extraPlots; // figures supplémentaires dans leur propre onglet (traces MCMC d'un événement)
 };
 
 class MethodRunner {
@@ -32,11 +35,45 @@ public:
     // Une demande de création de modèle ne déclenche aucun calcul automatique (résultat vide).
     static RunOutcome analyzeQuestion(const QString& question, DateFormat format = DateFormat::BcAd);
 
-    // Exécute des demandes déjà structurées (JSON avec "method").
+    // Niveau de confiance des intervalles HPD demandé dans la question, en % (« HPD à 99 % », « niveau de confiance 90 »,
+    // « intervalle à 99,7 % »). 0 si la question n'en précise pas (95 % par défaut) ou hors de [50 ; 100[.
+    // L'α95 archéomagnétique n'est pas pris pour un niveau de confiance.
+    static double requestedLevel(const QString& question);
+    static constexpr double kDefaultLevel = 95.0;
+
+    // Événement (Event de ChronoModel) estimé par MCMC à partir de plusieurs datations :
+    //   {"method":"event", "name":"US 12", "dates":[{"method":"c14",…}, {"method":"tl",…, "wiggle":{…}}],
+    //    "level":95, "tmin":-1000, "tmax":2000, "mcmc":{"num_iter":100000, "num_proc":4, "seeds":[…], …}}
+    // Paramètres MCMC absents = valeurs par défaut de ChronoModel. "wiggle" (facultatif) : {"type":"fixed","value":v},
+    // {"type":"range","min":a,"max":b} ou {"type":"gaussian","mean":m,"error":e}.
+    // Vrai si la question demande de combiner ses datations en un événement (« calcule l'événement… », « combine »).
+    static bool asksEvent(const QString& question);
+    // Paramètres MCMC et période d'étude cités dans la question (« 200 000 itérations », « 8 chaînes », « graines 1;2 »).
+    static QJsonObject mcmcFromQuestion(const QString& question, double* tmin = nullptr, double* tmax = nullptr);
+    // Avancement des calculs longs (MCMC) : texte, fraction 0..1 ; retourner false interrompt. Vide par défaut.
+    static void setProgressHandler(std::function<bool(const QString&, double)> handler);
+
+    // Exécute des demandes déjà structurées (JSON avec "method"). Clé facultative "level" : niveau de confiance (%) des
+    // intervalles HPD, 95 par défaut ; les HPD à 95 % et 68 % restent toujours données en complément.
     static RunOutcome run(const QVector<QJsonObject>& requests, DateFormat format = DateFormat::BcAd);
 
-    // Blocs ```calcul ... ``` d'une réponse du modèle : objet JSON ou tableau d'objets, "method" obligatoire.
+    // Blocs ```calcul ... ``` (ou ```json avec "method") d'une réponse du modèle : objet JSON, tableau d'objets ou
+    // objets séparés par des virgules ; "method" obligatoire. Chaque demande est normalisée (normalizeRequest).
     static QVector<QJsonObject> extractCalcBlocks(const QString& answer);
+
+    // Demandes JSON écrites dans la question (fragment collé d'un bloc chronomodel ou d'un .chr) :
+    //   « calcul Event avec ces deux dates {"method":"c14","age":2570,"error":35}, {"method":"c14",…} ».
+    static QVector<QJsonObject> jsonRequests(const QString& text);
+
+    // Décalage (wiggle) écrit dans la question : « wiggle entre 100 et 300 » (range), « décalage de 20 ± 5 »
+    // (gaussian), « wiggle de 20 ans » (fixed). Objet vide si aucun.
+    static QJsonObject wiggleFromQuestion(const QString& question);
+
+    // Met une demande (ou une datation d'événement) dans la forme attendue par les méthodes :
+    //  - « method » en minuscules, alias (14c, radiocarbone, osl, archeomag…) et noms d'outils (calculer_evenement…) ;
+    //  - datation au format .chr de ChronoModel ({"plugin_id":"14c","data":{"age":…,"error":…,"ref_curve":…}}) aplatie ;
+    //  - nombres écrits en texte (« "35" », « "2,5" ») convertis.
+    static QJsonObject normalizeRequest(QJsonObject request);
 };
 
 } // namespace seldon

@@ -31,12 +31,19 @@ std::pair<double, double> solveQuadratic(double y, double a, double b, double c)
 
 } // namespace
 
+// Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
+QRegularExpression GaussMethod::context() const
+{
+    static const QRegularExpression re(R"((gauss|loi normale|distribution normale|\bn\s*\(|normale))");
+    return re;
+}
+
 QVector<QJsonObject> GaussMethod::parse(const QString& question) const
 {
     QVector<QJsonObject> out;
     const QString q = text::fold(question);
 
-    static const QRegularExpression ctx(R"((gauss|loi normale|distribution normale|\bn\s*\(|normale))");
+    const QRegularExpression ctx = context();
     if (!ctx.match(q).hasMatch()) return out;
 
     // N(1200, 50) ou N(1200; 50)

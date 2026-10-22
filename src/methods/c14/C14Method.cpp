@@ -35,14 +35,20 @@ QString C14Method::defaultCurve(const QString& q)
     return family + "20";
 }
 
+// Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
+QRegularExpression C14Method::context() const
+{
+    static const QRegularExpression re(R"((c\s?-?14|14\s?-?c|carbone\s*14|radiocarbon|\bbp\b|calibr|intcal|shcal|marine\s?(?:20|13|09|04)))");
+    return re;
+}
+
 QVector<QJsonObject> C14Method::parse(const QString& question) const
 {
     QVector<QJsonObject> out;
     const QString q = text::fold(question);
 
     // Contexte radiocarbone obligatoire : évite de prendre n'importe quel « 120 ± 5 » pour une date 14C.
-    static const QRegularExpression ctx(
-        R"((c\s?-?14|14\s?-?c|carbone\s*14|radiocarbon|\bbp\b|calibr|intcal|shcal|marine\s?(?:20|13|09|04)))");
+    const QRegularExpression ctx = context();
     if (!ctx.match(q).hasMatch()) return out;
 
     const QString curve = defaultCurve(q);

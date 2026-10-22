@@ -45,6 +45,7 @@ struct ToolOutcome {
 ToolOutcome execute(const QString& name, const QString& argumentsJson, DateFormat format);
 
 // Réunit plusieurs courbes (même format de dates) en un seul graphique pour comparer.
+// Superpose les courbes de plusieurs blocs « plot » (une datation déjà présente, de même nom, n'est pas répétée).
 QJsonObject mergePlots(const QVector<QJsonObject>& plots);
 
 } // namespace tools

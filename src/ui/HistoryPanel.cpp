@@ -32,6 +32,7 @@ void CollapseStrip::paintEvent(QPaintEvent*)
     p.fillRect(rect(), hover_ ? pal.color(QPalette::Midlight) : pal.color(QPalette::Window));
     p.setPen(pal.color(QPalette::Mid));
     p.drawLine(width() - 1, 0, width() - 1, height());
+    if (isChecked()) p.drawLine(0, 0, 0, height());      // volet ouvert : la bande le borde à droite
 
     p.setPen(pal.color(QPalette::ButtonText));
     // Flèche en haut : ◀ quand le volet est ouvert (cliquer le replie), ▶ quand il est replié.

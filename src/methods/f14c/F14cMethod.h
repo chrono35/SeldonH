@@ -3,6 +3,8 @@
 // Formule de ChronoModel (plugin_F14C) :  L(t) = exp( -½ (F - μ(t))² / v ) / √v ,  v = σ_courbe² + σ_mesure²
 #pragma once
 
+#include <QRegularExpression>
+
 #include "../common/Method.h"
 #include "../common/RefCurve.h"
 
@@ -14,6 +16,8 @@ public:
     QString title() const override { return QStringLiteral("Fraction moderne (F14C)"); }
     QStringList curveNames() const override;
     QVector<QJsonObject> parse(const QString& question) const override;
+    QRegularExpression context() const override;
+    bool usesValueErrors() const override { return true; }
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
 

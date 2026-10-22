@@ -12,6 +12,9 @@ if [[ "$(uname)" == "Darwin" ]]; then
   LIBS=(-lllama -lggml)
   if [[ -f "$P/lib/libggml-metal.a" ]]; then LIBS+=(-lggml-metal -framework Metal -framework MetalKit); fi
   LIBS+=(-lggml-blas -lggml-cpu -lggml-base -framework Accelerate -framework Foundation)
+elif [[ -e "$P/lib/libllama.so" ]]; then
+  # Linux, backends dynamiques (scripts/build_llama.sh) : chargés depuis $P/lib au démarrage
+  LIBS=(-DSELDON_GGML_DL "-DSELDON_LLAMA_DIR=\"$P/lib\"" -lllama -lggml -lggml-base "-Wl,-rpath,$P/lib")
 else
   LIBS=(-lllama -lggml -lggml-cpu -lggml-base -lgomp -ldl -lpthread)
 fi
