@@ -145,6 +145,22 @@
 </ul>
 <p>Si l'assistant calcule ensuite d'autres dates pour la même question, elles s'ajoutent à cette figure au lieu d'ouvrir un nouvel onglet. Pour estimer <b>une date commune</b> à partir de ces datations, voir <a href="#evenement">Combiner des datations en un événement</a>.</p>
 
+<h3 id="wiggle">Datation avec un décalage (wiggle)</h3>
+<p>Quand l'échantillon n'est pas contemporain de ce que vous voulez dater (vieux bois, cernes comptés jusqu'à l'écorce, durée d'utilisation connue…), donnez le <b>décalage δ</b> : SeldonH calcule la densité de <b>t + δ</b>, comme ChronoModel, par convolution de la densité de la date par la loi de δ. δ &gt; 0 signifie que ce que l'on date est plus récent que l'échantillon.</p>
+<table>
+  <tr><th>Décalage</th><th>Exemple (cliquez)</th><th>Effet</th></tr>
+  <tr><td><b>Fixe</b></td>
+      <td><a class="ex" data-method="c14">C14 2500 ± 30 BP, wiggle de 25 ans</a></td>
+      <td>La densité est translatée de δ.</td></tr>
+  <tr><td><b>Intervalle</b> (δ uniforme)</td>
+      <td><a class="ex" data-method="gauss">date gaussienne N(250, 10) avec un wiggle entre 100 et 300</a></td>
+      <td>Densité élargie : ici 352 → 548 apr. J.-C. (HPD 95 %), moyenne 450.</td></tr>
+  <tr><td><b>Gaussien</b></td>
+      <td><a class="ex" data-method="tl">TL 800 ± 60 ans mesuré en 2015, décalage de 20 ± 5 ans</a></td>
+      <td>Densité élargie : les écarts-types s'ajoutent en quadrature.</td></tr>
+</table>
+<p>Mots reconnus : « wiggle », « décalage », « delta » ou « δ » (mais pas « delta R » / « ΔR », réservoir marin du 14C). Le décalage n'est appliqué automatiquement que si la question contient <b>une seule</b> datation ; avec plusieurs, précisez à l'assistant laquelle est décalée, ou utilisez un <a href="#evenement">événement</a>.</p>
+
 <h3>Dates et échelles de temps</h3>
 <ul>
   <li><b>BP</b> = années avant 1950, réservé à l'âge radiocarbone conventionnel. 1954 ± 50 BP n'a rien d'incohérent : c'est environ 2 000 ans.</li>
@@ -178,11 +194,22 @@
   <li><a class="ex" data-method="event">Combine en un événement : C14 3560 ± 20 BP et archéomagnétisme : inclinaison 65°, alpha95 = 1</a></li>
   <li><a class="ex" data-method="event">Calcule l'événement avec C14 2500 ± 30 BP et C14 2530 ± 25 BP, 200 000 itérations, 8 chaînes, graines 1;2;3;4;5;6;7;8</a></li>
 </ul>
-<p>Réglages possibles dans la phrase : nombre d'<b>itérations</b>, de <b>chaînes</b>, <b>burn-in</b>, <b>thinning</b>, <b>graines</b> (pour reproduire exactement un calcul) et <b>période d'étude</b> (« période d'étude -1000 à 0 ») ; sans indication, la période d'étude, loi a priori uniforme de θ, est calculée d'après les datations. Un niveau de confiance autre que 95 % se demande comme pour une date seule. Le décalage δ entre l'échantillon et l'événement (wiggle : fixe, intervalle ou gaussien) se donne à l'assistant, qui le transmet au calcul.</p>
+<p>Réglages possibles dans la phrase : nombre d'<b>itérations</b>, de <b>chaînes</b>, <b>burn-in</b>, <b>thinning</b>, <b>graines</b> (pour reproduire exactement un calcul), <b>période d'étude</b> (« période d'étude -1000 à 0 ») et <b>« pas de recuit »</b> (recuit simulé désactivé, comme <i>Recurrence = 0</i> dans ChronoModel) ; sans indication, la période d'étude, loi a priori uniforme de θ, est calculée d'après les datations. Un niveau de confiance autre que 95 % se demande comme pour une date seule.</p>
+
+<h3 id="evenement-wiggle">Événement dont les dates ont des décalages différents</h3>
+<p>Chaque datation d'un événement peut avoir son propre décalage δ, de type différent (fixe, intervalle, gaussien) ou aucun. Dans l'événement, δ n'est pas une simple convolution : c'est une inconnue du MCMC, et c'est <b>t + δ</b> qui est rattaché à la date θ de l'événement (modèle de ChronoModel). Pour donner des décalages différents, collez les datations au format JSON, une par objet, avec un champ <code>wiggle</code> :</p>
+<ul>
+  <li><a class="ex" data-method="event">Calcule l'événement « Four » avec ces dates : {"type":"gauss","name":"Charbon","age":1000,"error":30,"wiggle":{"type":"range","min":10,"max":40}}, {"type":"gauss","name":"Os","age":1030,"error":25}, {"type":"tl","name":"TL-1","age":1000,"error":60,"ref_year":2015,"wiggle":{"type":"fixed","value":15}}, {"type":"gauss","name":"Bois","age":1000,"error":40,"wiggle":{"type":"gaussian","mean":30,"error":10}}</a></li>
+</ul>
+<p>Les trois formes de <code>wiggle</code> : <code>{"type":"fixed","value":15}</code>, <code>{"type":"range","min":10,"max":40}</code>, <code>{"type":"gaussian","mean":30,"error":10}</code>. On peut aussi coller les dates telles qu'elles sont dans un fichier <code>.chr</code> de ChronoModel (avec <code>plugin_id</code>, <code>data</code> et <code>delta_type</code>) : SeldonH les convertit. Ou décrire les décalages en phrase à l'assistant, qui appelle alors le calcul :</p>
+<ul>
+  <li><a class="ex">Calcule l'événement « Four » : C14 2500 ± 30 BP sur charbon avec un wiggle entre 10 et 40 ans, et TL 2600 ± 90 ans mesuré en 2015, sans décalage</a></li>
+</ul>
 <p>La fiche de résultat donne :</p>
 <ul>
   <li><b>θ a posteriori</b> : HPD, MAP, moyenne, quartiles ;</li>
   <li>pour chaque datation : sa calibration seule, sa valeur a posteriori t<sub>i</sub> dans l'événement et sa dispersion σ médiane (petite : la date s'accorde avec les autres ; grande : elle est discordante) ;</li>
+  <li>pour une datation avec décalage : la calibration de <b>t + δ</b>, puis deux valeurs a posteriori, <b>t</b> (la date de l'échantillon) et <b>t + δ</b> (la date ramenée à l'événement, celle qui se compare à θ) ;</li>
   <li>les <b>critères de convergence</b> et les paramètres MCMC, avec les graines utilisées et l'état de l'adaptation de chaque chaîne.</li>
 </ul>
 <p>Deux figures : la densité de θ (remplie) avec les calibrations des datations (en traits), et dans un autre onglet les <b>traces de θ</b> de chaque chaîne, qui doivent se superposer sans dérive.</p>
@@ -201,9 +228,10 @@
 <p>Exemples de demandes :</p>
 <ul>
   <li><a class="ex">Fais-moi un modèle ChronoModel avec deux phases, Phase ancienne puis Phase récente. US 12 (phase ancienne) : date gaussienne -520 ± 35. US 10 (phase récente) : date gaussienne -430 ± 40. US 12 est plus ancienne que US 10.</a></li>
+  <li><a class="ex">Fais-moi un modèle ChronoModel : l'US 5 est datée par une date gaussienne 1000 ± 30 avec un wiggle entre 10 et 40 ans et par une date gaussienne 1030 ± 25 sans décalage ; l'US 4, date gaussienne 1100 ± 30 avec un décalage fixe de -10 ans, est plus récente que l'US 5.</a></li>
   <li><a class="ex">Quelles informations te faut-il pour construire un modèle de ma stratigraphie ?</a></li>
 </ul>
-<p>Ce qui est exporté aujourd'hui : événements, phases, dates <b>gaussiennes</b>, <b>uniformes</b>, <b>luminescence (TL/OSL)</b> et <b>archéomagnétiques</b>, bornes, contraintes entre événements et entre phases. Les dates radiocarbone et les densités tabulées ne sont pas encore exportées : saisissez-les dans ChronoModel (plugins 14C et Density) après avoir ouvert le fichier.</p>
+<p>Ce qui est exporté aujourd'hui : événements, phases, dates <b>gaussiennes</b>, <b>uniformes</b>, <b>radiocarbone (14C)</b>, <b>luminescence (TL/OSL)</b> et <b>archéomagnétiques</b>, avec leur <b>décalage (wiggle)</b> fixe, intervalle ou gaussien (champs <code>delta_*</code> du <code>.chr</code>), bornes, contraintes entre événements et entre phases, réglages MCMC demandés (dont « pas de recuit »). Les densités tabulées ne sont pas encore exportées : saisissez-les dans ChronoModel (plugin Density) après avoir ouvert le fichier. Pour le radiocarbone, la courbe (IntCal20 par défaut) doit être installée dans ChronoModel.</p>
 <table><tr><td class="warn"><b>À vérifier :</b> ouvrez toujours le <code>.chr</code> dans ChronoModel et contrôlez les événements, les phases et le sens des contraintes avant de lancer le calcul.</td></tr></table>
 
 <h2 id="interpreter">6. Interpréter des résultats</h2>
@@ -249,6 +277,35 @@ Les règles et connaissances, en Markdown, courtes et précises.
   <li>Soyez concis : un petit modèle suit mieux une règle courte qu'un long exposé. Ne mettez jamais de valeurs de courbes ni de résultats inventés.</li>
 </ul>
 
+<h3 id="courbes">Ajouter des courbes de référence</h3>
+<p>SeldonH cherche une courbe de calibration dans cet ordre : <b>votre dossier de courbes</b>, puis le dossier des courbes de <b>ChronoModel</b> (<code>Calib</code>, s'il est installé sur cet ordinateur ; option du menu <i>Courbes</i>), puis les <b>courbes intégrées</b>. Une courbe du même nom dans votre dossier remplace celle de ChronoModel ou l'intégrée.</p>
+<ol>
+  <li>Menu <i>Courbes &gt; Ouvrir le dossier des courbes</i> : il contient les sous-dossiers <code>14C</code>, <code>F14C</code> et <code>AM</code>, comme le dossier <code>Calib</code> de ChronoModel.</li>
+  <li>Déposez le fichier au format de ChronoModel : <code>.14c</code> (format IntCal) pour le radiocarbone et le F14C, <code>.ref</code> (année, valeur, erreur à 1σ) pour l'archéomagnétisme.</li>
+  <li>Menu <i>Courbes &gt; Recharger les courbes</i>, puis <i>Courbes disponibles</i> pour vérifier. La courbe se désigne par son nom de fichier sans extension (« courbe marine20 », « curve: mon_fichier »).</li>
+</ol>
+<p>Tout reste sur l'ordinateur : aucune courbe n'est téléchargée.</p>
+
+<h3 id="density">Créer un fichier de densité pour ChronoModel</h3>
+<p>Le plugin <b>Density</b> de ChronoModel utilise une densité tabulée (fichier <code>.csv</code>) comme datation. SeldonH en crée une à partir d'une loi classique : <b>normale</b> (moyenne, écart-type), <b>log-normale</b> (médiane et facteur), <b>uniforme</b> (min, max), <b>triangulaire</b> (min, mode, max), <b>trapézoïdale</b> (min, début et fin du plateau, max), <b>exponentielle</b> (moyenne), <b>gamma</b> (moyenne et écart-type) ou <b>bêta</b> (α, β sur un intervalle).</p>
+<p>La loi est placée sur l'axe du temps : t = décalage + x, ou, pour une durée <b>comptée vers le passé</b>, t = décalage − x.</p>
+
+<p><b>Exemple.</b> Un four est abandonné en 1200 ; sa dernière utilisation a eu lieu quelques décennies avant, le plus probablement une trentaine d'années, rarement plus d'un siècle. Une loi log-normale de médiane 30 ans et de facteur 2, comptée vers le passé depuis 1200, traduit cette connaissance :</p>
+<p><a class="ex">Crée un fichier de densité log-normale, médiane 30 ans, facteur 2, comptée vers le passé depuis 1200, nommé abandon_four</a></p>
+<p>L'assistant demande le calcul à SeldonH :</p>
+<pre><code>{"method":"density_file","law":"lognormal","median":30,"factor":2,
+ "offset":1200,"reverse":true,"name":"abandon_four"}</code></pre>
+<p>SeldonH trace la densité dans le panneau de droite et donne son résumé : médiane 1170, mode 1181, HPD à 95 % [1105 ; 1196]. La fiche se termine par le lien <i>Enregistrer le fichier…</i>, qui propose directement le dossier <code>Calib/Density</code> de ChronoModel. Le fichier <code>abandon_four.csv</code> commence ainsi :</p>
+<pre><code>// SeldonH : loi log-normale (médiane 30, facteur 2) ; t = 1200 − x (compté vers le passé) ; 481 valeurs de 720 à 1200 (pas 1)
+720
+1200
+4.0224209e-07
+4.079604e-07
+…</code></pre>
+<p>Format du plugin Density : une ligne de commentaire, puis l'année de début (tmin), l'année de fin (tmax) et une valeur de densité par année, de tmin à tmax. Inutile de normaliser : ChronoModel ramène l'aire à 1.</p>
+<p>Relancez ChronoModel : la densité apparaît dans le plugin Density. Dans un modèle préparé par SeldonH, elle s'écrit <code>{"type":"density","curve":"abandon_four.csv"}</code>.</p>
+<p>Autres exemples : <a class="ex">Crée un fichier de densité uniforme entre 1100 et 1500 au pas de 10 ans</a> ; <a class="ex">Crée un fichier de densité triangulaire de 900 à 1000, mode 980</a>.</p>
+
 <h2 id="reglages">9. Préférences</h2>
 <p>Menu <i>Édition &gt; Préférences…</i> :</p>
 <table>
@@ -263,7 +320,7 @@ Les règles et connaissances, en Markdown, courtes et précises.
   <tr><td>Longueur max. d'une réponse</td><td>Nombre maximal de tokens générés.</td></tr>
   <tr><td>Mode réflexion</td><td>Le modèle raisonne avant de répondre : plus lent, utile pour les cas complexes.</td></tr>
   <tr><td>Appel d'outils (modèle distant)</td><td>Case cochée par défaut. Le modèle distant peut alors <b>demander lui-même</b> un calcul (calibration, HPD, archéomagnétisme…) : SeldonH l'exécute sur votre ordinateur avec les méthodes de ChronoModel, puis lui renvoie les valeurs exactes. Seuls la demande (âge, erreur, courbe) et le résultat sont transmis au serveur. Si le serveur ou le modèle ne gère pas les outils, SeldonH le détecte, vous le dit et utilise à la place un bloc de calcul dans la réponse. Le modèle local fonctionne toujours avec ce bloc.</td></tr>
-  <tr><td>Budget des compétences</td><td>Texte maximal de fiches ajouté à chaque question.</td></tr>
+  <tr><td>Budget des compétences</td><td>Nombre maximal de caractères de fiches de compétences ajoutés à chaque question (6000 par défaut, soit environ 1 700 tokens). Plus grand : l'assistant reçoit plus de connaissances, mais il reste moins de place dans la taille du contexte et la réponse démarre plus lentement.</td></tr>
   <tr><td>Dossier des compétences</td><td>Où SeldonH lit vos fiches personnelles.</td></tr>
   <tr><td>Format des dates</td><td>Comme dans ChronoModel : BC/AD (défaut), BCE/CE, âge cal. BP (1950 − année), âge cal. B2K, date cal. BP/B2K, ka, Ma. Il s'applique aux fiches de résultat et aux graphiques (l'axe est alors inversé pour garder l'ordre chronologique). Une demande dans la question le remplace pour cette question : <a class="ex" data-method="c14">C14 de 3560 ± 20 BP, donne le résultat en cal BP</a></td></tr>
   <tr><td>Enregistrer automatiquement les conversations</td><td>Case cochée par défaut : alimente le volet Historique. Décochée, rien de nouveau n'est conservé ; les conversations déjà enregistrées restent jusqu'à leur suppression.</td></tr>
@@ -273,8 +330,8 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <h2 id="limites">10. Limites connues</h2>
 <ul>
   <li>Le modèle de langage peut se tromper ; les <b>valeurs de calcul</b> (intervalles, HPD) sont celles de l'application et font foi sur celles du texte.</li>
-  <li>Export <code>.chr</code> : pas encore de dates radiocarbone ni de densités tabulées ; vérifier le fichier dans ChronoModel.</li>
-  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04, la combinaison de dates (bouton « Combine ») et la calibration wiggle d'une date seule. Le décalage δ (wiggle) est en revanche pris en compte dans un <a href="#evenement">événement</a>.</li>
+  <li>Export <code>.chr</code> : pas encore de densités tabulées ; vérifier le fichier dans ChronoModel.</li>
+  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04, et la combinaison de dates (bouton « Combine »). Le décalage δ (wiggle) est pris en compte pour une <a href="#wiggle">date seule</a> comme dans un <a href="#evenement-wiggle">événement</a>.</li>
   <li>Une datation isolée, ou un événement seul, n'est pas un modèle : l'effet des contraintes stratigraphiques et des phases se calcule dans ChronoModel.</li>
 </ul>
 

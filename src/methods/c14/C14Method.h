@@ -19,6 +19,7 @@ public:
     bool usesValueErrors() const override { return true; }
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
+    QStringList referenceCurves(const QJsonObject& p) const override;
 
     static QString defaultCurve(const QString& foldedQuestion);
     static QString curveTitle(const QString& name);       // « intcal20 » -> « IntCal20 »

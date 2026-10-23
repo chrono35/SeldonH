@@ -21,6 +21,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 #include "../methods/common/Density.h"
@@ -45,6 +46,8 @@ bool CurveSpec::fromJson(const QJsonObject& o, CurveSpec& out, QString* err)
     out.xReverse = o.value("xreverse").toBool(false);
     out.yFromZero = o.value("yzero").toBool(true);
     out.showYAxis = o.contains("yaxis") ? o.value("yaxis").toBool(true) : !out.fill;
+    const QString layout = o.value("layout").toString().trimmed().toLower();
+    out.rows = layout == "rows" || (layout.isEmpty() && out.fill);
 
     auto toVec = [](const QJsonValue& v) {
         QVector<double> r;
@@ -100,11 +103,11 @@ const QColor kCmBrush(49, 112, 176);
 const QColor kPalette[] = { kCmPen, QColor("#e1572a"), QColor("#2aa876"),
                             QColor("#a52ae1"), QColor("#d9a400"), QColor("#2ac3d9") };
 
-// Trait et remplissage de la série d'indice i.
-void seriesColors(const CurveSeries& s, int i, QColor& pen, QColor& brush)
+// Trait et remplissage de la série d'indice i. En lignes, la couleur par défaut est celle de ChronoModel pour toutes.
+void seriesColors(const CurveSeries& s, int i, QColor& pen, QColor& brush, bool rows = false)
 {
     if (s.color.isValid())  { pen = s.color; brush = s.color; }
-    else if (i == 0)        { pen = kCmPen;  brush = kCmBrush; }
+    else if (i == 0 || rows) { pen = kCmPen;  brush = kCmBrush; }
     else                    { pen = kPalette[i % 6]; brush = pen; }
     brush.setAlpha(100);
 }
@@ -145,9 +148,23 @@ QVector<QPair<double, double>> hpdRegions(const CurveSeries& s, double level)
 
 } // namespace
 
-CurveWidget::CurveWidget(const CurveSpec& spec, QWidget* parent) : QWidget(parent), spec_(spec)
+CurveWidget::CurveWidget(const CurveSpec& spec, QWidget* parent) : QWidget(parent)
 {
-    setMinimumSize(280, 200);
+    setSpec(spec);
+}
+
+void CurveWidget::setSpec(const CurveSpec& spec)
+{
+    spec_ = spec;
+    setMinimumSize(280, spec_.stacked() ? std::max(200, 80 + 30 * int(spec_.series.size())) : 200);
+    update();
+}
+
+QSize CurveWidget::exportSize(const QSize& base) const
+{
+    if (!spec_.stacked()) return base;
+    const double k = base.width() / 800.0;
+    return QSize(base.width(), std::max(base.height(), int(std::lround(k * (90 + 70 * spec_.series.size())))));
 }
 
 void CurveWidget::paintEvent(QPaintEvent*)
@@ -205,7 +222,9 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     if (!spec_.yFromZero) ymin -= 0.05 * (ymax - ymin);
     ymax += 0.05 * (ymax - ymin);
 
-    const int left = spec_.showYAxis ? 56 : 26, right = 26, top = spec_.title.isEmpty() ? 14 : 34, bottom = 46;
+    const bool stacked = spec_.stacked();
+    const bool showY = spec_.showYAxis && !stacked;            // en lignes : une échelle par ligne, pas d'axe commun
+    const int left = showY ? 56 : 26, right = 26, top = spec_.title.isEmpty() ? 14 : 34, bottom = 46;
     const QRect pr(r.left() + left, r.top() + top, r.width() - left - right, r.height() - top - bottom);
     if (pr.width() < 20 || pr.height() < 20) return;
 
@@ -232,7 +251,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
         p.setPen(fg);
         p.drawText(QRectF(X(x) - 30, pr.bottom() + 4, 60, 16), Qt::AlignCenter, QString::number(x, 'g', 6));
     }
-    for (double y = std::ceil(ymin / sy) * sy; spec_.showYAxis && y <= ymax + 1e-9; y += sy) {
+    for (double y = std::ceil(ymin / sy) * sy; showY && y <= ymax + 1e-9; y += sy) {
         p.setPen(grid); p.drawLine(QPointF(pr.left(), Y(y)), QPointF(pr.right(), Y(y)));
         p.setPen(fg);
         p.drawText(QRectF(r.left() + 2, Y(y) - 8, left - 8, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
@@ -241,7 +260,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     p.drawRect(pr);
     if (!spec_.xlabel.isEmpty())
         p.drawText(QRect(pr.left(), r.bottom() - 20, pr.width(), 18), Qt::AlignCenter, spec_.xlabel);
-    if (spec_.showYAxis && !spec_.ylabel.isEmpty()) {
+    if (showY && !spec_.ylabel.isEmpty()) {
         p.save();
         p.translate(r.left() + 12, pr.center().y());
         p.rotate(-90);
@@ -249,17 +268,15 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
         p.restore();
     }
 
-    // Courbes
-    p.setClipRect(pr.adjusted(-1, -1, 1, 1));
-    int ci = 0;
-    for (const CurveSeries& s : spec_.series) {
+    // Une courbe (trait + remplissage HPD), avec l'échelle verticale `Yf`.
+    auto drawSeries = [&](const CurveSeries& s, int ci, const std::function<double(double)>& Yf) {
         QColor c, bc;
-        seriesColors(s, ci++, c, bc);
+        seriesColors(s, ci, c, bc, stacked);
         QPainterPath path;
         bool started = false;
         for (int i = 0; i < s.x.size(); ++i) {
             if (std::isnan(s.x[i]) || std::isnan(s.y[i])) { started = false; continue; }
-            const QPointF pt(X(s.x[i]), Y(s.y[i]));
+            const QPointF pt(X(s.x[i]), Yf(s.y[i]));
             if (!started) { path.moveTo(pt); started = true; } else path.lineTo(pt);
         }
         if (spec_.fill && s.fill) {
@@ -270,19 +287,19 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
             std::sort(order.begin(), order.end(), [&](int a, int b) { return s.x[a] < s.x[b]; });
             if (intervals.isEmpty()) {                     // pas de HPD (niveau 0 ou série non positive) : toute l'aire
                 QPainterPath area = path;
-                area.lineTo(X(s.x.last()), Y(0));
-                area.lineTo(X(s.x.first()), Y(0));
+                area.lineTo(X(s.x.last()), Yf(0));
+                area.lineTo(X(s.x.first()), Yf(0));
                 area.closeSubpath();
                 p.fillPath(area, fc);
             } else {
                 for (const auto& iv : intervals) {
                     QPainterPath area;
-                    area.moveTo(X(iv.first), Y(0));
-                    area.lineTo(X(iv.first), Y(valueAt(s, iv.first)));
+                    area.moveTo(X(iv.first), Yf(0));
+                    area.lineTo(X(iv.first), Yf(valueAt(s, iv.first)));
                     for (int i : order)       // par x croissant, même si la série est en ordre décroissant (axe d'âges)
-                        if (s.x[i] > iv.first && s.x[i] < iv.second && !std::isnan(s.y[i])) area.lineTo(X(s.x[i]), Y(s.y[i]));
-                    area.lineTo(X(iv.second), Y(valueAt(s, iv.second)));
-                    area.lineTo(X(iv.second), Y(0));
+                        if (s.x[i] > iv.first && s.x[i] < iv.second && !std::isnan(s.y[i])) area.lineTo(X(s.x[i]), Yf(s.y[i]));
+                    area.lineTo(X(iv.second), Yf(valueAt(s, iv.second)));
+                    area.lineTo(X(iv.second), Yf(0));
                     area.closeSubpath();
                     p.fillPath(area, fc);
                 }
@@ -291,7 +308,41 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
         p.setPen(QPen(c, s.width));
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
+    };
+
+    if (stacked) {
+        // Une série par ligne : axe horizontal commun, chaque densité mise à l'échelle de sa ligne, nom en haut à gauche.
+        const int n = int(spec_.series.size());
+        const double rowH = double(pr.height()) / n;
+        for (int k = 0; k < n; ++k) {
+            const CurveSeries& s = spec_.series[k];
+            const QRectF band(pr.left(), pr.top() + k * rowH, pr.width(), rowH);
+            double smax = 0.0;
+            for (double v : s.y) if (!std::isnan(v)) smax = std::max(smax, v);
+            if (!(smax > 0)) smax = 1.0;
+            const double head = std::min(16.0, band.height() * 0.3);       // place du nom au-dessus de la courbe
+            auto Yk = [&](double y) { return band.bottom() - y / smax * (band.height() - head - 2); };
+            p.save();
+            p.setClipRect(band.adjusted(0, 0, 0, 1));
+            drawSeries(s, k, Yk);
+            p.restore();
+            if (k > 0) {
+                p.setPen(QPen(fg, 0.6));
+                p.drawLine(QPointF(pr.left(), band.top()), QPointF(pr.right(), band.top()));
+            }
+            if (!s.name.isEmpty()) {
+                p.setPen(fg);
+                p.drawText(QRectF(band.left() + 6, band.top() + 1, band.width() - 12, head + 1), Qt::AlignLeft | Qt::AlignVCenter,
+                           p.fontMetrics().elidedText(s.name, Qt::ElideRight, int(band.width()) - 12));
+            }
+        }
+        return;
     }
+
+    // Courbes superposées
+    p.setClipRect(pr.adjusted(-1, -1, 1, 1));
+    int ci = 0;
+    for (const CurveSeries& s : spec_.series) drawSeries(s, ci++, Y);
     p.setClipping(false);
 
     // Légende (séries nommées), largeur adaptée au texte le plus long
@@ -499,9 +550,9 @@ bool FigurePanel::saveCurrentTo(const QString& path, QString* err) const
     auto* v = qobject_cast<ImageView*>(w);
     if (!c && !v) { if (err) *err = tr("Aucune figure à enregistrer."); return false; }
     const QString title = tabs_->tabText(tabs_->currentIndex());
-    const QSize size(1600, 1000);
+    const QSize size = c ? c->exportSize(QSize(1600, 1000)) : QSize();
     if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
-        const QByteArray svg = c ? c->renderSvg(QSize(800, 500), title) : v->toSvg(title);
+        const QByteArray svg = c ? c->renderSvg(c->exportSize(QSize(800, 500)), title) : v->toSvg(title);
         QFile f(path);
         if (svg.isEmpty() || !f.open(QIODevice::WriteOnly) || f.write(svg) != svg.size()) {
             if (err) *err = tr("Impossible d'écrire %1.").arg(path);

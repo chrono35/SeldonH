@@ -9,7 +9,7 @@ namespace seldon {
 // Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
 QRegularExpression UnifMethod::context() const
 {
-    static const QRegularExpression re(R"((uniforme|\bunif\s*\())");
+    static const QRegularExpression re(R"((uniforme|uniform|\bunif\s*\())");
     return re;
 }
 
@@ -17,13 +17,13 @@ QVector<QJsonObject> UnifMethod::parse(const QString& question) const
 {
     QVector<QJsonObject> out;
     const QString q = text::fold(question);
-    if (!q.contains("uniforme") && !QRegularExpression(R"(\bunif\s*\()").match(q).hasMatch()) return out;
+    if (!q.contains("uniform") && !QRegularExpression(R"(\bunif\s*\()").match(q).hasMatch()) return out;
 
     const QString num = QStringLiteral("(-?\\d+(?:[.,]\\d+)?)");
     const QRegularExpression forms[] = {
         QRegularExpression(QStringLiteral("(?:unif\\w*|\\bu)\\s*\\(\\s*") + num + QStringLiteral("\\s*[,;]\\s*") + num + QStringLiteral("\\s*\\)")),
-        QRegularExpression(QStringLiteral("entre\\s+") + num + QStringLiteral("\\s+et\\s+") + num),
-        QRegularExpression(QStringLiteral("de\\s+") + num + QStringLiteral("\\s+(?:a|jusqu'a)\\s+") + num),
+        QRegularExpression(QStringLiteral("(?:entre|between)\\s+") + num + QStringLiteral("\\s+(?:et|and)\\s+") + num),
+        QRegularExpression(QStringLiteral("\\b(?:de|from)\\s+") + num + QStringLiteral("\\s+(?:a|jusqu'a|to)\\s+") + num),
         QRegularExpression(QStringLiteral("min\\w*\\s*[=:]?\\s*") + num + QStringLiteral(".{0,20}?max\\w*\\s*[=:]?\\s*") + num),
     };
     for (const QRegularExpression& re : forms) {

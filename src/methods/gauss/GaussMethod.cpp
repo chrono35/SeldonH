@@ -34,7 +34,7 @@ std::pair<double, double> solveQuadratic(double y, double a, double b, double c)
 // Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
 QRegularExpression GaussMethod::context() const
 {
-    static const QRegularExpression re(R"((gauss|loi normale|distribution normale|\bn\s*\(|normale))");
+    static const QRegularExpression re(R"((gauss|loi normale|distribution normale|normal distribution|\bn\s*\(|normale))");
     return re;
 }
 

@@ -406,6 +406,36 @@ QString protectText(const QString& text, QStringList& rendered)
 
 } // namespace
 
+namespace {
+// Balises HTML en ligne (<br>, <sup>, <b>…) : l'import Markdown de Qt les gère mal
+// (dans un tableau, <br> fait disparaître le reste de la ligne et les lignes suivantes).
+// On les remplace par des marqueurs restitués tels quels après la conversion.
+QString protectHtml(const QString& text, QStringList& rendered)
+{
+    static const QRegularExpression tag(QStringLiteral(
+        "<\\s*(/?)\\s*(br|sup|sub|b|i|u|em|strong|small|s|del|ins|mark|kbd|code)\\s*(/?)\\s*>"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString out;
+    int last = 0;
+    auto it = tag.globalMatch(text);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        out += text.mid(last, m.capturedStart() - last);
+        const QString name = m.captured(2).toLower();
+        QString html;
+        if (name == QLatin1String("br")) html = QStringLiteral("<br />");
+        else if (name == QLatin1String("mark")) html = m.captured(1).isEmpty() ? QStringLiteral("<span style=\"background-color:#fff3a0;\">") : QStringLiteral("</span>");
+        else if (name == QLatin1String("kbd")) html = m.captured(1).isEmpty() ? QStringLiteral("<code>") : QStringLiteral("</code>");
+        else html = QStringLiteral("<%1%2>").arg(m.captured(1), name);
+        rendered << html;
+        out += marker(rendered.size() - 1, false);
+        last = m.capturedEnd();
+    }
+    out += text.mid(last);
+    return out;
+}
+} // namespace
+
 QString latexToHtml(const QString& latex) { return renderOne(latex); }
 
 QString protect(const QString& markdown, QStringList& rendered)
@@ -417,11 +447,11 @@ QString protect(const QString& markdown, QStringList& rendered)
     auto it = code.globalMatch(markdown);
     while (it.hasNext()) {
         const auto m = it.next();
-        out += protectText(markdown.mid(last, m.capturedStart() - last), rendered);
+        out += protectHtml(protectText(markdown.mid(last, m.capturedStart() - last), rendered), rendered);
         out += m.captured(0);
         last = m.capturedEnd();
     }
-    out += protectText(markdown.mid(last), rendered);
+    out += protectHtml(protectText(markdown.mid(last), rendered), rendered);
     return out;
 }
 

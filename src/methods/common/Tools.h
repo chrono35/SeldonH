@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include "DateFormat.h"
@@ -46,7 +47,12 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
 
 // Réunit plusieurs courbes (même format de dates) en un seul graphique pour comparer.
 // Superpose les courbes de plusieurs blocs « plot » (une datation déjà présente, de même nom, n'est pas répétée).
+// Les graphiques de datation (clé « dates » = noms des datations) reçoivent un titre refait avec tous les noms.
 QJsonObject mergePlots(const QVector<QJsonObject>& plots);
+
+// Titre d'un graphique de datation : « Densité calendaire — Ly-1234 », « Densités calendaires — US 12, US 10 »,
+// ou « Densités calendaires (calcul SeldonH) » si aucune datation n'a de nom.
+QString datingPlotTitle(const QStringList& names, int seriesCount);
 
 } // namespace tools
 } // namespace seldon

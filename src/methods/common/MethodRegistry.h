@@ -24,6 +24,7 @@ public:
     // Calcule une demande JSON (clé "method").
     MethodResult compute(const QJsonObject& request) const;
     QString      describe(const QJsonObject& request) const;
+    QStringList  referenceCurves(const QJsonObject& request) const;     // voir Method::referenceCurves
 
 private:
     MethodRegistry();

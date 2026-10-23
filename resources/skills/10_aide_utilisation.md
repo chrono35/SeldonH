@@ -1,7 +1,7 @@
 ---
 name: Aide à l'utilisation de SeldonH
 description: Répondre brièvement aux questions sur le fonctionnement de SeldonH et renvoyer au mode d'emploi
-keywords: aide, mode d'emploi, que sais-tu calculer, svg, exporter, notice, tutoriel, comment utiliser, comment ca marche, comment faire, que sais-tu faire, que peux-tu faire, fonctionnalites, fonctionnalite, demarrer, commencer, utilisation, boutons, interface
+keywords: aide, mode d'emploi, que sais-tu calculer, svg, exporter, notice, tutoriel, comment utiliser, comment ca marche, comment faire, que sais-tu faire, que peux-tu faire, fonctionnalites, fonctionnalite, demarrer, commencer, utilisation, boutons, interface, help, user guide, manual, what can you compute, what can you calculate, tutorial, how to use, how does it work, how do i, what can you do, features, feature, getting started, start, usage, buttons
 priority: 9
 ---
 Si la question porte sur l'**utilisation de SeldonH** (que sait-il faire, comment poser une question, où sont les réglages), réponds en 5 lignes maximum avec les points ci-dessous, puis renvoie vers le **mode d'emploi** : menu Aide > Mode d'emploi, touche F1, ou la commande `/aide` dans la zone de question. N'invente aucune fonction : si ce n'est pas dans cette liste, dis que tu ne sais pas et renvoie au mode d'emploi.

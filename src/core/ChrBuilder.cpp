@@ -7,8 +7,14 @@
 #include <QRegularExpression>
 #include <QUuid>
 #include <QHash>
+#include <QPair>
+#include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
+
+#include "../methods/common/MethodRegistry.h"
+#include "../methods/common/TextUtil.h"
 
 namespace seldon {
 
@@ -124,6 +130,46 @@ int amProcessCode(const QString& p)
     return m.value(p.trimmed().toUpper(), 0);
 }
 
+// Nom de courbe de calibration 14C tel que ChronoModel le stocke : « nom.14c » en minuscules (ex. « intcal13.14c »,
+// relevé dans un projet réel, Castelnau_version_19-12-2016.chr).
+QString c14CurveName(QString n)
+{
+    n = n.trimmed().toLower();
+    if (n.endsWith(".14c")) n.chop(4);
+    return n.isEmpty() ? QString() : n + ".14c";
+}
+
+// Sens d'une relation d'ordre écrite en toutes lettres entre A et B (« A <relation> B ») :
+//   +1 : A est plus ancien que B (avant, antérieur, précède, sous / en dessous, recouvert par, coupé par…) ;
+//   −1 : A est plus récent que B (après, postérieur, succède, sur / au-dessus, recouvre, coupe, scelle…) ;
+//    0 : relation non reconnue ou contradictoire.
+// En stratigraphie, ce qui est au-dessus est plus récent (loi de superposition) ; ce qui coupe, recouvre ou scelle
+// une couche est plus récent qu'elle.
+int relationOrder(const QString& relation)
+{
+    QString r = text::fold(relation);
+    r.replace(QRegularExpression(QStringLiteral("[-_'’]")), QStringLiteral(" "));
+    r = r.simplified();
+    if (r.isEmpty()) return 0;
+    // Formes passives d'abord : « coupé par », « recouvert par », « scellé par », « cut by », « covered by »…
+    // « A est coupé / recouvert / suivi par B » : A plus ancien ; « A est précédé par B » : A plus récent.
+    static const QRegularExpression passiveOlder(QStringLiteral(
+        R"(\b(?:coupee?s?|recoupee?s?|recouverte?s?|scellee?s?|percee?s?|suivie?s?|succedee?s?|cut|covered|sealed|overlain|overlaid)"
+        R"(|truncated|disturbed|followed|succeeded|postdated)\s+(?:par|by)\b)"));
+    static const QRegularExpression passiveYounger(QStringLiteral(
+        R"(\b(?:precedee?s?|preceded|predated|antedated)\s+(?:par|by)\b)"));
+    if (passiveYounger.match(r).hasMatch()) return -1;
+    if (passiveOlder.match(r).hasMatch()) return +1;
+    static const QRegularExpression older(QStringLiteral(
+        R"(\b(?:avant|anterieure?s?|plus anciens?|plus anciennes?|precede\w*|sous|dessous|older|before|earlier|below|beneath|under|underl\w*|preced\w*|antedat\w*|predat\w*)\b)"));
+    static const QRegularExpression younger(QStringLiteral(
+        R"(\b(?:apres|posterieure?s?|plus recente?s?|succede\w*|suit|suivent|sur|dessus|sus jacente?s?|recouvre\w*|scelle\w*|coupe\w*|recoupe\w*|perce\w*)"
+        R"(|younger|after|later|above|over|overl\w*|follow\w*|succeed\w*|postdat\w*|cuts?|covers?|seals?|truncates?)\b)"));
+    const bool o = older.match(r).hasMatch(), y = younger.match(r).hasMatch();
+    if (o == y) return 0;
+    return o ? +1 : -1;
+}
+
 struct Range { double lo =  std::numeric_limits<double>::infinity();
                double hi = -std::numeric_limits<double>::infinity();
                void add(double v) { lo = std::min(lo, v); hi = std::max(hi, v); }
@@ -180,7 +226,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
     QJsonArray events;
     QHash<QString, int> eventId;
     Range span;
-    int nextEvent = 1, row = 0, amWithoutSpan = 0, nextDate = 0;
+    int nextEvent = 1, row = 0, amWithoutSpan = 0, nextDate = 0;     // amWithoutSpan : dates AM ou densités (étendue inconnue)
 
     for (const QJsonValue& ev : evSpec) {
         const QJsonObject e = ev.toObject();
@@ -343,8 +389,92 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                 };
                 // L'étendue de la date n'est pas connue sans la courbe : on ne l'ajoute pas à la plage d'étude.
                 ++amWithoutSpan;
+            } else if (type == "f14c") {
+                // F14C (plugin « f14c ») : fraction moderne, erreur, courbe « xxx.14c ». Format relevé dans
+                // test_tous_plugin_wiggle.chr : "data": {"error":0.01, "fraction":1.2, "ref_curve":"bomb13nh1.14c"}.
+                const double F = d.value("f14c").toDouble(d.value("fraction").toDouble(std::nan("")));
+                const double err = d.value("error").toDouble(std::nan(""));
+                if (std::isnan(F) || !(F > 0) || std::isnan(err) || err <= 0) {
+                    R.errors << QStringLiteral("Date F14C invalide dans « %1 » (fraction « f14c » > 0 et erreur > 0 requises).").arg(name);
+                    continue;
+                }
+                QString curve = c14CurveName(d.value("curve").toString(d.value("ref_curve").toString()));
+                if (curve.isEmpty()) {
+                    curve = QStringLiteral("bomb21nhz1.14c");
+                    R.warnings << QStringLiteral("Date F14C « %1 » : courbe bomb21nhz1 (hémisphère nord, zone 1) utilisée par défaut. "
+                                                 "Précisez « curve » et vérifiez qu'elle est installée dans ChronoModel.").arg(out["name"].toString());
+                }
+                out["plugin_id"] = "f14c";
+                out["sampler"] = kDateSampler;
+                out["data"] = QJsonObject{ { "error", err }, { "fraction", F }, { "ref_curve", curve } };
+                const MethodResult cal = MethodRegistry::instance().compute(
+                    QJsonObject{ { "method", "f14c" }, { "f14c", F }, { "error", err }, { "curve", curve.chopped(4) } });
+                if (cal.ok && !cal.hpd95.empty()) {
+                    double lo = cal.hpd95.front().from, hi = cal.hpd95.front().to;
+                    for (const Interval& iv : cal.hpd95) { lo = std::min(lo, iv.from); hi = std::max(hi, iv.to); }
+                    addSpan(lo - 5, hi + 5);
+                } else {
+                    R.warnings << QStringLiteral("Date F14C « %1 » : courbe « %2 » inconnue de SeldonH ; plage d'étude estimée "
+                                                 "(1950 à aujourd'hui), à vérifier.").arg(out["name"].toString(), curve);
+                    addSpan(1950, QDate::currentDate().year());
+                }
+            } else if (type == "density" || type == "densite") {
+                // Densité tabulée (plugin « density ») : "data": {"curve":"fichier.csv"} ; le fichier doit être dans le dossier
+                // Calib/Density de ChronoModel (nom comparé en minuscules). SeldonH n'a pas le fichier : étendue inconnue.
+                QString file = d.value("curve").toString(d.value("file").toString()).trimmed();
+                if (file.isEmpty()) {
+                    R.errors << QStringLiteral("Densité tabulée dans « %1 » : nom du fichier CSV (« curve ») requis.").arg(name);
+                    continue;
+                }
+                if (!file.endsWith(".csv", Qt::CaseInsensitive)) file += QStringLiteral(".csv");
+                out["plugin_id"] = "density";
+                out["sampler"] = kDateSampler;
+                out["data"] = QJsonObject{ { "curve", file } };
+                R.warnings << QStringLiteral("Densité « %1 » : le fichier « %2 » doit se trouver dans le dossier Calib/Density de "
+                                             "ChronoModel.").arg(out["name"].toString(), file);
+                ++amWithoutSpan;
+            } else if (type == "c14" || type == "14c" || type == "radiocarbone") {
+                // Radiocarbone (plugin « 14c ») : âge conventionnel BP, erreur 1σ, courbe « xxx.14c », ΔR et son erreur
+                // (0 si non marin). Format relevé dans un projet réel (Castelnau_version_19-12-2016.chr) :
+                //   "data": {"age":1290, "delta_r":0, "delta_r_error":0, "error":30, "ref_curve":"intcal13.14c"}
+                const double age = d.value("age").toDouble(std::nan(""));
+                const double err = d.value("error").toDouble(std::nan(""));
+                if (std::isnan(age) || std::isnan(err) || err <= 0) {
+                    R.errors << QStringLiteral("Date radiocarbone invalide dans « %1 » (âge BP et erreur > 0 requis).").arg(name);
+                    continue;
+                }
+                QString curve = c14CurveName(d.value("curve").toString(d.value("ref_curve").toString()));
+                if (curve.isEmpty()) {
+                    curve = QStringLiteral("intcal20.14c");
+                    R.warnings << QStringLiteral("Date radiocarbone « %1 » : courbe IntCal20 utilisée par défaut. Précisez « curve » "
+                                                 "(shcal20 pour l'hémisphère sud, marine20 pour un échantillon marin).").arg(out["name"].toString());
+                }
+                const bool marine = curve.startsWith("marine");
+                const double dR = d.value("delta_r").toDouble(d.value("deltaR").toDouble(0.0));
+                const double dRerr = d.value("delta_r_error").toDouble(d.value("deltaRerr").toDouble(0.0));
+                if (marine && !d.contains("delta_r") && !d.contains("deltaR"))
+                    R.warnings << QStringLiteral("Date radiocarbone « %1 » : courbe marine sans ΔR (0 utilisé). Précisez « delta_r » et "
+                                                 "« delta_r_error ».").arg(out["name"].toString());
+                out["plugin_id"] = "14c";
+                out["sampler"] = kDateSampler;
+                out["data"] = QJsonObject{ { "age", age }, { "delta_r", dR }, { "delta_r_error", dRerr },
+                                           { "error", err }, { "ref_curve", curve } };
+                // Plage d'étude : HPD à 95 % de la calibration (méthode de SeldonH, même courbe), avec une marge.
+                QJsonObject rq{ { "method", "c14" }, { "age", age }, { "error", err }, { "curve", curve.chopped(4) } };
+                if (dR != 0.0 || dRerr != 0.0) { rq["deltaR"] = dR; rq["deltaRerr"] = dRerr; rq["hasDeltaR"] = true; }
+                const MethodResult cal = MethodRegistry::instance().compute(rq);
+                if (cal.ok && !cal.hpd95.empty()) {
+                    double lo = cal.hpd95.front().from, hi = cal.hpd95.front().to;
+                    for (const Interval& iv : cal.hpd95) { lo = std::min(lo, iv.from); hi = std::max(hi, iv.to); }
+                    addSpan(lo - 2 * err, hi + 2 * err);
+                } else {
+                    // Courbe absente de SeldonH (elle peut exister dans ChronoModel) : estimation grossière 1950 − âge.
+                    R.warnings << QStringLiteral("Date radiocarbone « %1 » : courbe « %2 » inconnue de SeldonH ; vérifiez qu'elle est "
+                                                 "installée dans ChronoModel et ajustez la plage d'étude.").arg(out["name"].toString(), curve);
+                    addSpan(1950 - age - dR - 4 * err - 300, 1950 - age - dR + 4 * err + 300);
+                }
             } else {
-                R.errors << QStringLiteral("Type de date « %1 » non géré (événement « %2 »). Types gérés : gauss, unif, tl (TL/OSL), am (archéomagnétisme).")
+                R.errors << QStringLiteral("Type de date « %1 » non géré (événement « %2 »). Types gérés : gauss, unif, tl (TL/OSL), am (archéomagnétisme), c14 (radiocarbone), f14c, density (densité tabulée).")
                                 .arg(type, name);
                 continue;
             }
@@ -369,23 +499,94 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
     }
 
     // ---------- Contraintes ----------
+    // Contraintes : chaque élément de la liste peut s'écrire
+    //   ["A", "B"]                      A plus ancien que B (forme historique) ;
+    //   ["A", "B", "C", …]              séquence du plus ancien au plus récent (tous des noms connus) ;
+    //   ["A", "<relation>", "B"]        relation en toutes lettres, français ou anglais (voir relationOrder) ;
+    //   {"older": "A", "younger": "B"}  ou {"before": "A", "after": "B"} ;
+    //   {"a": "A", "relation": "<relation>", "b": "B"}.
+    // Les doublons sont ignorés ; deux contraintes opposées ou un cycle (A < B < C < A) sont des erreurs.
     auto buildConstraints = [&](const QJsonArray& list, const QHash<QString, int>& ids,
                                 const QString& what) {
         QJsonArray out;
         int cid = 1;
+        QVector<QPair<QString, QString>> pairs;          // (plus ancien, plus récent)
+        auto add = [&](const QString& olderName, const QString& youngerName, const QString& shown) {
+            if (!ids.contains(olderName) || !ids.contains(youngerName)) {
+                R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : nom inconnu.").arg(what, shown);
+                return;
+            }
+            if (olderName == youngerName) { R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : même élément.").arg(what, shown); return; }
+            if (pairs.contains({ olderName, youngerName })) return;
+            if (pairs.contains({ youngerName, olderName })) {
+                R.errors << QStringLiteral("Contraintes %1 contradictoires : « %2 » est donné à la fois plus ancien et plus récent que « %3 ».")
+                                .arg(what, olderName, youngerName);
+                return;
+            }
+            pairs.append({ olderName, youngerName });
+        };
+        auto relationFail = [&](const QString& shown) {
+            R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : relation non reconnue (utiliser par ex. avant / après, "
+                                         "antérieur / postérieur, en dessous / au-dessus, précède / succède).").arg(what, shown);
+        };
         for (const QJsonValue& v : list) {
-            const QJsonArray pair = v.toArray();
-            if (pair.size() != 2) { R.warnings << QStringLiteral("Contrainte %1 ignorée (2 noms attendus).").arg(what); continue; }
-            const QString a = pair[0].toString().trimmed(), b = pair[1].toString().trimmed();
-            if (!ids.contains(a) || !ids.contains(b)) {
-                R.warnings << QStringLiteral("Contrainte %1 « %2 → %3 » ignorée : nom inconnu.").arg(what, a, b);
+            if (v.isObject()) {
+                const QJsonObject o = v.toObject();
+                auto str = [&](std::initializer_list<const char*> keys) {
+                    for (const char* k : keys) if (o.contains(k)) return o.value(k).toString().trimmed();
+                    return QString();
+                };
+                const QString od = str({ "older", "before", "anterieur", "antérieur", "plus_ancien" });
+                const QString yg = str({ "younger", "after", "posterieur", "postérieur", "plus_recent" });
+                if (!od.isEmpty() && !yg.isEmpty()) { add(od, yg, od + " → " + yg); continue; }
+                const QString a = str({ "a", "from", "x", "first" }), b = str({ "b", "to", "y", "second" });
+                const QString rel = str({ "relation", "rel", "type" });
+                const QString shown = QStringLiteral("%1 %2 %3").arg(a, rel, b);
+                const int ord = relationOrder(rel);
+                if (a.isEmpty() || b.isEmpty() || ord == 0) { relationFail(shown); continue; }
+                if (ord > 0) add(a, b, shown); else add(b, a, shown);
                 continue;
             }
-            if (a == b) { R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : même élément.").arg(what, a); continue; }
+            const QJsonArray arr = v.toArray();
+            QStringList names;
+            for (const QJsonValue& x : arr) names << x.toString().trimmed();
+            const QString shown = names.join(" → ");
+            if (names.size() == 3 && !ids.contains(names[1])) {          // ["A", "relation", "B"]
+                const int ord = relationOrder(names[1]);
+                const QString rs = names.join(' ');
+                if (ord == 0) { relationFail(rs); continue; }
+                if (ord > 0) add(names[0], names[2], rs); else add(names[2], names[0], rs);
+            } else if (names.size() >= 2) {                               // séquence du plus ancien au plus récent
+                for (int i = 0; i + 1 < names.size(); ++i) add(names[i], names[i + 1], shown);
+            } else {
+                R.warnings << QStringLiteral("Contrainte %1 ignorée (2 noms attendus).").arg(what);
+            }
+        }
+        // Cycle (A < B < C < A) : ChronoModel le refuserait.
+        QHash<QString, QStringList> next;
+        for (const auto& pr : pairs) next[pr.first] << pr.second;
+        QHash<QString, int> state;                       // 0 non vu, 1 en cours, 2 fini
+        QStringList stack;
+        std::function<bool(const QString&)> dfs = [&](const QString& n) -> bool {
+            state[n] = 1; stack << n;
+            for (const QString& m : next.value(n)) {
+                if (state.value(m) == 1) { stack << m; return true; }
+                if (state.value(m) == 0 && dfs(m)) return true;
+            }
+            state[n] = 2; stack.removeLast();
+            return false;
+        };
+        for (const auto& pr : pairs)
+            if (state.value(pr.first) == 0 && dfs(pr.first)) {
+                const int from = stack.indexOf(stack.last());
+                R.errors << QStringLiteral("Contraintes %1 contradictoires (cycle) : %2.").arg(what, stack.mid(from).join(" → "));
+                break;
+            }
+        for (const auto& pr : pairs) {
             QJsonObject c;
             c["id"] = cid++;
-            c["bwd_id"] = ids[kBwdIsOlder ? a : b];
-            c["fwd_id"] = ids[kBwdIsOlder ? b : a];
+            c["bwd_id"] = ids[kBwdIsOlder ? pr.first : pr.second];
+            c["fwd_id"] = ids[kBwdIsOlder ? pr.second : pr.first];
             out.append(c);
         }
         return out;
@@ -409,7 +610,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         tmax = static_cast<int>(std::lround(sIn.value("tmax").toDouble()));
     } else if (!span.valid() && amWithoutSpan > 0) {
         tmin = -1000; tmax = 2000;
-        R.warnings << QStringLiteral("Plage d'étude par défaut pour les dates archéomagnétiques : -1000 à 2000. "
+        R.warnings << QStringLiteral("Plage d'étude par défaut pour les dates archéomagnétiques ou densités tabulées : -1000 à 2000. "
                                      "Ajustez « settings » (tmin, tmax) à la période couverte par les courbes choisies.");
     } else if (span.valid()) {
         const double margin = std::max(50.0, 0.1 * (span.hi - span.lo));
@@ -420,7 +621,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         return R;
     }
     if (amWithoutSpan > 0 && span.valid() && !sIn.contains("tmin"))
-        R.warnings << QStringLiteral("La plage d'étude calculée ne tient pas compte des dates archéomagnétiques : vérifiez tmin et tmax.");
+        R.warnings << QStringLiteral("La plage d'étude calculée ne tient pas compte des dates archéomagnétiques ou des densités tabulées : vérifiez tmin et tmax.");
     if (tmin >= tmax) { R.errors << QStringLiteral("tmin doit être inférieur à tmax."); return R; }
     step = sIn.contains("step") ? std::max(1, sIn.value("step").toInt(1))
                                 : std::max(1, static_cast<int>(std::ceil((tmax - tmin) / 5000.0)));
@@ -504,7 +705,11 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
     s += QStringLiteral("Projet ChronoModel (version %1)\n").arg(chr.value("app_version").toString("?"));
     s += QStringLiteral("Plage d'étude : %1 à %2, pas %3\n").arg(st.value("tmin").toInt()).arg(st.value("tmax").toInt()).arg(st.value("step").toInt());
     s += QStringLiteral("Courbe : process_type=%1\n").arg(chr.value("curve").toObject().value("process_type").toInt(78));
-    s += QStringLiteral("MCMC : %1 itérations, %2 burn-in, %3 chaînes\n").arg(mc.value("num_iter").toInt()).arg(mc.value("num_burn").toInt()).arg(mc.value("num_proc").toInt());
+    s += QStringLiteral("MCMC : %1 itérations, %2 burn-in, %3 chaînes, %4\n").arg(mc.value("num_iter").toInt()).arg(mc.value("num_burn").toInt())
+             .arg(mc.value("num_proc").toInt())
+             .arg(mc.value("anneal_recurrence").toInt(1000) > 0
+                      ? QStringLiteral("recuit 2^%1 tous les %2 itérations").arg(mc.value("anneal_temp").toDouble(10)).arg(mc.value("anneal_recurrence").toInt(1000))
+                      : QStringLiteral("sans recuit (anneal_recurrence = 0)"));
 
     QHash<int, QString> phaseName;
     const QJsonArray phases = chr.value("phases").toArray();
@@ -529,6 +734,7 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
             const QString pl = d.value("plugin_id").toString();
             if (pl == "gauss")      ds << QStringLiteral("gauss %1±%2").arg(dd.value("age").toDouble()).arg(dd.value("error").toDouble());
             else if (pl == "unif")  ds << QStringLiteral("unif [%1;%2]").arg(dd.value("min").toDouble()).arg(dd.value("max").toDouble());
+            else if (pl == "f14c")  ds << QStringLiteral("F14C %1±%2").arg(dd.value("fraction").toDouble()).arg(dd.value("error").toDouble());
             else if (pl == "14c")   ds << QStringLiteral("14C %1±%2").arg(dd.value("age").toDouble()).arg(dd.value("error").toDouble());
             else if (pl == "tl/osl") ds << QStringLiteral("TL/OSL %1±%2 (réf. %3)").arg(dd.value("age").toDouble()).arg(dd.value("error").toDouble()).arg(dd.value("ref_year").toDouble());
             else if (pl == "density") ds << QStringLiteral("densité tabulée « %1 »").arg(dd.value("curve").toString());
@@ -549,8 +755,23 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
         if (!ds.isEmpty()) s += " : " + ds.join("; ");
         s += "\n";
     }
-    s += QStringLiteral("Contraintes d'événements : %1 ; de phases : %2\n")
-             .arg(chr.value("events_constraints").toArray().size()).arg(chr.value("phases_constraints").toArray().size());
+    // Contraintes en clair (plus ancien → plus récent), pour vérifier le sens.
+    QHash<int, QString> eventName;
+    for (const QJsonValue& v : events) eventName[v.toObject().value("id").toInt()] = v.toObject().value("name").toString();
+    auto cons = [&](const QJsonArray& list, const QHash<int, QString>& names) {
+        QStringList l;
+        for (const QJsonValue& v : list) {
+            const QJsonObject c = v.toObject();
+            const int older = c.value(kBwdIsOlder ? "bwd_id" : "fwd_id").toInt(), younger = c.value(kBwdIsOlder ? "fwd_id" : "bwd_id").toInt();
+            l << QStringLiteral("%1 → %2").arg(names.value(older, QString::number(older)), names.value(younger, QString::number(younger)));
+        }
+        return l;
+    };
+    const QStringList ec = cons(chr.value("events_constraints").toArray(), eventName);
+    const QStringList pc = cons(chr.value("phases_constraints").toArray(), phaseName);
+    s += QStringLiteral("Contraintes d'événements : %1 ; de phases : %2 (plus ancien → plus récent)\n").arg(ec.size()).arg(pc.size());
+    if (!ec.isEmpty()) s += QStringLiteral("  Événements : %1\n").arg(ec.join(" ; "));
+    if (!pc.isEmpty()) s += QStringLiteral("  Phases : %1\n").arg(pc.join(" ; "));
     return s;
 }
 

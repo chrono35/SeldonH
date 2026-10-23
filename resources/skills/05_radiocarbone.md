@@ -1,7 +1,7 @@
 ---
 name: Radiocarbone et calibration
 description: Âge 14C conventionnel, courbes de calibration, effet réservoir, ΔR
-keywords: radiocarbone, 14c, c14, carbone 14, calibration, calibrer, calibre, intcal, intcal20, shcal, marine, marine20, reservoir, delta r, bp conventionnel, laboratoire
+keywords: radiocarbone, 14c, c14, carbone 14, calibration, calibrer, calibre, intcal, intcal20, shcal, marine, marine20, reservoir, delta r, bp conventionnel, laboratoire, radiocarbon, carbon 14, carbon-14, calibrate, calibrated, reservoir effect, conventional age, laboratory, radiocarbon date
 priority: 5
 ---
 - L'âge radiocarbone conventionnel (BP, ± σ) est calculé avec la demi-vie de Libby (5568 ans) et le présent = 1950 ; il n'est **pas** un âge calendaire.

@@ -19,7 +19,7 @@ const RefCurve* F14cMethod::resolveCurve(const QString& name)
 // Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
 QRegularExpression F14cMethod::context() const
 {
-    static const QRegularExpression re(R"((f\s?-?14\s?c|fraction moderne|fraction 14c|post[- ]?bombe|bomb curve|\bpmc\b))");
+    static const QRegularExpression re(R"((f\s?-?14\s?c|fraction moderne|fraction 14c|post[- ]?bombe|bomb curve|post[- ]?bomb|fraction modern|modern fraction|\bpmc\b))");
     return re;
 }
 
@@ -34,10 +34,16 @@ QVector<QJsonObject> F14cMethod::parse(const QString& question) const
     QString curve;
     static const QRegularExpression named(R"((bomb(?:21|13)(?:nhz|shz|nh|sh)\d{1,2}))");
     const auto nm = named.match(q);
-    if (nm.hasMatch()) {
+    // Courbe nommée dans la question : courbe de la bombe, sinon courbe 14C (avant 1950).
+    QString known = CurveStore::findNamed(QStringLiteral("f14c"), q);
+    if (known.isEmpty()) known = CurveStore::findNamed(QStringLiteral("c14"), q);
+    if (!known.isEmpty()) {
+        curve = known;
+    } else if (nm.hasMatch()) {
         curve = nm.captured(1);
     } else {
-        const bool south = q.contains("hemisphere sud") || q.contains("australe") || q.contains("shcal");
+        const bool south = q.contains("hemisphere sud") || q.contains("australe") || q.contains("shcal")
+                           || q.contains("southern hemisphere") || q.contains("south hemisphere");
         QString zone = "1";
         static const QRegularExpression z(R"(zone\s*([123]))");
         const auto zm = z.match(q);
@@ -83,6 +89,13 @@ MethodResult F14cMethod::compute(const QJsonObject& p) const
     QStringList warn;
     if (F > 1.0) warn << "un F14C > 1 donne souvent deux solutions (montée puis descente de la courbe de la bombe)";
     return MethodResult::fromDensity(d, warn, true);
+}
+
+QStringList F14cMethod::referenceCurves(const QJsonObject& p) const
+{
+    const QString name = p.value("curve").toString("bomb21nhz1").toLower();
+    // Courbe de la bombe, ou courbe 14C (avant 1950) : même règle que resolveCurve().
+    return { (CurveStore::sourceOf("f14c", name).isEmpty() ? QStringLiteral("|c14|") : QStringLiteral("|f14c|")) + name };
 }
 
 QString F14cMethod::describe(const QJsonObject& p) const

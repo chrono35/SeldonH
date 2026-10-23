@@ -22,14 +22,15 @@ QVector<QJsonObject> TlMethod::parse(const QString& question) const
     if (!ctx.match(q).hasMatch()) return out;
 
     static const QRegularExpression refRe(
-        R"((?:annee\s+(?:de\s+)?(?:reference|mesure)|mesure[e]?\s+en|reference\s*[:=]?|refyear\s*[=:]?)\s*[:=]?\s*(\d{4}))");
+        R"((?:annee\s+(?:de\s+)?(?:reference|mesure)|mesure[e]?\s+en|reference\s*[:=]?|refyear\s*[=:]?)"
+        R"(|measured\s+in|measurement\s+(?:year|in)|year\s+of\s+(?:measurement|reference)|reference\s+year|ref\.?\s+year)\s*[:=]?\s*(\d{4}))");
     const auto rm = refRe.match(q);
 
     for (const text::ValueError& ve : text::findValueErrors(q)) {
         if (out.size() >= 6) break;
         double scale = 1.0;
         const QString after = q.mid(ve.start + ve.length, 12);
-        if (QRegularExpression(R"(^\s*(ka|k\.a\.|milliers))").match(after).hasMatch()) scale = 1000.0;
+        if (QRegularExpression(R"(^\s*(ka|k\.a\.|kyr|milliers|thousand))").match(after).hasMatch()) scale = 1000.0;
         QJsonObject o;
         o["age"] = ve.value * scale;
         o["error"] = ve.error * scale;

@@ -14,6 +14,12 @@ ChatView::ChatView(QWidget* parent) : QTextBrowser(parent)
     setOpenLinks(false);              // les liens seldon:// sont traités par MainWindow (anchorClicked)
     setOpenExternalLinks(false);
     setReadOnly(true);
+    // Boîte du dialogue à coins arrondis : cadre dessiné par la feuille de style, zone d'affichage transparente
+    // pour que le fond ne déborde pas des coins.
+    setFrameShape(QFrame::NoFrame);
+    setStyleSheet(QStringLiteral("QTextBrowser { border: 1px solid palette(mid); border-radius: 12px; "
+                                 "background: palette(base); padding: 6px; }"));
+    viewport()->setAutoFillBackground(false);
     document()->setDefaultStyleSheet(
         "p { margin-top: 4px; margin-bottom: 4px; }"
         "pre, code { font-family: Menlo, Consolas, monospace; }"
@@ -106,15 +112,17 @@ QString ChatView::bubble(const Item& it) const
     const QPalette pal = QApplication::palette();
     const bool dark = pal.color(QPalette::Window).lightness() < 128;
     const QString fg = pal.color(QPalette::Text).name();
-    const QString userBg   = dark ? "#2d4a6b" : "#dbe8f7";
     const QString asstBg   = dark ? "#2b2b2e" : "#f2f2f4";
     const QString noticeBg = dark ? "#4a3f1f" : "#fff4d6";
     const QString muted    = dark ? "#9a9aa0" : "#777777";
 
     QString inner, bg, who;
+    QString text = fg, label = muted;
     switch (it.kind) {
     case Item::User:
-        bg = userBg; who = tr("Vous"); inner = it.html; break;
+        // Rappel de la question : fond blanc entouré de noir, quel que soit le thème (texte noir pour rester lisible).
+        bg = QStringLiteral("#ffffff"); text = QStringLiteral("#000000"); label = QStringLiteral("#555555");
+        who = tr("Vous"); inner = it.html; break;
     case Item::Notice:
         bg = noticeBg; who = QString(); inner = it.html; break;
     case Item::Assistant:
@@ -126,10 +134,13 @@ QString ChatView::bubble(const Item& it) const
             inner = it.html;
         break;
     }
-    QString out = QStringLiteral("<table width=\"100%\" cellspacing=\"0\" cellpadding=\"10\" style=\"margin-top:8px\">"
-                                 "<tr><td bgcolor=\"%1\" style=\"color:%2\">").arg(bg, fg);
+    const QString border = it.kind == Item::User
+        ? QStringLiteral(" border=\"1\" style=\"margin-top:8px; border-collapse:collapse; border-style:solid; border-color:#000000\"")
+        : QStringLiteral(" style=\"margin-top:8px\"");
+    QString out = QStringLiteral("<table width=\"100%\" cellspacing=\"0\" cellpadding=\"10\"%3>"
+                                 "<tr><td bgcolor=\"%1\" style=\"color:%2\">").arg(bg, text, border);
     if (!who.isEmpty())
-        out += QStringLiteral("<b style=\"color:%1\">%2</b><br>").arg(muted, who);
+        out += QStringLiteral("<b style=\"color:%1\">%2</b><br>").arg(label, who);
     out += inner;
     if (!it.actions.isEmpty())
         out += QStringLiteral("<p style=\"margin-top:8px\">%1</p>").arg(it.actions);

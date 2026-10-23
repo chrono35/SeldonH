@@ -95,6 +95,20 @@ inline double convert(double year, DateFormat f)
     }
 }
 
+// Inverse de convert : valeur exprimée dans le format f -> année calendaire signée.
+inline double toCalendar(double v, DateFormat f)
+{
+    switch (f) {
+    case DateFormat::CalBP:  return 1950.0 - v;
+    case DateFormat::CalB2K: return 2000.0 - v;
+    case DateFormat::DatBP:  return v + 1950.0;
+    case DateFormat::DatB2K: return v + 2000.0;
+    case DateFormat::Ka:     return -v * 1e3;
+    case DateFormat::Ma:     return -v * 1e6;
+    default:                 return v;
+    }
+}
+
 // Valeur affichée avec son unité, ex. « 3848 cal BP », « 1899 av. J.-C. », « 1,898 ka ».
 inline QString format(double year, DateFormat f)
 {
@@ -131,9 +145,13 @@ inline DateFormat detect(const QString& question, DateFormat fallback)
     auto has = [&](const char* re) { return QRegularExpression(QString::fromLatin1(re)).match(q).hasMatch(); };
 
     const char* outVerb = "(?:resultats?|donne\\w*|exprim\\w*|affich\\w*|present\\w*|sortie|intervalles?|densites?|dates?|ages?|annees?)";
+    // Anglais : « give the results in ka », « express the intervals in BP ».
+    const char* outVerbEn = "(?:results?|give\\w*|express\\w*|display\\w*|show\\w*|output|intervals?|densit\\w*|dates?|ages?|years?)";
     auto after = [&](const QString& unit) {
         return QRegularExpression(QStringLiteral("\\b%1\\b[^.\\n\\d±]{0,60}\\ben\\s+(?:annees\\s+|age\\s+|date\\s+)?%2\\b")
-                                      .arg(QString::fromLatin1(outVerb), unit)).match(q).hasMatch();
+                                      .arg(QString::fromLatin1(outVerb), unit)).match(q).hasMatch()
+            || QRegularExpression(QStringLiteral("\\b%1\\b[^.\\n\\d±]{0,60}\\bin\\s+(?:years\\s+|age\\s+)?%2\\b")
+                                      .arg(QString::fromLatin1(outVerbEn), unit)).match(q).hasMatch();
     };
 
     if (has(R"(\bdate\s+cal\.?\s*b2k\b|\bb2k\s+date\b)")) return DateFormat::DatB2K;
@@ -141,7 +159,7 @@ inline DateFormat detect(const QString& question, DateFormat fallback)
     if (has(R"(\bcal\.?\s*b2k\b|\bb2k\b)"))              return DateFormat::CalB2K;
     if (has(R"(\bcal\.?\s*bp\b|\bbp\s+cal\w*\b|\bage\s+cal)")) return DateFormat::CalBP;
     if (has(R"(\bbce\b)"))                               return DateFormat::BceCe;
-    if (has(R"(\bbc/ad\b|\ben\s+annees\s+calendaires\b|\bav\.?\s*j\.?-?c\b.*\bapr\.?\s*j)")) return DateFormat::BcAd;
+    if (has(R"(\bbc/ad\b|\ben\s+annees\s+calendaires\b|\bin\s+calendar\s+years\b|\bav\.?\s*j\.?-?c\b.*\bapr\.?\s*j)")) return DateFormat::BcAd;
     if (after(QStringLiteral("bp")))                     return DateFormat::CalBP;
     if (after(QStringLiteral("ka")))                     return DateFormat::Ka;
     if (after(QStringLiteral("ma")))                     return DateFormat::Ma;

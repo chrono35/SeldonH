@@ -1,7 +1,7 @@
 ---
 name: Tracer des courbes
 description: Format du bloc plot pour afficher une courbe dans le panneau graphique
-keywords: tracer, trace, graphique, courbe, courbes, plot, dessiner, afficher, visualiser, diagramme, densite
+keywords: tracer, trace, graphique, courbe, courbes, plot, dessiner, afficher, visualiser, diagramme, densite, draw, graph, chart, curve, curves, display, show, visualize, visualise, diagram, density
 priority: 8
 ---
 **Une datation calculée par SeldonH (14C, F14C, TL, Gauss, uniforme, archéomagnétisme) est tracée automatiquement** par l'application (courbe bleue, région HPD à 95 % remplie) : n'écris alors aucun bloc « plot », et ne décris pas le graphique au-delà de ce que dit la fiche de résultat.

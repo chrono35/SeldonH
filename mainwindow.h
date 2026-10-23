@@ -61,6 +61,11 @@ private slots:
     void openSkillsFolder();
     void openModelsFolder();
     void reloadSkills();
+    void openCurvesFolder();
+    void reloadCurves();
+    void showCurves();
+    void saveDensityFile(const QUrl& url);
+    QVector<QJsonObject> lastDatingRequests() const;
     void showAbout();
     void showHelp();
     void openHelpInBrowser();
@@ -168,6 +173,7 @@ private:
     bool                 loading_ = false;
     bool                 generating_ = false;
     QString              attachName_, attachText_;
+    bool                 attachChronoResults_ = false;   // pièce jointe = résultats de ChronoModel (résumé extrait)
     QString              modelDesc_;
 };
 

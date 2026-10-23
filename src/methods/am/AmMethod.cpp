@@ -33,6 +33,40 @@ QString defaultCurve(char kind, const QString& foldedQuestion)
     return bg ? "bulgaria_f" : "gwh2013uni_f";
 }
 
+// Courbes nommées dans la question (« courbe pour l'inclinaison gal2002sph2014_i, pour l'intensité eurw_2017_f »).
+// 1) Un nom terminé par _i, _d ou _f donne sa composante, même si la courbe n'est pas installée (le calcul le dira).
+// 2) Un nom de courbe connu sans ce suffixe : composante du mot le plus proche qui le précède (inclinaison,
+//    déclinaison, intensité).
+void namedCurves(const QString& q, QString& cI, QString& cD, QString& cF)
+{
+    static const QRegularExpression tok(R"((?<![a-z0-9_])([a-z][a-z0-9]*(?:[_-][a-z0-9]+)*_([idf]))(?![a-z0-9_]))");
+    auto it = tok.globalMatch(q);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        const QString n = m.captured(1);
+        QString& dst = m.captured(2) == QLatin1String("i") ? cI : m.captured(2) == QLatin1String("d") ? cD : cF;
+        if (dst.isEmpty()) dst = n;
+    }
+    static const QRegularExpression suffix(R"(_[idf]$)");
+    static const QRegularExpression role(R"((inclin)|(declin)|(intensit|champ|field|paleointensit))");
+    QString rest = q;
+    for (int guard = 0; guard < 6; ++guard) {
+        int pos = -1;
+        const QString n = CurveStore::findNamed(QStringLiteral("am"), rest, &pos);
+        if (n.isEmpty()) break;
+        rest.replace(pos, n.size(), QString(n.size(), QLatin1Char(' ')));       // pour trouver la suivante
+        if (suffix.match(n).hasMatch()) continue;                               // déjà traitée en 1)
+        int best = -1; char kind = 0;
+        auto rit = role.globalMatch(q.left(pos));
+        while (rit.hasNext()) {
+            const auto r = rit.next();
+            if (r.capturedStart() > best) { best = int(r.capturedStart()); kind = !r.captured(1).isEmpty() ? 'I' : !r.captured(2).isEmpty() ? 'D' : 'F'; }
+        }
+        QString& dst = kind == 'I' ? cI : kind == 'D' ? cD : cF;
+        if (kind && dst.isEmpty()) dst = n;
+    }
+}
+
 } // namespace
 
 QStringList AmMethod::curveNames() const { return CurveStore::names(id()); }
@@ -40,7 +74,7 @@ QStringList AmMethod::curveNames() const { return CurveStore::names(id()); }
 // Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
 QRegularExpression AmMethod::context() const
 {
-    static const QRegularExpression re(R"((archeomag|archaeomag|paleomag|inclinaison|declinaison|alpha|α|\ba95\b))");
+    static const QRegularExpression re(R"((archeomag|archaeomag|paleomag|palaeomag|inclinaison|declinaison|inclination|declination|alpha|α|\ba95\b))");
     return re;
 }
 
@@ -52,7 +86,7 @@ QVector<QJsonObject> AmMethod::parse(const QString& question) const
     if (!ctx.match(q).hasMatch()) return out;
 
     auto grab = [&](const QString& pattern, double& v) {
-        const QRegularExpression re(pattern + QStringLiteral("\\s*(?:de|=|:|a|egale)?\\s*(-?\\d+(?:[.,]\\d+)?)"));
+        const QRegularExpression re(pattern + QStringLiteral("\\s*(?:de|=|:|a|egale|of|is)?\\s*(-?\\d+(?:[.,]\\d+)?)"));
         const auto m = re.match(q);
         if (!m.hasMatch()) return false;
         v = text::toNumber(m.captured(1));
@@ -60,11 +94,23 @@ QVector<QJsonObject> AmMethod::parse(const QString& question) const
     };
 
     double inc = 0, dec = 0, a95 = 0, field = 0, errF = 0;
-    const bool hasI = grab(R"((?:inclinaison|\binc\b|\bi\b(?=\s*[=:])))", inc);
-    const bool hasD = grab(R"((?:declinaison|\bdec\b|\bd\b(?=\s*[=:])))", dec);
+    const bool hasI = grab(R"((?:inclinaison|inclination|\binc\b|\bi\b(?=\s*[=:])))", inc);
+    const bool hasD = grab(R"((?:declinaison|declination|\bdec\b|\bd\b(?=\s*[=:])))", dec);
     const bool hasA = grab(R"((?:(?:alpha|α)(?:\s*_?95)?|\ba95\b))", a95);
-    const bool hasF = grab(R"((?:intensite|\bf\b(?=\s*[=:])))", field);
-    bool hasE = grab(R"((?:erreur\s*(?:sur\s*)?(?:f|l'intensite|intensite)|sigma\s*f|err(?:eur)?\s*f))", errF);
+    const bool hasF = grab(R"((?:intensite|intensity|field\s+strength|\bf\b(?=\s*[=:])))", field);
+    bool hasE = grab(R"((?:erreur\s*(?:sur\s*)?(?:f|l'intensite|intensite)|error\s*(?:on\s*)?(?:the\s*)?(?:f|intensity)|sigma\s*f|err(?:eur)?\s*f))", errF);
+    // « intensité = 56,89 erreur = 0,74 » : une erreur sans précision écrite APRÈS l'intensité est celle de F
+    // (l'incertitude des directions est α95).
+    if (hasF && !hasE) {
+        static const QRegularExpression fRe(R"((?:intensite|intensity|field\s+strength|\bf\b(?=\s*[=:])))");
+        static const QRegularExpression eRe(
+            R"((?:\berreur\b|\berror\b|\berr\b|\bincertitude\b|\buncertainty\b|\bsigma\b|σ)\s*(?:de|=|:|of|is)?\s*(\d+(?:[.,]\d+)?))");
+        const auto fm = fRe.match(q);
+        if (fm.hasMatch()) {
+            const auto em = eRe.match(q, fm.capturedEnd());
+            if (em.hasMatch()) { errF = text::toNumber(em.captured(1)); hasE = true; }
+        }
+    }
     // « intensité 52 ± 3 µT » : erreur donnée par ±
     if (hasF && !hasE) {
         for (const text::ValueError& ve : text::findValueErrors(q)) {
@@ -85,9 +131,15 @@ QVector<QJsonObject> AmMethod::parse(const QString& question) const
     if (hasA) o["alpha95"] = a95;
     if (hasF) { o["field"] = field; o["errorF"] = hasE ? errF : 0.0; }
     o["steps"] = 500;
-    if (hasI) o["curveI"] = defaultCurve('I', q);
-    if (hasD) o["curveD"] = defaultCurve('D', q);
-    if (hasF) o["curveF"] = defaultCurve('F', q);
+    QString nI, nD, nF;
+    namedCurves(q, nI, nD, nF);
+    // Courbes non nommées : défaut régional (« Bulgarie »), sans compter les noms de courbes (« bulgaria_f » ne
+    // désigne que la courbe d'intensité).
+    QString region = q;
+    region.remove(QRegularExpression(QStringLiteral(R"((?<![a-z0-9_])[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*_[idf](?![a-z0-9_]))")));
+    if (hasI) o["curveI"] = nI.isEmpty() ? defaultCurve('I', region) : nI;
+    if (hasD) o["curveD"] = nD.isEmpty() ? defaultCurve('D', region) : nD;
+    if (hasF) o["curveF"] = nF.isEmpty() ? defaultCurve('F', region) : nF;
     out << o;
     return out;
 }
@@ -177,6 +229,17 @@ MethodResult AmMethod::compute(const QJsonObject& p) const
 
     const Density d = buildDensity(tmin, tmax, 1.0, L, true);
     return MethodResult::fromDensity(d, {}, true);
+}
+
+QStringList AmMethod::referenceCurves(const QJsonObject& p) const
+{
+    const QString proc = p.value("process").toString().toUpper();
+    const QString qnone;
+    QStringList out;
+    if (proc.contains('I')) out << QStringLiteral("I|am|") + p.value("curveI").toString(defaultCurve('I', qnone)).toLower();
+    if (proc.contains('D')) out << QStringLiteral("D|am|") + p.value("curveD").toString(defaultCurve('D', qnone)).toLower();
+    if (proc.contains('F')) out << QStringLiteral("F|am|") + p.value("curveF").toString(defaultCurve('F', qnone)).toLower();
+    return out;
 }
 
 QString AmMethod::describe(const QJsonObject& p) const

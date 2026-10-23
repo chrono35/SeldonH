@@ -1,7 +1,7 @@
 ---
 name: Concepts de ChronoModel
 description: Événements, dates, phases, bornes, contraintes, MCMC dans ChronoModel
-keywords: wiggle, decalage, wiggle-matching, chronomodel, evenement, evenements, phase, phases, borne, bounds, contrainte, contraintes, bayesien, bayesienne, mcmc, modele, prior, a priori, stratigraphie, stratigraphique, anteriorite
+keywords: recuit, annealing, recuit simule, wiggle, decalage, wiggle-matching, chronomodel, evenement, evenements, phase, phases, borne, bounds, contrainte, contraintes, bayesien, bayesienne, mcmc, modele, prior, a priori, stratigraphie, stratigraphique, anteriorite, simulated annealing, offset, event, events, bound, constraint, constraints, bayesian, model, stratigraphy, stratigraphic, older than, younger than
 priority: 3
 ---
 ChronoModel est un logiciel de modélisation chronologique bayésienne (échantillonnage MCMC).
@@ -17,3 +17,4 @@ ChronoModel est un logiciel de modélisation chronologique bayésienne (échanti
 - **Contraintes d'ordre** : entre événements (stratigraphie : A plus ancien que B) ou entre phases (succession, éventuellement avec un hiatus minimal). Elles font gagner beaucoup en précision quand elles sont justes, et faussent les résultats quand elles sont fausses : à vérifier avec l'archéologue. Dans le fichier .chr, une contrainte est stockée avec `bwd_id` = l'événement le plus ancien et `fwd_id` = l'événement le plus récent (vérifié sur des projets réels).
 - **Plage d'étude (tmin–tmax)** : doit contenir largement toutes les dates (marge d'au moins 3σ). Le **pas** (step) est la résolution de la grille de calcul.
 - **MCMC** : plusieurs chaînes (4 par défaut), période de chauffe (burn-in), adaptation, puis itérations d'acquisition (100 000 par défaut), avec amincissement (thinning).
+- **Recuit simulé (annealing)** : pendant l'acquisition, toutes les `anneal_recurrence` itérations (1000 par défaut), ChronoModel « réchauffe » la chaîne (température jusqu'à 2^`anneal_temp`, 2^10 par défaut) pendant `anneal_dwell` itérations (1000) pour l'aider à sauter d'un mode à l'autre. **« Pas de recuit », « sans recuit », « annealing = 0 » = recuit désactivé = `anneal_recurrence` à 0** (dans ChronoModel : section « 4 - ANNEALING » des réglages MCMC, Recurrence = 0 ; le log affiche alors « Disabled »). Ce n'est pas `anneal_temp` = 0.

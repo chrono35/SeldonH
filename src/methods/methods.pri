@@ -6,6 +6,7 @@ INCLUDEPATH += $$METHODS_DIR
 
 SOURCES += \
     $$METHODS_DIR/common/Density.cpp \
+    $$METHODS_DIR/common/DensityFile.cpp \
     $$METHODS_DIR/common/EventMcmc.cpp \
     $$METHODS_DIR/common/RefCurve.cpp \
     $$METHODS_DIR/common/CurveStore.cpp \
@@ -22,6 +23,7 @@ SOURCES += \
 
 HEADERS += \
     $$METHODS_DIR/common/Density.h \
+    $$METHODS_DIR/common/DensityFile.h \
     $$METHODS_DIR/common/EventMcmc.h \
     $$METHODS_DIR/common/RefCurve.h \
     $$METHODS_DIR/common/CurveStore.h \

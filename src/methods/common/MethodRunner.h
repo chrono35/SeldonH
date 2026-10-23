@@ -34,6 +34,17 @@ public:
 
     // Une demande de création de modèle ne déclenche aucun calcul automatique (résultat vide).
     static RunOutcome analyzeQuestion(const QString& question, DateFormat format = DateFormat::BcAd);
+    // Datations (demandes de calcul) lues dans une question, sans les calculer ; vide pour une demande de modèle.
+    static QVector<QJsonObject> requestsFromQuestion(const QString& question);
+    // Question de suivi qui demande seulement un autre niveau de confiance (« et à 50 % ? ») : les datations
+    // précédentes (`previous`), avec ce niveau. Vide si la question contient ses propres datations ou pas de niveau.
+    static QVector<QJsonObject> followUpRequests(const QString& question, const QVector<QJsonObject>& previous,
+                                                 DateFormat format = DateFormat::BcAd);
+    // Période d'étude écrite dans la question : « entre 0 et 2000 », « de 500 av. J.-C. à 500 », « période d'étude
+    // de -500 à 500 », « study period from 0 to 2000 », « between 0 and 2000 ». Valeurs telles qu'écrites (format
+    // d'affichage ; « av. J.-C. » / « BC » rend la valeur négative). Faux si absente. « Entre X et Y » n'est pas une
+    // période dans une question de loi uniforme ni dans le passage d'un décalage (wiggle).
+    static bool periodFromQuestion(const QString& question, double& from, double& to);
 
     // Niveau de confiance des intervalles HPD demandé dans la question, en % (« HPD à 99 % », « niveau de confiance 90 »,
     // « intervalle à 99,7 % »). 0 si la question n'en précise pas (95 % par défaut) ou hors de [50 ; 100[.
@@ -48,6 +59,11 @@ public:
     // {"type":"range","min":a,"max":b} ou {"type":"gaussian","mean":m,"error":e}.
     // Vrai si la question demande de combiner ses datations en un événement (« calcule l'événement… », « combine »).
     static bool asksEvent(const QString& question);
+    // Vrai si la question demande de superposer les densités (« sur le même graphe », « superposées ») : sinon
+    // chaque densité est tracée sur sa propre ligne.
+    static bool asksOverlay(const QString& question);
+    // Couleur d'une date ou d'un événement : « color » ("#rrggbb" ou nom), ou red/green/blue (format .chr). Vide sinon.
+    static QString colorOf(const QJsonObject& o);
     // Paramètres MCMC et période d'étude cités dans la question (« 200 000 itérations », « 8 chaînes », « graines 1;2 »).
     static QJsonObject mcmcFromQuestion(const QString& question, double* tmin = nullptr, double* tmax = nullptr);
     // Avancement des calculs longs (MCMC) : texte, fraction 0..1 ; retourner false interrompt. Vide par défaut.
@@ -67,7 +83,8 @@ public:
 
     // Décalage (wiggle) écrit dans la question : « wiggle entre 100 et 300 » (range), « décalage de 20 ± 5 »
     // (gaussian), « wiggle de 20 ans » (fixed). Objet vide si aucun.
-    static QJsonObject wiggleFromQuestion(const QString& question);
+    // `start`/`length` (facultatifs) : passage reconnu dans la question, pour le masquer avant de lire les datations.
+    static QJsonObject wiggleFromQuestion(const QString& question, int* start = nullptr, int* length = nullptr);
 
     // Met une demande (ou une datation d'événement) dans la forme attendue par les méthodes :
     //  - « method » en minuscules, alias (14c, radiocarbone, osl, archeomag…) et noms d'outils (calculer_evenement…) ;

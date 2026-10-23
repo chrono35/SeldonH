@@ -8,22 +8,43 @@
 #include <QMutexLocker>
 
 #include <memory>
+#include <vector>
 
 namespace seldon {
 
 namespace {
 
 QMutex gMutex;
+QStringList gRoots;                                              // dossiers supplémentaires, par priorité
+QHash<QString, std::shared_ptr<RefCurve>> gCache;
+std::vector<std::shared_ptr<RefCurve>> gRetired;                 // courbes remplacées : gardées en vie (pointeurs en cours d'usage)
 
-QString dirOf(const QString& methodId) { return QStringLiteral(":/methods/%1/curves").arg(methodId); }
+QString extOf(const QString& methodId) { return methodId == QLatin1String("am") ? QStringLiteral("ref") : QStringLiteral("14c"); }
+
+QStringList dirsOf(const QString& methodId)
+{
+    QStringList d;
+    QMutexLocker lock(&gMutex);
+    for (const QString& r : std::as_const(gRoots)) d << QDir(r).filePath(CurveStore::subdir(methodId));
+    d << QStringLiteral(":/methods/%1/curves").arg(methodId);
+    return d;
+}
+
+QFileInfoList curveFiles(const QString& dir, const QString& methodId)
+{
+    QFileInfoList out;
+    const QString ext = extOf(methodId);
+    for (const QFileInfo& fi : QDir(dir).entryInfoList(QDir::Files, QDir::Name))
+        if (fi.suffix().compare(ext, Qt::CaseInsensitive) == 0) out << fi;
+    return out;
+}
 
 QString findFile(const QString& methodId, const QString& name)
 {
-    const QDir d(dirOf(methodId));
     const QString want = name.toLower();
-    for (const QFileInfo& fi : d.entryInfoList(QDir::Files)) {
-        if (fi.completeBaseName().toLower() == want || fi.fileName().toLower() == want) return fi.filePath();
-    }
+    for (const QString& dir : dirsOf(methodId))
+        for (const QFileInfo& fi : curveFiles(dir, methodId))
+            if (fi.completeBaseName().toLower() == want || fi.fileName().toLower() == want) return fi.filePath();
     return QString();
 }
 
@@ -32,21 +53,73 @@ QString findFile(const QString& methodId, const QString& name)
 QStringList CurveStore::names(const QString& methodId)
 {
     QStringList out;
-    const QDir d(dirOf(methodId));
-    for (const QFileInfo& fi : d.entryInfoList(QDir::Files, QDir::Name)) out << fi.completeBaseName().toLower();
+    for (const QString& dir : dirsOf(methodId))
+        for (const QFileInfo& fi : curveFiles(dir, methodId)) {
+            const QString n = fi.completeBaseName().toLower();
+            if (!out.contains(n)) out << n;
+        }
+    out.sort();
     return out;
+}
+
+QString CurveStore::subdir(const QString& methodId)
+{
+    if (methodId == QLatin1String("c14")) return QStringLiteral("14C");
+    if (methodId == QLatin1String("f14c")) return QStringLiteral("F14C");
+    if (methodId == QLatin1String("am")) return QStringLiteral("AM");
+    return methodId;
+}
+
+void CurveStore::setExtraRoots(const QStringList& roots)
+{
+    QMutexLocker lock(&gMutex);
+    gRoots = roots;
+    for (auto it = gCache.begin(); it != gCache.end(); ++it)
+        if (it.value()) gRetired.push_back(it.value());
+    gCache.clear();
+}
+
+QStringList CurveStore::extraRoots()
+{
+    QMutexLocker lock(&gMutex);
+    return gRoots;
+}
+
+QString CurveStore::findNamed(const QString& methodId, const QString& text, int* pos)
+{
+    auto isWordChar = [](QChar c) { return c.isLetterOrNumber() || c == QLatin1Char('_'); };
+    QString best;
+    int bestPos = -1;
+    for (const QString& n : names(methodId)) {
+        if (n.size() <= best.size()) continue;
+        for (int i = text.indexOf(n); i >= 0; i = text.indexOf(n, i + 1)) {
+            const int e = i + int(n.size());
+            if ((i == 0 || !isWordChar(text.at(i - 1))) && (e >= text.size() || !isWordChar(text.at(e)))) {
+                best = n; bestPos = i;
+                break;
+            }
+        }
+    }
+    if (pos) *pos = bestPos;
+    return best;
+}
+
+QString CurveStore::sourceOf(const QString& methodId, const QString& name)
+{
+    return findFile(methodId, name);
 }
 
 const RefCurve* CurveStore::get(const QString& methodId, const QString& name, CurveFormat fmt, bool asF14C)
 {
-    static QHash<QString, std::shared_ptr<RefCurve>> cache;
     const QString key = methodId + '/' + name.toLower() + (asF14C ? "#f" : "#a");
-
+    {
+        QMutexLocker lock(&gMutex);
+        const auto it = gCache.constFind(key);
+        if (it != gCache.constEnd()) return it.value().get();
+    }
+    const QString path = findFile(methodId, name);         // hors verrou (dirsOf le prend)
     QMutexLocker lock(&gMutex);
-    const auto it = cache.constFind(key);
-    if (it != cache.constEnd()) return it.value().get();
-
-    const QString path = findFile(methodId, name);
+    if (const auto it = gCache.constFind(key); it != gCache.constEnd()) return it.value().get();
     std::shared_ptr<RefCurve> curve;
     if (!path.isEmpty()) {
         QFile f(path);
@@ -60,7 +133,7 @@ const RefCurve* CurveStore::get(const QString& methodId, const QString& name, Cu
             if (ok) curve = c;
         }
     }
-    cache.insert(key, curve);       // met aussi en cache l'échec (nullptr)
+    gCache.insert(key, curve);      // met aussi en cache l'échec (nullptr)
     return curve.get();
 }
 

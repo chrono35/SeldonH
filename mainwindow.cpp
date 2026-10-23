@@ -35,6 +35,9 @@
 
 #include "src/core/ChatText.h"
 #include "src/core/ChrBuilder.h"
+#include "src/core/ChronoResults.h"
+#include "src/methods/common/CurveStore.h"
+#include "src/methods/common/DensityFile.h"
 #include "src/methods/common/MethodRunner.h"
 #include "src/methods/common/Tools.h"
 #include "src/llm/RemoteEngine.h"
@@ -55,6 +58,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     settings_ = AppSettings::load();
     skills_.reload(settings_.skillsDir);
+    CurveStore::setExtraRoots(settings_.curveRoots());
 
     buildUi();
     buildMenus();
@@ -149,7 +153,9 @@ void MainWindow::buildUi()
     connect(stopBtn_, &QPushButton::clicked, this, &MainWindow::stopGeneration);
 
     attachBtn_ = new QToolButton;
-    attachBtn_->setText(QStringLiteral("📎"));
+    attachBtn_->setText(tr("📎 Joindre"));
+    attachBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    attachBtn_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);   // même largeur que « Envoyer »
     attachBtn_->setToolTip(tr("Joindre un fichier (.chr, .csv, .txt…) ou une image"));
     connect(attachBtn_, &QToolButton::clicked, this, &MainWindow::attachFile);
 
@@ -165,13 +171,14 @@ void MainWindow::buildUi()
     attachRow->addWidget(attachClear_);
     attachRow->addStretch();
 
+    // Colonne de boutons à droite de la saisie : joindre un fichier au-dessus d'« Envoyer » (la saisie prend toute la largeur).
     auto* buttons = new QVBoxLayout;
+    buttons->addWidget(attachBtn_);
     buttons->addWidget(sendBtn_);
     buttons->addWidget(stopBtn_);
     buttons->addStretch();
 
     auto* inputRow = new QHBoxLayout;
-    inputRow->addWidget(attachBtn_, 0, Qt::AlignTop);
     inputRow->addWidget(input_, 1);
     inputRow->addLayout(buttons);
 
@@ -252,6 +259,21 @@ void MainWindow::buildMenus()
     QMenu* sk = menuBar()->addMenu(tr("&Compétences"));
     sk->addAction(tr("Ouvrir le dossier des compétences"), this, &MainWindow::openSkillsFolder);
     sk->addAction(tr("Recharger les compétences"), this, &MainWindow::reloadSkills);
+
+    // Courbes de référence : dossier de l'utilisateur (14C, F14C, AM) et, en option, celles de ChronoModel.
+    QMenu* cv = menuBar()->addMenu(tr("Co&urbes"));
+    cv->addAction(tr("Courbes disponibles"), this, &MainWindow::showCurves);
+    cv->addAction(tr("Ouvrir le dossier des courbes"), this, &MainWindow::openCurvesFolder);
+    QAction* cm = cv->addAction(tr("Utiliser aussi les courbes de ChronoModel"));
+    cm->setCheckable(true);
+    cm->setChecked(settings_.useChronoModelCurves);
+    cm->setToolTip(AppSettings::chronoModelCalibDir());
+    connect(cm, &QAction::toggled, this, [this](bool on) {
+        settings_.useChronoModelCurves = on;
+        settings_.save();
+        reloadCurves();
+    });
+    cv->addAction(tr("Recharger les courbes"), this, &MainWindow::reloadCurves);
 
     QMenu* view = menuBar()->addMenu(tr("&Affichage"));
     QAction* fig = view->addAction(tr("Panneau graphiques"));
@@ -510,7 +532,13 @@ void MainWindow::sendMessage()
     }
 
     // Demande de création de modèle : la fiche qui décrit le format du bloc chronomodel est toujours fournie.
-    const QStringList pinned = MethodRunner::isModelRequest(q) ? QStringList{ QStringLiteral("03_chronomodel_creer_modele") } : QStringList();
+    QStringList pinned = MethodRunner::isModelRequest(q) ? QStringList{ QStringLiteral("03_chronomodel_creer_modele") } : QStringList();
+    // Résultats de ChronoModel joints : fiche de diagnostic de l'utilisateur si elle existe, sinon la fiche intégrée des logs.
+    if (attachChronoResults_) {
+        bool user = false;
+        for (const Skill& s : skills_.skills()) user = user || s.id == QLatin1String("chronomodel_resultats_convergence");
+        pinned << (user ? QStringLiteral("chronomodel_resultats_convergence") : QStringLiteral("11_chronomodel_logs"));
+    }
     const QList<SkillMatch> matches = skills_.select(q, settings_.skillChars, recentSkillIds(3), pinned);
     const QString knowledge = SkillManager::format(matches);
 
@@ -519,7 +547,26 @@ void MainWindow::sendMessage()
     for (const SkillMatch& m : matches) t.skillIds << m.skill->id;
 
     // Calculs déterministes (calibration 14C) : faits par l'application, pas par le modèle.
-    const RunOutcome dating = MethodRunner::analyzeQuestion(q, dateformat::fromId(settings_.dateFormat));
+    RunOutcome dating = MethodRunner::analyzeQuestion(q, dateformat::fromId(settings_.dateFormat));
+    // « Et à 50 % ? » : pas de datation dans la question, seulement un autre niveau de confiance -> la dernière datation
+    // de la conversation est recalculée à ce niveau (le modèle ne doit pas déduire une HPD des quartiles).
+    if (!dating.found) {
+        const DateFormat fmt = dateformat::detect(q, displayFormat());
+        const QVector<QJsonObject> again = MethodRunner::followUpRequests(q, lastDatingRequests(), fmt);
+        if (!again.isEmpty()) {
+            dating = MethodRunner::run(again, fmt);
+            QStringList what;
+            if (const double lv = MethodRunner::requestedLevel(q); lv > 0)
+                what << tr("au niveau %1 %").arg(QString::number(lv, 'g', 4));
+            if (again.first().contains("tmin"))
+                what << tr("sur la période d'étude %1 → %2").arg(dateformat::format(again.first().value("tmin").toDouble(), fmt),
+                                                                 dateformat::format(again.first().value("tmax").toDouble(), fmt));
+            dating.noticeHtml.prepend(tr("<p><i>↻ Datation précédente recalculée %1.</i></p>").arg(what.join(tr(" et "))));
+            dating.promptBlock.prepend(QStringLiteral("[La question demande de refaire la datation précédente %1 : SeldonH l'a "
+                                                      "recalculée (mêmes mesures, mêmes courbes). Commente ce résultat ; ne réécris "
+                                                      "pas de bloc calcul ; une HPD ne se déduit pas des quartiles.]\n").arg(what.join(" et ")));
+        }
+    }
     t.followUp = dating.found;       // déjà calculé par l'application : pas de nouveau calcul à relancer
 
     QString mu;
@@ -560,6 +607,20 @@ void MainWindow::startGeneration()
     sp.enableThinking = settings_.thinking;
     if (remoteActive()) emit requestRemoteGenerate(buildChat(), sp);
     else emit requestGenerate(buildChat(), sp);
+}
+
+// Dernières datations de la conversation (au plus 8 tours en arrière) : écrites dans une question de l'utilisateur,
+// ou demandées par l'assistant dans un bloc « calcul » (ou un appel d'outil, ré-écrit en bloc).
+QVector<QJsonObject> MainWindow::lastDatingRequests() const
+{
+    // D'abord les datations écrites par l'utilisateur (valeurs et courbes exactes) ; à défaut, un bloc « calcul » de
+    // l'assistant (il peut avoir perdu une courbe ou ajouté une clé).
+    for (int i = turns_.size() - 1, n = 0; i >= 0 && n < 8; --i, ++n)
+        if (!turns_[i].synthetic)
+            if (const QVector<QJsonObject> r = MethodRunner::requestsFromQuestion(turns_[i].question); !r.isEmpty()) return r;
+    for (int i = turns_.size() - 1, n = 0; i >= 0 && n < 8; --i, ++n)
+        if (const QVector<QJsonObject> b = MethodRunner::extractCalcBlocks(turns_[i].answer + turns_[i].toolBlocks); !b.isEmpty()) return b;
+    return {};
 }
 
 // Format : celui des Préférences, ou celui demandé dans la dernière vraie question de l'utilisateur.
@@ -742,7 +803,8 @@ void MainWindow::attachFile()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Joindre un fichier"), QString(),
-        tr("Fichiers pris en charge (*.chr *.json *.csv *.tsv *.txt *.md *.png *.jpg *.jpeg *.svg);;Tous les fichiers (*)"));
+        tr("Fichiers pris en charge (*.chr *.json *.html *.htm *.csv *.tsv *.txt *.md *.png *.jpg *.jpeg *.svg);;"
+           "Résultats ChronoModel (*.html *.htm);;Tous les fichiers (*)"));
     if (f.isEmpty()) return;
 
     const QString ext = QFileInfo(f).suffix().toLower();
@@ -755,6 +817,18 @@ void MainWindow::attachFile()
     const QByteArray data = file.readAll();
 
     QString text;
+    bool chronoResults = false;
+    if (ext == "html" || ext == "htm") {
+        // Export des résultats de ChronoModel (Log_Posterior_Distrib_Stats.html…) : trop long pour le modèle, SeldonH en
+        // extrait les valeurs utiles (convergence, σ des dates). Autre page HTML : son texte.
+        const QString plain = chronoresults::htmlToText(QString::fromUtf8(data));
+        if (chronoresults::looksLike(plain)) {
+            text = chronoresults::summarize(chronoresults::parse(plain), QFileInfo(f).fileName());
+            chronoResults = true;
+        } else {
+            text = plain;
+        }
+    }
     if (ext == "chr" || ext == "json") {
         const QJsonDocument d = QJsonDocument::fromJson(data);
         if (d.isObject() && d.object().contains("events")) text = ChrBuilder::summarize(d.object());
@@ -766,6 +840,7 @@ void MainWindow::attachFile()
     }
     attachName_ = QFileInfo(f).fileName();
     attachText_ = text;
+    attachChronoResults_ = chronoResults;
     attachLabel_->setText(tr("📎 %1 (%2 caractères)").arg(attachName_).arg(text.size()));
     attachLabel_->show();
     attachClear_->show();
@@ -775,6 +850,7 @@ void MainWindow::clearAttachment()
 {
     attachName_.clear();
     attachText_.clear();
+    attachChronoResults_ = false;
     attachLabel_->hide();
     attachClear_->hide();
 }
@@ -789,6 +865,7 @@ void MainWindow::onLink(const QUrl& url)
     else if (action == "help") showHelp();
     else if (action == "insert") insertExample(QUrlQuery(url).queryItemValue(QStringLiteral("q"), QUrl::FullyDecoded));
     else if (action == "chr") saveChrFromTurn(idx);
+    else if (action == "densityfile") saveDensityFile(url);
     else if (action == "copy" && idx >= 0 && idx < turns_.size()) QApplication::clipboard()->setText(turns_[idx].answer);
 }
 
@@ -1091,6 +1168,84 @@ void MainWindow::openSkillsFolder()
 {
     QDir().mkpath(settings_.skillsDir);
     QDesktopServices::openUrl(QUrl::fromLocalFile(settings_.skillsDir));
+}
+
+void MainWindow::openCurvesFolder()
+{
+    for (const char* m : { "c14", "f14c", "am" })
+        QDir().mkpath(QDir(settings_.curvesDir).filePath(CurveStore::subdir(QString::fromLatin1(m))));
+    QDesktopServices::openUrl(QUrl::fromLocalFile(settings_.curvesDir));
+}
+
+void MainWindow::reloadCurves()
+{
+    CurveStore::setExtraRoots(settings_.curveRoots());
+    int n = 0;
+    for (const char* m : { "c14", "f14c", "am" }) n += CurveStore::names(QString::fromLatin1(m)).size();
+    statusBar()->showMessage(tr("%1 courbes de référence disponibles").arg(n), 4000);
+}
+
+// Liste des courbes par méthode, avec leur origine (dossier de l'utilisateur, ChronoModel ou intégrée).
+void MainWindow::showCurves()
+{
+    const QString cmDir = AppSettings::chronoModelCalibDir();
+    auto origin = [&](const QString& path) {
+        if (path.startsWith(QLatin1String(":/"))) return tr("intégrée");
+        if (!cmDir.isEmpty() && path.startsWith(cmDir)) return tr("ChronoModel");
+        return tr("utilisateur");
+    };
+    QString html = tr("<b>Courbes de référence</b><br><i>Ordre de recherche : votre dossier (%1), puis ChronoModel (%2), "
+                      "puis les courbes intégrées. Une courbe se désigne par son nom de fichier sans extension.</i>")
+                       .arg(settings_.curvesDir.toHtmlEscaped(),
+                            settings_.useChronoModelCurves ? cmDir.toHtmlEscaped() : tr("désactivé"));
+    const struct { const char* id; const char* title; } methods[] = {
+        { "c14", "Radiocarbone (14C, fichiers .14c)" }, { "f14c", "F14C post-bombe (fichiers .14c)" },
+        { "am", "Archéomagnétisme (fichiers .ref)" } };
+    // Une courbe par ligne (liste à puces), avec son origine.
+    for (const auto& m : methods) {
+        const QStringList names = CurveStore::names(QString::fromLatin1(m.id));
+        html += QStringLiteral("<p><b>%1</b> — %2</p><ul>").arg(tr(m.title), tr("%n courbe(s)", nullptr, int(names.size())));
+        for (const QString& n : names)
+            html += QStringLiteral("<li><code>%1</code> <i>(%2)</i></li>")
+                        .arg(n.toHtmlEscaped(), origin(CurveStore::sourceOf(QString::fromLatin1(m.id), n)));
+        if (names.isEmpty()) html += QStringLiteral("<li><i>%1</i></li>").arg(tr("aucune"));
+        html += QStringLiteral("</ul>");
+    }
+    logNotice(html);
+}
+
+// Lien « Enregistrer le fichier… » d'une fiche de densité : la spécification est dans le lien, le fichier est recalculé.
+// Dossier proposé : Calib/Density de ChronoModel s'il est installé (le fichier y est directement utilisable).
+void MainWindow::saveDensityFile(const QUrl& url)
+{
+    const QByteArray raw = QByteArray::fromBase64(QUrlQuery(url).queryItemValue(QStringLiteral("spec")).toLatin1(),
+                                                  QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    const DensityFileResult F = buildDensityFile(QJsonDocument::fromJson(raw).object());
+    if (!F.ok) { QMessageBox::warning(this, tr("Fichier de densité"), F.error); return; }
+
+    const QString cmCalib = AppSettings::chronoModelCalibDir();
+    QString dir = QDir::homePath();
+    if (!cmCalib.isEmpty() && QDir(cmCalib).exists()) {
+        dir = QDir(cmCalib).filePath(QStringLiteral("Density"));
+        QDir().mkpath(dir);
+    }
+    const QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer le fichier de densité"), QDir(dir).filePath(F.fileName),
+                                                      tr("Densité ChronoModel (*.csv)"));
+    if (path.isEmpty()) return;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text) || f.write(F.csv.toUtf8()) < 0) {
+        QMessageBox::warning(this, tr("Fichier de densité"), tr("Impossible d'écrire %1.").arg(path));
+        return;
+    }
+    f.close();
+    const bool inCm = !cmCalib.isEmpty() && QFileInfo(path).absolutePath().startsWith(cmCalib);
+    logNotice(tr("📄 Fichier de densité enregistré : <code>%1</code>.<br>%2 Dans un modèle : "
+                 "<code>{\"type\":\"density\",\"curve\":\"%3\"}</code>.")
+                  .arg(path.toHtmlEscaped(),
+                       inCm ? tr("Il est dans le dossier des densités de ChronoModel : relancez ChronoModel pour qu'il apparaisse.")
+                            : tr("Copiez-le dans le dossier <code>Calib/Density</code> de ChronoModel (%1), puis relancez ChronoModel.")
+                                  .arg(cmCalib.isEmpty() ? tr("introuvable sur cet ordinateur") : cmCalib.toHtmlEscaped()),
+                       QFileInfo(path).fileName().toHtmlEscaped()));
 }
 
 void MainWindow::reloadSkills()

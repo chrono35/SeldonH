@@ -1,7 +1,7 @@
 ---
 name: Que faire quand un critère de convergence ne passe pas
 description: Causes et remèdes selon le symptôme (R̂ élevé, ESS faible, date aberrante, contrainte inversée)
-keywords: converge, converger, remede, remedes, corriger, correction, relancer, ne passe pas, pas converge, ne converge pas, pas convergé, non converge, que faire, comment faire, ameliorer, ess faible, rhat eleve, contrainte inversee, contradiction, aberrante, outlier, iterations, burn-in, multimodal, multimodale
+keywords: converge, converger, remede, remedes, corriger, correction, relancer, ne passe pas, pas converge, ne converge pas, pas convergé, non converge, que faire, comment faire, ameliorer, ess faible, rhat eleve, contrainte inversee, contradiction, aberrante, outlier, iterations, burn-in, multimodal, multimodale, remedy, remedies, solution, correct, fix, rerun, run again, does not pass, does not converge, did not converge, not converged, what to do, how to fix, improve, low ess, high rhat, inverted constraint
 priority: 11
 ---
 **Règle** : corrige d'abord le **modèle** (gratuit, décisif), règle le MCMC ensuite. Allonger les chaînes ne répare pas un modèle contradictoire.

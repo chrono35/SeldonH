@@ -21,16 +21,20 @@ QString C14Method::curveTitle(const QString& name)
 
 QString C14Method::defaultCurve(const QString& q)
 {
+    // Courbe nommée dans la question (intégrée, de ChronoModel ou de l'utilisateur) : « intcal98_fix », « shcal13 »…
+    if (const QString named = CurveStore::findNamed(QStringLiteral("c14"), q); !named.isEmpty()) return named;
     static const QRegularExpression explicitName(R"((intcal|shcal|marine)\s*-?\s*(20|13|09|04))");
     const auto m = explicitName.match(q);
     if (m.hasMatch()) return m.captured(1) + m.captured(2);
 
     QString family = "intcal";
     if (q.contains("marine") || q.contains("marin ") || q.contains("marins") || q.contains("coquille")
-        || q.contains("poisson") || q.contains("mammifere marin") || q.contains("reservoir"))
+        || q.contains("poisson") || q.contains("mammifere marin") || q.contains("reservoir")
+        || q.contains("shell") || q.contains("fish") || q.contains("marine mammal"))
         family = "marine";
     else if (q.contains("shcal") || q.contains("hemisphere sud") || q.contains("hemisphere austral")
-             || q.contains("australe") || q.contains("sud de l'equateur"))
+             || q.contains("australe") || q.contains("sud de l'equateur")
+             || q.contains("southern hemisphere") || q.contains("south hemisphere"))
         family = "shcal";
     return family + "20";
 }
@@ -38,7 +42,7 @@ QString C14Method::defaultCurve(const QString& q)
 // Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
 QRegularExpression C14Method::context() const
 {
-    static const QRegularExpression re(R"((c\s?-?14|14\s?-?c|carbone\s*14|radiocarbon|\bbp\b|calibr|intcal|shcal|marine\s?(?:20|13|09|04)))");
+    static const QRegularExpression re(R"((c\s?-?14|14\s?-?c|carbone\s*14|carbon\s*-?\s*14|radiocarbon|\bbp\b|calibr|intcal|shcal|marine\s?(?:20|13|09|04)))");
     return re;
 }
 
@@ -107,6 +111,11 @@ MethodResult C14Method::compute(const QJsonObject& p) const
         warn << "courbe marine sans ΔR : la correction réservoir régionale n'est pas précisée (ΔR = 0 par défaut)";
     if (age < 0) warn << "âge conventionnel négatif : échantillon post-bombe, utiliser plutôt la méthode F14C";
     return MethodResult::fromDensity(d, warn, true);
+}
+
+QStringList C14Method::referenceCurves(const QJsonObject& p) const
+{
+    return { QStringLiteral("|c14|") + p.value("curve").toString("intcal20").toLower() };
 }
 
 QString C14Method::describe(const QJsonObject& p) const

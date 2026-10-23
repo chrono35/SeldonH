@@ -5,6 +5,8 @@
 // Format JSON d'un bloc plot :
 //   { "title": "Densités a posteriori", "xlabel": "Année", "ylabel": "Densité", "fill": true, "hpd": 95,
 //     "series": [ { "name": "US 101", "x": [-520, -519, ...], "y": [0.0, 0.01, ...] } ] }
+// "layout": "rows" -> une série par ligne (axe horizontal commun, échelle verticale propre à chaque ligne, comme les
+// densités de ChronoModel) ; "overlay" -> séries superposées. Par défaut : "rows" pour des densités ("fill": true), sinon "overlay".
 // "x" peut aussi être donné une seule fois au niveau racine pour toutes les séries.
 #pragma once
 
@@ -26,7 +28,7 @@ namespace seldon {
 struct CurveSeries {
     QString          name;
     QVector<double>  x, y;
-    QColor           color;          // facultatif ("color": "#rrggbb") ; sinon bleu de ChronoModel pour la 1re série
+    QColor           color;          // facultatif ("color": "#rrggbb") ; sinon bleu de ChronoModel (1re série, ou toutes en lignes)
     bool             fill = true;    // "fill": false -> trait seul, même si le graphique remplit les HPD
     double           width = 1.8;    // épaisseur du trait ("width")
 };
@@ -44,7 +46,11 @@ struct CurveSpec {
     bool                 xReverse = false;
     // Échelle verticale partant de 0 (densités) ; "yzero": false -> ajustée aux données (traces MCMC…).
     bool                 yFromZero = true;
+    // Une série par ligne ("layout": "rows").
+    bool                 rows = false;
     QVector<CurveSeries> series;
+
+    bool stacked() const { return rows && series.size() > 1; }
 
     // Retourne false (et err) si le JSON est inexploitable.
     static bool fromJson(const QJsonObject& o, CurveSpec& out, QString* err = nullptr);
@@ -57,7 +63,9 @@ public:
     QImage render(const QSize& size) const;      // pour l'export PNG
     // Export vectoriel : document SVG de la courbe (taille en pixels, texte et tracés en vecteurs).
     QByteArray renderSvg(const QSize& size, const QString& title = QString()) const;
-    void setSpec(const CurveSpec& spec) { spec_ = spec; update(); }
+    void setSpec(const CurveSpec& spec);
+    // Taille d'export : plus haute que `base` quand les séries sont en lignes (≥ 70 px par ligne à l'échelle 800×500).
+    QSize exportSize(const QSize& base) const;
 protected:
     void paintEvent(QPaintEvent*) override;
 private:

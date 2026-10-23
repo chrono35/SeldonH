@@ -20,6 +20,7 @@ public:
     QRegularExpression context() const override;
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
+    QStringList referenceCurves(const QJsonObject& p) const override;
 };
 
 } // namespace seldon

@@ -1,7 +1,7 @@
 ---
 name: Conventions de datation et calculs simples
 description: BP, BC/AD, année zéro, moyenne pondérée, test de cohérence de dates
-keywords: bp, calendaire, avant jc, av. j.-c., ad, bc, annee zero, moyenne ponderee, ecart-type, sigma, coherence, ward et wilson, khi2, chi2, combiner, combinaison, conversion, convertir, age calendaire
+keywords: bp, calendaire, avant jc, av. j.-c., ad, bc, annee zero, moyenne ponderee, ecart-type, sigma, coherence, ward et wilson, khi2, chi2, combiner, combinaison, conversion, convertir, age calendaire, calendar, calendar age, before christ, year zero, weighted mean, weighted average, standard deviation, consistency, combine, combination, convert, cal bp
 priority: 5
 ---
 **Échelles**

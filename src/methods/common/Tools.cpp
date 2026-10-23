@@ -125,6 +125,42 @@ QVector<ToolDef> build()
                       { "dates" }),
                "event" });
 
+    v.append({ "creer_densite",
+               QStringLiteral("Crée un fichier de densité tabulée (CSV) pour le plugin Density de ChronoModel à partir d'une loi classique, "
+                              "placée sur l'axe du temps : t = offset + x, ou t = offset − x avec reverse (durée comptée vers le passé). "
+                              "Renvoie la description, les HPD et le nom du fichier ; l'utilisateur l'enregistre avec un lien. "
+                              "N'invente aucun paramètre : demande-les."),
+               schema({ { "law", str(QStringLiteral("Loi : normal (mean, sd), lognormal (meanlog et sdlog, ou median et factor), uniform (min, max), "
+                                                    "triangular (min, mode, max), trapezoidal (min, mode_min, mode_max, max), exponential (mean ou "
+                                                    "rate), gamma (shape et scale, ou mean et sd), beta (alpha, beta, sur [min ; max])."),
+                                     { "normal", "lognormal", "uniform", "triangular", "trapezoidal", "exponential", "gamma", "beta" }) },
+                        { "mean", num(QStringLiteral("Moyenne (normal, exponential, gamma).")) },
+                        { "sd", num(QStringLiteral("Écart-type (normal, gamma).")) },
+                        { "meanlog", num(QStringLiteral("Moyenne de ln x (lognormal).")) },
+                        { "sdlog", num(QStringLiteral("Écart-type de ln x (lognormal).")) },
+                        { "median", num(QStringLiteral("Médiane (lognormal), à la place de meanlog.")) },
+                        { "factor", num(QStringLiteral("Facteur multiplicatif > 1 = exp(sdlog) (lognormal), à la place de sdlog.")) },
+                        { "min", num(QStringLiteral("Borne inférieure (uniform, triangular, trapezoidal, beta).")) },
+                        { "max", num(QStringLiteral("Borne supérieure (uniform, triangular, trapezoidal, beta).")) },
+                        { "mode", num(QStringLiteral("Mode (triangular).")) },
+                        { "mode_min", num(QStringLiteral("Début du plateau (trapezoidal).")) },
+                        { "mode_max", num(QStringLiteral("Fin du plateau (trapezoidal).")) },
+                        { "rate", num(QStringLiteral("Taux (exponential, gamma), à la place de mean ou scale.")) },
+                        { "shape", num(QStringLiteral("Paramètre de forme (gamma).")) },
+                        { "scale", num(QStringLiteral("Paramètre d'échelle (gamma).")) },
+                        { "alpha", num(QStringLiteral("Premier paramètre de forme (beta).")) },
+                        { "beta", num(QStringLiteral("Second paramètre de forme (beta).")) },
+                        { "offset", num(QStringLiteral("Décalage sur l'axe du temps (année) : t = offset + x. 0 par défaut.")) },
+                        { "reverse", QJsonObject{ { "type", "boolean" },
+                                                  { "description", QStringLiteral("Vrai : t = offset − x (une durée comptée vers le passé depuis offset).") } } },
+                        { "tmin", num(QStringLiteral("Début du fichier (année). Facultatif : calculé d'après la loi.")) },
+                        { "tmax", num(QStringLiteral("Fin du fichier (année). Facultatif.")) },
+                        { "step", num(QStringLiteral("Pas de la grille en années. Facultatif (≈ 1 an).")) },
+                        { "points", num(QStringLiteral("Nombre de valeurs, à la place de step. Facultatif.")) },
+                        { "name", str(QStringLiteral("Nom du fichier (.csv ajouté). Facultatif.")) } },
+                      { "law" }),
+               "density_file" });
+
     v.append({ "courbes_disponibles",
                QStringLiteral("Liste les courbes de référence intégrées à SeldonH (calibration 14C, F14C bombe, archéomagnétisme). "
                               "À appeler avant un calcul quand l'utilisateur nomme une courbe dont tu n'es pas sûr."),
@@ -133,10 +169,22 @@ QVector<ToolDef> build()
 
     // Niveau de confiance facultatif, commun à toutes les datations.
     for (ToolDef& d : v) {
-        if (d.methodId.isEmpty()) continue;
+        if (d.methodId.isEmpty() || d.methodId == QLatin1String("density_file")) continue;
         QJsonObject props = d.parameters.value("properties").toObject();
         props["level"] = num(QStringLiteral("Niveau de confiance des intervalles HPD, en % (défaut 95). À donner seulement si "
                                             "l'utilisateur demande un autre niveau (ex. 99 ou 90) ; les HPD à 95 % et 68 % sont toujours fournies."));
+        props["color"] = str(QStringLiteral("Couleur de la courbe (\"#rrggbb\" ou nom de couleur), seulement si l'utilisateur "
+                                            "en donne une (ou si la date / l'événement du .chr en a une). Facultatif."));
+        props["layout"] = str(QStringLiteral("« overlay » seulement si l'utilisateur demande de superposer les densités sur le même "
+                                             "graphe ; sinon (défaut) chaque densité est tracée sur sa propre ligne."), { "rows", "overlay" });
+        if (d.methodId != "event") {
+            props["tmin"] = num(QStringLiteral("Début de la période d'étude (année calendaire signée), seulement si l'utilisateur en donne "
+                                               "une : la densité est calculée sur [tmin ; tmax] puis renormalisée. Défaut : toute la courbe."));
+            props["tmax"] = num(QStringLiteral("Fin de la période d'étude (année calendaire signée). Facultatif."));
+        }
+        if (d.methodId != "event")
+            props["name"] = str(QStringLiteral("Nom de la datation (ex. « Ly-1234 », ou le « name » de la date dans un fichier .chr), "
+                                               "repris dans le titre du graphique. Facultatif."));
         if (d.methodId != "event")
             props["wiggle"] = QJsonObject{ { "type", "object" },
                                            { "description", QStringLiteral("Facultatif, seulement si l'utilisateur donne un décalage δ (wiggle-matching) entre "
@@ -316,9 +364,14 @@ QJsonObject mergePlots(const QVector<QJsonObject>& plots)
     QJsonObject merged;
     QJsonArray series;
     QStringList names;
+    QStringList dateNames;
+    bool dating = true;              // tous des graphiques de datation (clé « dates ») : titre refait avec tous les noms
     bool sameLevel = true;
     for (const QJsonObject& p : plots) {
         if (p.isEmpty()) continue;
+        if (!p.contains("dates")) dating = false;
+        for (const QJsonValue& n : p.value("dates").toArray())
+            if (!dateNames.contains(n.toString())) dateNames << n.toString();
         if (merged.isEmpty()) merged = p;
         else if (p.value("hpd").toDouble(95) != merged.value("hpd").toDouble(95)) sameLevel = false;
         for (const QJsonValue& s : p.value("series").toArray()) {
@@ -331,8 +384,21 @@ QJsonObject mergePlots(const QVector<QJsonObject>& plots)
     if (!merged.isEmpty()) {
         merged["series"] = series;
         if (!sameLevel) merged["hpd"] = 95;                            // niveaux différents : 95 % pour toutes
+        if (dating) {
+            merged["dates"] = QJsonArray::fromStringList(dateNames);
+            merged["title"] = datingPlotTitle(dateNames, int(series.size()));
+        }
     }
     return merged;
+}
+
+QString datingPlotTitle(const QStringList& names, int seriesCount)
+{
+    if (names.isEmpty()) return QStringLiteral("Densités calendaires (calcul SeldonH)");
+    constexpr int kMax = 4;                                            // titre lisible : au plus 4 noms
+    QString list = QStringList(names.mid(0, kMax)).join(", ");
+    if (names.size() > kMax) list += QStringLiteral(", … (+%1)").arg(names.size() - kMax);
+    return (seriesCount <= 1 ? QStringLiteral("Densité calendaire — %1") : QStringLiteral("Densités calendaires — %1")).arg(list);
 }
 
 } // namespace tools

@@ -1,7 +1,7 @@
 ---
 name: Lire les logs de ChronoModel et repérer la variable à problème
 description: Verdict de convergence, critères R̂ et ESS de ChronoModel, localisation de la variable en échec (événement, donnée, paramètre)
-keywords: log, logs, journal, resultats, ne converge pas, pas converge, converge, converger, convergence, converged, not converged, rhat, gelman, ess bulk, ess tail, ess, posterior event date, posterior std ti, posterior shrinkage, posterior calib, std ti, shrinkage, adaptation, not adapted, critere, criteres, variable, probleme, echec, acceptance rate
+keywords: annealing, recuit, disabled, log, logs, journal, resultats, ne converge pas, pas converge, converge, converger, convergence, converged, not converged, rhat, gelman, ess bulk, ess tail, ess, posterior event date, posterior std ti, posterior shrinkage, posterior calib, std ti, shrinkage, adaptation, not adapted, critere, criteres, variable, probleme, echec, acceptance rate, results, does not converge, did not converge, criterion, criteria, problem, failure, failed
 priority: 12
 ---
 **Quatre logs** : *Description* (événements, données, **nombre** de contraintes « back » = a un prédécesseur plus ancien, « fwd » = a un successeur plus récent, paramètres réels des dates), *Initialisation*, *Adaptation*, *Statistiques a posteriori* (résultats et critères). Le nom d'une donnée est libre : fie-toi à ses paramètres réels.
@@ -17,5 +17,7 @@ priority: 12
 - 4 chaînes par défaut ; avec 2, R̂ est peu fiable. Un posterior en deux gros morceaux HPD peut être légitime (calibration multimodale).
 
 **Repérer la variable racine** : plusieurs variables d'un même événement avec le **même R̂** → une seule cause. La racine est en général l'événement (date ou contrainte) ; un σ_i ou un S02 énorme en est la **conséquence**. Indices : trace qui touche les bornes de la période d'étude ; états de fin d'adaptation très différents entre les deux chaînes ; médiane de l'événement éloignée de ses dates de plusieurs erreurs.
+
+**Recuit (« 4 - ANNEALING »)** : « Disabled » = recuit simulé désactivé (Recurrence = 0, demandé par « pas de recuit ») ; sinon Init. Temp. (exposant de 2), Recurrence et Dwell. Sans recuit, une chaîne peut rester bloquée dans un mode d'une densité multimodale : R̂ élevé entre chaînes, traces qui ne se croisent pas ; remède : réactiver le recuit ou allonger les chaînes.
 
 **Adaptation** : elle s'arrête quand tous les taux d'acceptation sont dans leur fenêtre : 42–46 % (cible 44 %), et 30–40 % pour t_i et σ_i des événements à plusieurs dates. « Not adapted after 100 batches » (taux en rouge) veut dire qu'au moins un taux est resté hors fenêtre : fréquent, sans gravité en pratique si R̂ et ESS passent. Le *Shrinkage* S02 n'existe que dans le modèle d'événement EDM2.

@@ -1,7 +1,7 @@
 ---
 name: Archéomagnétisme
 description: Datation par inclinaison, déclinaison et intensité, courbes de référence, réduction au site
-keywords: archeomagnetisme, archeomagnetique, paleomagnetisme, inclinaison, declinaison, intensite, alpha95, courbe de reference, champ magnetique, vgp, relocate, reduction
+keywords: archeomagnetisme, archeomagnetique, paleomagnetisme, inclinaison, declinaison, intensite, alpha95, courbe de reference, champ magnetique, vgp, relocate, reduction, archaeomagnetism, archaeomagnetic, archeomagnetic, palaeomagnetism, paleomagnetism, inclination, declination, intensity, reference curve, magnetic field, geomagnetic
 priority: 3
 ---
 - On mesure l'inclinaison I, la déclinaison D (et/ou l'intensité F) de l'aimantation thermorémanente d'une structure cuite, avec son incertitude (α95 pour la direction).

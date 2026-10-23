@@ -61,6 +61,10 @@ public:
 
     // « 1954 ± 50 BP — IntCal20 »
     virtual QString describe(const QJsonObject& params) const = 0;
+
+    // Courbes de référence utilisées par ce calcul, sous la forme « rôle|méthode|nom » (rôle : vide, ou I, D, F pour
+    // l'archéomagnétisme ; méthode : dossier de CurveStore). Vide pour une méthode sans courbe (Gauss, uniforme, TL).
+    virtual QStringList referenceCurves(const QJsonObject& params) const { (void)params; return {}; }
 };
 
 } // namespace seldon

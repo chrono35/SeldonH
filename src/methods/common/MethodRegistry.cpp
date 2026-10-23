@@ -126,6 +126,12 @@ MethodResult MethodRegistry::compute(const QJsonObject& request) const
     return m->compute(request);
 }
 
+QStringList MethodRegistry::referenceCurves(const QJsonObject& request) const
+{
+    const Method* m = byId(request.value("method").toString());
+    return m ? m->referenceCurves(request) : QStringList();
+}
+
 QString MethodRegistry::describe(const QJsonObject& request) const
 {
     const Method* m = byId(request.value("method").toString());

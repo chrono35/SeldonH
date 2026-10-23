@@ -1,7 +1,7 @@
 ---
 name: Autres méthodes de datation
 description: Dendrochronologie, luminescence, TPQ/TAQ, typologie, comment les saisir dans un modèle
-keywords: dendrochronologie, dendro, luminescence, otl, tl, thermoluminescence, tpq, taq, terminus, typologie, ceramique, monnaie, numismatique, texte, source ecrite, uranium, thorium, datation simple, type de date
+keywords: dendrochronologie, dendro, luminescence, otl, tl, thermoluminescence, tpq, taq, terminus, typologie, ceramique, monnaie, numismatique, texte, source ecrite, uranium, thorium, datation simple, type de date, dendrochronology, optically stimulated, terminus post quem, terminus ante quem, typology, pottery, ceramic, coin, numismatics, written source, simple dating, date type
 priority: 4
 ---
 Comment traduire une information en date de modèle :

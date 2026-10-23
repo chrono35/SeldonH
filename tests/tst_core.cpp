@@ -24,6 +24,7 @@
 #include "../src/core/MathText.h"
 #include "../src/core/ChatText.h"
 #include "../src/core/ChrBuilder.h"
+#include "../src/core/ChronoResults.h"
 #include "../src/core/ConversationStore.h"
 #include "../src/ui/HistoryPanel.h"
 #include <QListWidget>
@@ -34,6 +35,7 @@
 #include "../src/methods/common/CurveStore.h"
 #include "../src/methods/common/DateFormat.h"
 #include "../src/methods/common/EventMcmc.h"
+#include "../src/methods/common/DensityFile.h"
 #include "../src/methods/common/MethodRegistry.h"
 #include "../src/methods/common/MethodRunner.h"
 #include "../src/methods/common/Tools.h"
@@ -141,6 +143,13 @@ private slots:
         QVERIFY(ids("Peux-tu calibrer cette date radiocarbone avec IntCal20 ?").contains("05_radiocarbone"));
         QVERIFY(ids("Convertis 2500 BP en années calendaires").contains("01_conventions_datation"));
         QVERIFY(ids("Bonjour").isEmpty());
+        // questions en anglais : mots-clés anglais des fiches
+        QVERIFY(ids("How do I build a ChronoModel model with two phases and a constraint?").contains("03_chronomodel_creer_modele"));
+        QVERIFY(ids("Please calibrate this radiocarbon date with IntCal20").contains("05_radiocarbone"));
+        QVERIFY(ids("My run did not converge, what should I do?").contains("12_chronomodel_logs_remedes"));
+        QVERIFY(ids("How should I interpret the posterior credible interval?").contains("04_chronomodel_interpreter"));
+        QVERIFY(ids("Archaeomagnetic dating with inclination 65 and alpha95 1").contains("06_archeomagnetisme"));
+        QVERIFY(ids("Hello").isEmpty());
         // exclusion des fiches déjà injectées
         QVERIFY(!m.select("créer un modèle ChronoModel", 6000, { "03_chronomodel_creer_modele" })
                      .isEmpty() || true);
@@ -154,7 +163,7 @@ private slots:
     {
         SkillManager m;
         m.reload(QString());
-        auto ids = [&](const QString& q) { QStringList r; for (auto& x : m.select(q, 5000)) r << x.skill->id; return r; };
+        auto ids = [&](const QString& q) { QStringList r; for (auto& x : m.select(q, AppSettings().skillChars)) r << x.skill->id; return r; };
         // log collé : la fiche de lecture des logs est choisie
         const QStringList a = ids("Le log indique Not converged (max R\u0302 = 1.8268 ; min ESS = 3). Quelle variable pose problème ?");
         QVERIFY2(a.contains("11_chronomodel_logs"), qPrintable(a.join(",")));
@@ -177,8 +186,8 @@ private slots:
         QVERIFY(!logs.contains("1,1 ") && !fix.contains("1,1 "));
         QVERIFY(fix.contains("contraintes") && fix.contains("burn-in", Qt::CaseInsensitive));
         QVERIFY(!logs.isEmpty() && !fix.isEmpty());
-        // les deux fiches tiennent ensemble dans le budget par défaut des Préférences (5000)
-        QVERIFY(logs.size() + fix.size() <= 5000);
+        // les deux fiches tiennent ensemble dans le budget par défaut des Préférences
+        QVERIFY(logs.size() + fix.size() <= AppSettings().skillChars);
     }
 
     void skillUserOverride()
@@ -340,6 +349,512 @@ private slots:
         QVERIFY(sum.contains("TL/OSL 488"));
         QVERIFY(sum.contains("archéomag. F"));
         QVERIFY(sum.contains("archéomag. I"));
+    }
+
+    // Dates radiocarbone exportées au format du plugin 14c de ChronoModel (relevé dans Castelnau_version_19-12-2016.chr :
+    // "data": {"age", "delta_r", "delta_r_error", "error", "ref_curve": "intcal13.14c"}).
+    void chrRadiocarbon()
+    {
+        using namespace seldon;
+        const QString spec = R"({"name":"Projet","events":[{"name":"titi","dates":[
+            {"type":"c14","name":"D1","age":15600,"error":50},
+            {"type":"c14","name":"D2","age":16040,"error":30,"curve":"IntCal13.14C"},
+            {"type":"c14","name":"Coq","age":3000,"error":30,"curve":"marine20","delta_r":-50,"delta_r_error":30}]}]})";
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        const QJsonArray ds = r.chr["events"].toArray()[0].toObject()["dates"].toArray();
+        QCOMPARE(ds.size(), 3);
+        auto keys = [](const QJsonObject& o) { QStringList k = o.keys(); k.sort(); return k; };
+        const QJsonObject d1 = ds[0].toObject(), d2 = ds[1].toObject(), d3 = ds[2].toObject();
+        QCOMPARE(d1["plugin_id"].toString(), QString("14c"));
+        QCOMPARE(d1["sampler"].toInt(), 4);
+        QCOMPARE(keys(d1["data"].toObject()), QStringList({ "age", "delta_r", "delta_r_error", "error", "ref_curve" }));
+        QCOMPARE(d1["data"].toObject()["ref_curve"].toString(), QString("intcal20.14c"));          // défaut, avec avertissement
+        QVERIFY(r.warnings.join(" ").contains("IntCal20"));
+        QCOMPARE(d2["data"].toObject()["ref_curve"].toString(), QString("intcal13.14c"));          // minuscules, sans doubler .14c
+        QCOMPARE(d3["data"].toObject()["delta_r"].toDouble(), -50.0);
+        QCOMPARE(d3["data"].toObject()["delta_r_error"].toDouble(), 30.0);
+        // plage d'étude : contient les HPD à 95 % des calibrations
+        const int tmin = r.chr["settings"].toObject()["tmin"].toInt(), tmax = r.chr["settings"].toObject()["tmax"].toInt();
+        for (const QJsonValue& v : ds) {
+            const QJsonObject rq = MethodRunner::normalizeRequest(v.toObject());       // relecture du .chr par SeldonH
+            QCOMPARE(rq["method"].toString(), QString("c14"));
+            const MethodResult cal = MethodRegistry::instance().compute(rq);
+            QVERIFY2(cal.ok, qPrintable(cal.error));
+            for (const Interval& iv : cal.hpd95) QVERIFY(iv.from >= tmin && iv.to <= tmax);
+        }
+        QVERIFY(ChrBuilder::summarize(r.chr).contains("14C 15600±50"));
+        // erreur manquante : refusée
+        QVERIFY(!ChrBuilder::build(QJsonDocument::fromJson(R"({"events":[{"name":"E","dates":[{"type":"c14","age":2500}]}]})").object()).ok);
+    }
+
+    // Tous les plugins de date, avec et sans wiggle, comparés à un projet écrit par ChronoModel 4.0
+    // (tests/data/test_tous_plugin_wiggle.chr : unif, gauss, 14c, f14c, density avec les 4 cas de décalage, am, tl/osl).
+    void chrAllPluginsLikeReference()
+    {
+        using namespace seldon;
+        QFile f(QFINDTESTDATA("data/test_tous_plugin_wiggle.chr"));
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QJsonObject ref = QJsonDocument::fromJson(f.readAll()).object();
+        auto keys = [](const QJsonObject& o) { QStringList k = o.keys(); k.sort(); return k; };
+        QHash<QString, QStringList> refData;                 // plugin -> clés de « data »
+        QStringList refDateKeys;
+        for (const QJsonValue& ev : ref["events"].toArray())
+            for (const QJsonValue& dv : ev.toObject()["dates"].toArray()) {
+                const QJsonObject d = dv.toObject();
+                refData[d["plugin_id"].toString()] = keys(d["data"].toObject());
+                if (d.contains("is_selected")) refDateKeys = keys(d);
+                // relecture par SeldonH : méthode reconnue, décalage compris, calcul possible (sauf densité : pas de fichier)
+                if (d["plugin_id"].toString() == "density") continue;
+                const QJsonObject rq = MethodRunner::normalizeRequest(d);
+                QVERIFY2(!rq["method"].toString().isEmpty(), qPrintable(d["name"].toString()));
+                QCOMPARE(rq.contains("wiggle"), d["delta_type"].toInt() >= 0);
+                const MethodResult r = MethodRegistry::instance().compute(rq);
+                QVERIFY2(r.ok, qPrintable(d["name"].toString() + " : " + r.error));
+            }
+        QCOMPARE(QSet<QString>(refData.keyBegin(), refData.keyEnd()),
+                 QSet<QString>({ "unif", "gauss", "14c", "f14c", "density", "am", "tl/osl" }));
+
+        const QString spec = R"({"name":"Tous","events":[
+          {"name":"unif","dates":[{"type":"unif","name":"u0","min":0,"max":100},
+             {"type":"unif","name":"u1","min":0,"max":100,"wiggle":{"type":"fixed","value":12}},
+             {"type":"unif","name":"u2","min":0,"max":100,"wiggle":{"type":"range","min":-10,"max":10}},
+             {"type":"unif","name":"u3","min":0,"max":100,"wiggle":{"type":"gaussian","mean":50,"error":5}}]},
+          {"name":"Gauss","dates":[{"type":"gauss","name":"g0","age":0,"error":100},
+             {"type":"gauss","name":"g1","age":0,"error":100,"wiggle":{"type":"fixed","value":-10}}]},
+          {"name":"F14C","dates":[{"type":"f14c","name":"f0","f14c":1.2,"error":0.01,"curve":"bomb13nh1"},
+             {"type":"f14c","name":"f1","f14c":1.2,"error":0.01,"curve":"bomb13nh1","wiggle":{"type":"range","min":-20,"max":20}}]},
+          {"name":"Density","dates":[{"type":"density","name":"d0","curve":"-400_200.csv"},
+             {"type":"density","name":"d1","curve":"-400_200","wiggle":{"type":"gaussian","mean":50,"error":3}}]},
+          {"name":"AM","dates":[{"type":"am","name":"Inclinaison","process":"I","inc":65,"alpha95":1}]},
+          {"name":"TL/OSL","dates":[{"type":"tl","name":"TL","age":100,"error":30,"ref_year":2026}]},
+          {"name":"14C","dates":[{"type":"c14","name":"c0","age":3124,"error":30,"curve":"intcal20"},
+             {"type":"c14","name":"c1","age":3124,"error":30,"curve":"intcal20","wiggle":{"type":"fixed","value":120}},
+             {"type":"c14","name":"c2","age":3124,"error":30,"curve":"intcal20","wiggle":{"type":"range","min":-20,"max":20}},
+             {"type":"c14","name":"c3","age":3124,"error":30,"curve":"intcal20","wiggle":{"type":"gaussian","mean":10,"error":23}}]}]})";
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        QHash<QString, QJsonObject> byName;
+        for (const QJsonValue& ev : r.chr["events"].toArray())
+            for (const QJsonValue& dv : ev.toObject()["dates"].toArray()) {
+                const QJsonObject d = dv.toObject();
+                byName[d["name"].toString()] = d;
+                QCOMPARE(keys(d), refDateKeys);
+                QCOMPARE(d["sampler"].toInt(), 4);
+                const QString pl = d["plugin_id"].toString();
+                QCOMPARE(keys(d["data"].toObject()), refData.value(pl));
+            }
+        // décalages : même encodage que ChronoModel
+        QCOMPARE(byName["u0"]["delta_type"].toInt(), -1);
+        QCOMPARE(byName["u1"]["delta_type"].toInt(), 0);  QCOMPARE(byName["u1"]["delta_fixed"].toDouble(), 12.0);
+        QCOMPARE(byName["u2"]["delta_type"].toInt(), 2);  QCOMPARE(byName["u2"]["delta_min"].toDouble(), -10.0);
+        QCOMPARE(byName["u2"]["delta_max"].toDouble(), 10.0);
+        QCOMPARE(byName["u3"]["delta_type"].toInt(), 1);  QCOMPARE(byName["u3"]["delta_average"].toDouble(), 50.0);
+        QCOMPARE(byName["u3"]["delta_error"].toDouble(), 5.0);
+        QCOMPARE(byName["g1"]["delta_fixed"].toDouble(), -10.0);
+        QCOMPARE(byName["f1"]["delta_type"].toInt(), 2);
+        QCOMPARE(byName["d1"]["delta_type"].toInt(), 1);
+        QCOMPARE(byName["f0"]["data"].toObject()["fraction"].toDouble(), 1.2);
+        QCOMPARE(byName["f0"]["data"].toObject()["ref_curve"].toString(), QString("bomb13nh1.14c"));
+        QCOMPARE(byName["d1"]["data"].toObject()["curve"].toString(), QString("-400_200.csv"));
+        QCOMPARE(byName["c0"]["data"].toObject()["ref_curve"].toString(), QString("intcal20.14c"));
+        QCOMPARE(byName["c1"]["delta_type"].toInt(), 0);  QCOMPARE(byName["c1"]["delta_fixed"].toDouble(), 120.0);
+        QCOMPARE(byName["c2"]["delta_type"].toInt(), 2);  QCOMPARE(byName["c2"]["delta_min"].toDouble(), -20.0);
+        QCOMPARE(byName["c3"]["delta_type"].toInt(), 1);  QCOMPARE(byName["c3"]["delta_error"].toDouble(), 23.0);
+        QVERIFY(r.warnings.join(" ").contains("Calib/Density"));
+        const QString sum = ChrBuilder::summarize(r.chr);
+        QVERIFY(sum.contains("F14C 1.2±0.01"));
+        QVERIFY(sum.contains("densité tabulée"));
+    }
+
+    // Contraintes entre événements ou phases : relation en toutes lettres (français / anglais), séquence, objet ;
+    // doublons ignorés, contradictions et cycles refusés, contraintes listées en clair dans le résumé.
+    void chrConstraintRelations()
+    {
+        using namespace seldon;
+        auto build = [](const QString& cons, const QString& key = "event_constraints") {
+            const QString spec = QStringLiteral(R"({"phases":[{"name":"P1"},{"name":"P2"}],"events":[
+                {"name":"A","phases":["P1"],"dates":[{"type":"gauss","age":100,"error":10}]},
+                {"name":"B","phases":["P1"],"dates":[{"type":"gauss","age":200,"error":10}]},
+                {"name":"C","phases":["P2"],"dates":[{"type":"gauss","age":300,"error":10}]}],"%1":%2})").arg(key, cons);
+            return ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
+        };
+        // (plus ancien, plus récent) de chaque contrainte, par nom
+        auto order = [](const ChrResult& r, const char* key = "events_constraints", const char* list = "events") {
+            QHash<int, QString> n;
+            for (const QJsonValue& v : r.chr[list].toArray()) n[v.toObject()["id"].toInt()] = v.toObject()["name"].toString();
+            QStringList l;
+            for (const QJsonValue& v : r.chr[key].toArray())
+                l << n[v.toObject()["bwd_id"].toInt()] + "<" + n[v.toObject()["fwd_id"].toInt()];
+            return l;
+        };
+        const struct { const char* rel; const char* expected; } cases[] = {
+            { "avant", "A<B" }, { "antérieur à", "A<B" }, { "précède", "A<B" }, { "en dessous de", "A<B" }, { "sous", "A<B" },
+            { "est coupé par", "A<B" }, { "est suivi par", "A<B" }, { "before", "A<B" }, { "older than", "A<B" }, { "below", "A<B" },
+            { "is cut by", "A<B" }, { "après", "B<A" }, { "postérieur à", "B<A" }, { "succède à", "B<A" }, { "au-dessus de", "B<A" },
+            { "recouvre", "B<A" }, { "coupe", "B<A" }, { "est précédé par", "B<A" }, { "after", "B<A" }, { "above", "B<A" },
+            { "overlies", "B<A" }, { "younger than", "B<A" }, { "cuts", "B<A" }, { "is preceded by", "B<A" } };
+        for (const auto& c : cases) {
+            const ChrResult r = build(QStringLiteral(R"([["A","%1","B"]])").arg(QString::fromUtf8(c.rel)));
+            QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+            QCOMPARE(order(r), QStringList{ QString::fromLatin1(c.expected) });
+        }
+        // forme historique, séquence, objets ; doublon ignoré
+        QCOMPARE(order(build(R"([["A","B"]])")), QStringList{ "A<B" });
+        QCOMPARE(order(build(R"([["A","B","C"]])")), QStringList({ "A<B", "B<C" }));
+        QCOMPARE(order(build(R"([{"older":"C","younger":"A"},{"a":"B","relation":"above","b":"C"},["C","A"]])")),
+                 QStringList({ "C<A", "C<B" }));
+        // relation inconnue : ignorée avec avertissement ; contradiction et cycle : erreurs
+        const ChrResult u = build(R"([["A","contemporain de","B"]])");
+        QVERIFY(u.ok && order(u).isEmpty() && u.warnings.join(" ").contains("relation non reconnue"));
+        QVERIFY(!build(R"([["A","avant","B"],["A","après","B"]])").ok);
+        const ChrResult cyc = build(R"([["A","B"],["B","C"],["C","A"]])");
+        QVERIFY(!cyc.ok && cyc.errors.join(" ").contains("cycle"));
+        // phases et résumé en clair
+        const ChrResult ph = build(R"([["P2","succède à","P1"]])", "phase_constraints");
+        QCOMPARE(order(ph, "phases_constraints", "phases"), QStringList{ "P1<P2" });
+        QVERIFY(ChrBuilder::summarize(ph.chr).contains("Phases : P1 → P2"));
+        QVERIFY(ChrBuilder::summarize(build(R"([["B","au-dessus de","A"]])").chr).contains("Événements : A → B"));
+    }
+
+    // Tournures anglaises reconnues par le détecteur de datations et les réglages du calcul.
+    void englishPhrasing()
+    {
+        using namespace seldon;
+        auto parse = [](const QString& q) { return MethodRegistry::instance().parse(q); };
+        const auto tl = parse("TL 488 ± 19 years, measured in 2015");
+        QVERIFY(!tl.isEmpty());
+        QCOMPARE(tl[0]["refYear"].toInt(), 2015);
+        const auto sh = parse("radiocarbon 2500 ± 30 BP, southern hemisphere");
+        QVERIFY(!sh.isEmpty());
+        QCOMPARE(sh[0]["curve"].toString(), QString("shcal20"));
+        const auto sea = parse("carbon-14 date on a shell, 3000 ± 30 BP");
+        QVERIFY(!sea.isEmpty());
+        QCOMPARE(sea[0]["curve"].toString(), QString("marine20"));
+        const auto un = parse("uniform between 1100 and 1500");
+        QVERIFY(!un.isEmpty());
+        QCOMPARE(un[0]["max"].toDouble(), 1500.0);
+        const auto am = parse("archaeomagnetic date: inclination 65, alpha95 1");
+        QVERIFY(!am.isEmpty());
+        QCOMPARE(am[0]["process"].toString(), QString("I"));
+        QCOMPARE(am[0]["inc"].toDouble(), 65.0);
+        QVERIFY(!parse("F14C 1.2 ± 0.01, post-bomb, southern hemisphere").isEmpty());
+        // réglages
+        double tmin = 0, tmax = 0;
+        const QJsonObject m = MethodRunner::mcmcFromQuestion("run with 2 chains, 20000 iterations, no annealing, study period from -1000 to 500",
+                                                             &tmin, &tmax);
+        QCOMPARE(m["num_proc"].toInt(), 2);
+        QCOMPARE(m["num_iter"].toInt(), 20000);
+        QCOMPARE(m["anneal_recurrence"].toInt(), 0);
+        QCOMPARE(tmin, -1000.0);
+        QCOMPARE(tmax, 500.0);
+        QCOMPARE(MethodRunner::requestedLevel("14C 2500 ± 30 BP at 99 %"), 99.0);
+        QCOMPARE(MethodRunner::requestedLevel("with a confidence level of 90 %"), 90.0);
+        QVERIFY(MethodRunner::asksEvent("combine these two dates"));
+        QVERIFY(MethodRunner::asksOverlay("show them on the same graph"));
+        const QJsonObject w = MethodRunner::wiggleFromQuestion("14C 2500 ± 30 BP with an offset between 10 and 30 years");
+        QCOMPARE(w["type"].toString(), QString("range"));
+        QCOMPARE(w["max"].toDouble(), 30.0);
+        QCOMPARE(dateformat::detect("14C 3000 ± 30 BP, give the results in cal BP", DateFormat::BcAd), DateFormat::CalBP);
+        QCOMPARE(dateformat::detect("14C 3000 ± 30 BP, express the intervals in ka", DateFormat::BcAd), DateFormat::Ka);
+    }
+
+    // Courbes de référence ajoutées dans un dossier (utilisateur ou Calib de ChronoModel) : lues avant les intégrées.
+    void userCurvesFolder()
+    {
+        using namespace seldon;
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QDir(root.path()).mkpath("14C");
+        QDir(root.path()).mkpath("AM");
+        QVERIFY(QFile::copy(":/methods/c14/curves/intcal20.14c", root.path() + "/14C/MaCourbe.14c"));
+        QVERIFY(QFile::copy(":/methods/c14/curves/intcal13.14c", root.path() + "/14C/intcal20.14c"));    // remplace l'intégrée
+        QVERIFY(QFile::copy(":/methods/am/curves/GAL2002sph2014_I.ref", root.path() + "/AM/test_i.ref"));
+        QFile junk(root.path() + "/14C/lisez-moi.txt"); QVERIFY(junk.open(QIODevice::WriteOnly)); junk.write("x"); junk.close();
+
+        const QStringList saved = CurveStore::extraRoots();
+        CurveStore::setExtraRoots({ root.path() });
+        QVERIFY(CurveStore::names("c14").contains("macourbe"));
+        QVERIFY(!CurveStore::names("c14").contains("lisez-moi"));               // seulement les .14c
+        QVERIFY(CurveStore::names("c14").contains("marine20"));                 // les intégrées restent
+        QVERIFY(CurveStore::sourceOf("c14", "intcal20").startsWith(root.path()));
+        const MethodResult c = MethodRegistry::instance().compute(QJsonObject{ { "method", "c14" }, { "age", 2500 }, { "error", 30 }, { "curve", "macourbe" } });
+        QVERIFY2(c.ok, qPrintable(c.error));
+        const MethodResult a = MethodRegistry::instance().compute(QJsonObject{ { "method", "am" }, { "process", "I" }, { "inc", 65 },
+                                                                               { "alpha95", 1 }, { "curveI", "test_i" }, { "steps", 500 } });
+        QVERIFY2(a.ok, qPrintable(a.error));
+        // retour aux seules courbes intégrées
+        CurveStore::setExtraRoots(saved);
+        QVERIFY(CurveStore::sourceOf("c14", "intcal20").startsWith(":/"));
+        QVERIFY(!CurveStore::names("c14").contains("macourbe"));
+    }
+
+    // Fichier de densité pour le plugin Density de ChronoModel (lois classiques, placement sur l'axe du temps).
+    void densityFileTool()
+    {
+        using namespace seldon;
+        auto build = [](const char* json) { return buildDensityFile(QJsonDocument::fromJson(QByteArray(json)).object()); };
+        // relit le CSV comme PluginDensity::loadRefFile : 1re colonne, commentaires //, tmin, tmax, valeurs
+        auto reread = [](const QString& csv) {
+            QVector<double> v;
+            for (const QString& l : csv.split('\n', Qt::SkipEmptyParts)) {
+                if (l.trimmed().startsWith("//")) continue;
+                bool ok = false; const double d = l.split(',').first().toDouble(&ok);
+                if (ok) v << d;
+            }
+            return v;
+        };
+        // loi normale : bornes ±5σ, une valeur par an, statistiques retrouvées
+        const DensityFileResult N = build(R"({"law":"normale","mean":-250,"sd":50})");
+        QVERIFY2(N.ok, qPrintable(N.error));
+        QCOMPARE(N.tmin, -500.0); QCOMPARE(N.tmax, 0.0); QCOMPARE(N.points, 501);
+        const QVector<double> nv = reread(N.csv);
+        QCOMPARE(nv.size(), N.points + 2);
+        QCOMPARE(nv[0], -500.0); QCOMPARE(nv[1], 0.0);
+        QVERIFY(N.csv.startsWith("// SeldonH : loi normale"));
+        const DensityStats ns = densityStats(N.density);
+        QVERIFY(std::abs(ns.mean + 250) < 0.5 && std::abs(ns.sd - 50) < 0.5);
+        // durée log-normale comptée vers le passé depuis 1200 : toute la masse avant 1200, médiane ≈ 1170
+        const DensityFileResult LN = build(R"({"law":"log-normale","median":30,"factor":2,"offset":1200,"reverse":true})");
+        QVERIFY2(LN.ok, qPrintable(LN.error));
+        QCOMPARE(LN.tmax, 1200.0);
+        QVERIFY(LN.placement.contains("1200 − x"));
+        QVERIFY(std::abs(densityStats(LN.density).median - 1170) < 1.5);
+        // triangulaire décalée : mode en 110 ; uniforme au pas de 10 ans : 41 valeurs égales
+        const DensityFileResult T = build(R"({"law":"triangular","min":0,"mode":10,"max":40,"offset":100})");
+        QVERIFY(T.ok && std::abs(densityStats(T.density).mode - 110) < 0.5);
+        const DensityFileResult U = build(R"({"law":"uniform","min":1100,"max":1500,"step":10,"name":"Four 3"})");
+        QVERIFY(U.ok);
+        QCOMPARE(U.points, 41);
+        QCOMPARE(U.fileName, QString("Four 3.csv"));
+        const QVector<double> uv = reread(U.csv);
+        QCOMPARE(uv[2], uv.last());
+        // autres lois ; densité infinie au bord (bêta de forme < 1) signalée
+        for (const char* j : { R"({"law":"exponential","mean":50})", R"({"law":"gamma","mean":20,"sd":10,"offset":-300})",
+                               R"({"law":"trapezoidal","min":0,"mode_min":10,"mode_max":30,"max":50})",
+                               R"({"law":"beta","alpha":2,"beta":5,"min":0,"max":100})" }) {
+            const DensityFileResult r = build(j);
+            QVERIFY2(r.ok, j);
+            QVERIFY(std::abs(densityArea(r.density) - 1.0) < 1e-6);
+        }
+        const DensityFileResult B = build(R"({"law":"beta","alpha":0.5,"beta":0.5,"min":0,"max":10,"points":51})");
+        QVERIFY(B.ok && B.warnings.join(" ").contains("infinie"));
+        // erreurs
+        QVERIFY(!build(R"({"law":"normal","mean":0,"sd":0})").ok);
+        QVERIFY(!build(R"({"law":"cauchy","mean":0})").ok);
+        QVERIFY(!build(R"({"law":"normal","mean":0,"sd":10,"tmin":100,"tmax":50})").ok);
+        // bornes imposées trop étroites : avertissement
+        QVERIFY(build(R"({"law":"normal","mean":0,"sd":10,"tmin":-5,"tmax":5})").warnings.join(" ").contains("%"));
+
+        // outil (modèle distant) et bloc « calcul » : fiche, graphique, lien d'enregistrement qui recalcule le même fichier
+        const auto t = tools::execute("creer_densite", R"({"law":"normal","mean":-250,"sd":50,"name":"Test"})", DateFormat::BcAd);
+        QVERIFY2(t.executed, qPrintable(t.content));
+        QCOMPARE(t.run.plot["series"].toArray()[0].toObject()["name"].toString(), QString("Test.csv"));
+        const QRegularExpressionMatch m = QRegularExpression("seldon://densityfile\\?spec=([A-Za-z0-9_-]+)").match(t.run.noticeHtml);
+        QVERIFY(m.hasMatch());
+        const QJsonObject spec = QJsonDocument::fromJson(QByteArray::fromBase64(m.captured(1).toLatin1(),
+                                     QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals)).object();
+        QCOMPARE(buildDensityFile(spec).csv, buildDensityFile(QJsonObject{ { "law", "normal" }, { "mean", -250 }, { "sd", 50 }, { "name", "Test" } }).csv);
+        const auto blocks = MethodRunner::extractCalcBlocks("```calcul\n{\"method\":\"density_file\",\"law\":\"uniforme\",\"min\":0,\"max\":10}\n```\n");
+        QCOMPARE(blocks.size(), 1);
+        const RunOutcome r = MethodRunner::run(blocks);
+        QVERIFY(r.noticeHtml.contains("Enregistrer le fichier"));
+        QVERIFY(r.promptBlock.contains("Calib/Density"));
+        QCOMPARE(MethodRunner::normalizeRequest(QJsonObject{ { "method", "creer_densite" } })["method"].toString(), QString("density_file"));
+    }
+
+    // « Et à 50 % ? » après une calibration : la datation précédente est recalculée au niveau demandé.
+    // Archéomagnétisme vectoriel IF : « erreur » sans précision, écrite après l'intensité = erreur sur F.
+    void amIntensityError()
+    {
+        using namespace seldon;
+        const auto v = MethodRegistry::instance().parse("date en am vectoriel IF; inclinaison=63,95 alpha95=1,83\nintensité=56,89 erreur=0.74");
+        QCOMPARE(v.size(), 1);
+        QCOMPARE(v[0]["process"].toString(), QString("IF"));
+        QCOMPARE(v[0]["inc"].toDouble(), 63.95);
+        QCOMPARE(v[0]["alpha95"].toDouble(), 1.83);
+        QCOMPARE(v[0]["field"].toDouble(), 56.89);
+        QCOMPARE(v[0]["errorF"].toDouble(), 0.74);
+        QVERIFY2(MethodRegistry::instance().compute(v[0]).ok, qPrintable(MethodRegistry::instance().compute(v[0]).error));
+        // une erreur écrite avant l'intensité n'est pas prise pour celle de F ; les formes déjà reconnues restent
+        QCOMPARE(MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 ± 2")[0]["errorF"].toDouble(), 2.0);
+        QCOMPARE(MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50, erreur sur F 1,5")[0]["errorF"].toDouble(), 1.5);
+        QCOMPARE(MethodRegistry::instance().parse("archaeomagnetic: inclination 65, alpha95 1, intensity 50, error 0.8")[0]["errorF"].toDouble(), 0.8);
+    }
+
+    // Chaque datation rappelle ses courbes de référence (nom et origine) ; le modèle doit les rappeler aussi.
+    void datingShowsReferenceCurves()
+    {
+        using namespace seldon;
+        const RunOutcome c = MethodRunner::analyzeQuestion("C14 de 3560 ± 20 BP");
+        QVERIFY2(c.noticeHtml.contains("Courbe de référence : IntCal20 (intégrée)"), qPrintable(c.noticeHtml));
+        QVERIFY(c.promptBlock.contains("Courbe de référence : IntCal20 (intégrée)"));
+        QVERIFY(c.promptBlock.contains("Rappelle dans ta réponse la ou les courbes"));
+        const RunOutcome m = MethodRunner::analyzeQuestion("date en am vectoriel IF; inclinaison=63,95 alpha95=1,83 intensité=56,89 erreur=0.74");
+        QVERIFY2(m.noticeHtml.contains("Courbes de référence : I : GAL2002sph2014_I (intégrée) ; F : GwH2013uni_F (intégrée)"), qPrintable(m.noticeHtml));
+        const RunOutcome f = MethodRunner::run({ QJsonObject{ { "method", "f14c" }, { "f14c", 1.2 }, { "error", 0.01 } } });
+        QVERIFY2(f.noticeHtml.contains("bomb21NHZ1 (intégrée)"), qPrintable(f.noticeHtml));
+        const RunOutcome g = MethodRunner::run({ QJsonObject{ { "method", "gauss" }, { "age", 1200 }, { "error", 50 } } });
+        QVERIFY(!g.noticeHtml.contains("de référence") && !g.promptBlock.contains("Rappelle dans ta réponse"));
+        const char* ev = R"({"method":"event","dates":[{"method":"c14","age":2500,"error":30},{"method":"c14","age":2550,"error":30,"curve":"intcal13"}],"mcmc":{"num_iter":2000,"num_burn":200,"num_proc":2,"seeds":[1,2]}})";
+        const RunOutcome e = MethodRunner::run({ QJsonDocument::fromJson(ev).object() });
+        QVERIFY2(e.noticeHtml.contains("Courbes de référence : IntCal20 (intégrée) ; IntCal13 (intégrée)"), qPrintable(e.noticeHtml.left(600)));
+    }
+
+    // Courbes nommées dans la question : utilisées au lieu des courbes par défaut.
+    void namedCurvesInQuestion()
+    {
+        using namespace seldon;
+        // la question de l'utilisateur : I et F nommées (eurw_2017_f vient de ChronoModel : absente ici, le calcul le dit)
+        const auto v = MethodRegistry::instance().parse("date en am vectoriel IF; inclinaison=63,95 alpha95=1,83\n"
+                                                        "intensité=56,89 erreur sur l'intensité=0,74\n"
+                                                        "avec la courbe pour l'inclinaison gal2002sph2014_i\npour l'intensité eurw_2017_f");
+        QCOMPARE(v.size(), 1);
+        QCOMPARE(v[0]["curveI"].toString(), QString("gal2002sph2014_i"));
+        QCOMPARE(v[0]["curveF"].toString(), QString("eurw_2017_f"));
+        QCOMPARE(v[0]["errorF"].toDouble(), 0.74);
+        const MethodResult miss = MethodRegistry::instance().compute(v[0]);
+        QVERIFY(!miss.ok && miss.error.contains("eurw_2017_f"));
+        // courbe intégrée nommée
+        const auto b = MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 erreur 1, courbe pour l'intensité bulgaria_f");
+        QCOMPARE(b[0]["curveF"].toString(), QString("bulgaria_f"));
+        QCOMPARE(b[0]["curveI"].toString(), QString("gal2002sph2014_i"));                 // non nommée : défaut
+        QVERIFY(MethodRegistry::instance().compute(b[0]).ok);
+        // courbes ajoutées par l'utilisateur : nom sans suffixe (composante d'après le mot qui précède), et 14C
+        QTemporaryDir root;
+        QDir(root.path()).mkpath("AM"); QDir(root.path()).mkpath("14C");
+        QVERIFY(QFile::copy(":/methods/am/curves/GwH2013uni_F.ref", root.path() + "/AM/europe.ref"));
+        QVERIFY(QFile::copy(":/methods/c14/curves/intcal13.14c", root.path() + "/14C/intcal98_fix.14c"));
+        const QStringList saved = CurveStore::extraRoots();
+        CurveStore::setExtraRoots({ root.path() });
+        const auto e = MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 erreur 1 avec la courbe europe");
+        QCOMPARE(e[0]["curveF"].toString(), QString("europe"));
+        QVERIFY(MethodRegistry::instance().compute(e[0]).ok);
+        const auto c = MethodRegistry::instance().parse("C14 3000 ± 30 BP avec la courbe intcal98_fix");
+        QCOMPARE(c[0]["curve"].toString(), QString("intcal98_fix"));
+        CurveStore::setExtraRoots(saved);
+        QCOMPARE(MethodRegistry::instance().parse("C14 3000 ± 30 BP, shcal13")[0]["curve"].toString(), QString("shcal13"));
+    }
+
+    // Période d'étude d'une datation simple : densité restreinte à [tmin ; tmax] et renormalisée ; sinon toute la courbe.
+    void datingStudyPeriod()
+    {
+        using namespace seldon;
+        double a = 0, b = 0;
+        QVERIFY(MethodRunner::periodFromQuestion("refait la datation entre 0 et 2000", a, b) && a == 0 && b == 2000);
+        QVERIFY(MethodRunner::periodFromQuestion("période d'étude de 500 av. J.-C. à 500", a, b) && a == -500 && b == 500);
+        QVERIFY(MethodRunner::periodFromQuestion("redo it between -1000 and 1000", a, b) && a == -1000 && b == 1000);
+        QVERIFY(!MethodRunner::periodFromQuestion("loi uniforme entre 1100 et 1500", a, b));
+        QVERIFY(!MethodRunner::periodFromQuestion("C14 2500 ± 30 BP avec un décalage entre 10 et 30 ans", a, b));
+        QVERIFY(!MethodRunner::periodFromQuestion("C14 de 3560 ± 20 BP", a, b));
+
+        // la datation de l'utilisateur (IF, courbes nommées), puis « refait la datation entre 0 et 2000 »
+        const QString first = "date en am vectoriel IF; inclinaison=63,95 alpha95=1,83 intensité=56,89 erreur sur l'intensité=0,74 "
+                              "avec la courbe pour l'inclinaison gal2002sph2014_i pour l'intensité bulgaria_f";
+        const QVector<QJsonObject> prev = MethodRunner::requestsFromQuestion(first);
+        const QVector<QJsonObject> again = MethodRunner::followUpRequests("refait la datation entre 0 et 2000", prev);
+        QCOMPARE(again.size(), 1);
+        QCOMPARE(again[0]["tmin"].toDouble(), 0.0);
+        QCOMPARE(again[0]["tmax"].toDouble(), 2000.0);
+        QCOMPARE(again[0]["curveF"].toString(), QString("bulgaria_f"));             // les courbes choisies sont gardées
+        QVERIFY(!again[0].contains("level"));
+        const RunOutcome r = MethodRunner::run(again);
+        QVERIFY2(r.noticeHtml.contains("période d'étude 0 → 1950 apr. J.-C.") || r.noticeHtml.contains("période d'étude"), qPrintable(r.noticeHtml.left(400)));
+        for (const QJsonValue& v : r.plot["series"].toArray()[0].toObject()["x"].toArray())
+            QVERIFY(v.toDouble() >= 0 && v.toDouble() <= 2000);
+        // datation simple avec période dans la question ; sans période, toute la courbe
+        const RunOutcome c = MethodRunner::analyzeQuestion("C14 3000 ± 30 BP entre -1500 et -1000");
+        QVERIFY(c.found);
+        for (const QJsonValue& v : c.plot["series"].toArray()[0].toObject()["x"].toArray())
+            QVERIFY(v.toDouble() >= -1500 && v.toDouble() <= -1000);
+        QVERIFY(!MethodRunner::analyzeQuestion("C14 3000 ± 30 BP").noticeHtml.contains("période d'étude"));
+        // aucune probabilité sur la période : message clair ; format cal BP : période convertie
+        QVERIFY(MethodRunner::analyzeQuestion("C14 3000 ± 30 BP entre 1000 et 2000").noticeHtml.contains("aucune probabilité"));
+        const QVector<QJsonObject> bp = MethodRunner::followUpRequests("et entre 3000 et 3500", MethodRunner::requestsFromQuestion("C14 3000 ± 30 BP"),
+                                                                       DateFormat::CalBP);
+        QCOMPARE(bp[0]["tmin"].toDouble(), -1550.0);
+        QCOMPARE(bp[0]["tmax"].toDouble(), -1050.0);
+        // clé de l'outil
+        const auto t = tools::execute("calibrer_radiocarbone", R"({"age":3000,"error":30,"tmin":-1500,"tmax":-1000})", DateFormat::BcAd);
+        QVERIFY(t.executed && t.content.contains("période d'étude"));
+    }
+
+    // Export HTML des résultats de ChronoModel : résumé exact (critère global, variables hors critères de la pire à la
+    // meilleure, facteur d'itérations, dates au σ grand, Events dont toutes les dates ont un σ grand).
+    void chronoModelResultsSummary()
+    {
+        using namespace seldon;
+        const char* page = R"HTML(<html><body><p>ChronoModel 4.0.0</p><p>Project filename : Test</p>
+<p>Not converged (max R&#770; = 1.0121 ; min ESS = 504)</p>
+<p>R&#770; : max = 1.0121, mean = 1.0006 (1/12 variable(s) &ge; Threshold)</p><p>ESS : min = 504, mean = 9000</p>
+<h3>Event : A</h3><h4>Posterior Event Date</h4><p>R&#770; = 1.0000 &middot; ESS bulk = 12971 &middot; ESS tail = 11377 &#9989;</p>
+<p>MAP = 1000,00 ; Mean = 1000,00 ; Std = 20,00</p>
+<h3>Data : A1</h3><h4>Posterior calib. date</h4><p>R&#770; = 1.0000 &middot; ESS bulk = 13910 &middot; ESS tail = 14660 &#9989;</p>
+<p>MAP = 1000,00 ; Mean = 1000,00 ; Std = 50,00</p>
+<h4>Posterior Std ti</h4><p>R&#770; = 1.0121 &#9888;&#65039; Insufficient convergence</p><p>ESS bulk = 738 &#9888;&#65039; Insufficient (&lt; 1500)</p>
+<p>ESS tail = 1041 &#9888;&#65039; Insufficient (&lt; 1500)</p><p>MAP = 300,00 ; Mean = 320,00 ; Std = 90,00</p>
+<h3>Event : B</h3><h4>Posterior Event Date</h4><p>R&#770; = 1.0047 &#9989; Satisfactory convergence</p><p>ESS bulk = 1507 &#9989; Satisfactory</p>
+<p>ESS tail = 504 &#9888;&#65039; Insufficient (&lt; 1500)</p><p>MAP = 2000,00 ; Mean = 2000,00 ; Std = 30,00</p>
+<h3>Data : B1</h3><h4>Posterior calib. date</h4><p>R&#770; = 1.0000 &middot; ESS bulk = 9000 &middot; ESS tail = 9000 &#9989;</p><p>MAP = 2000,00 ; Mean = 2000,00 ; Std = 40,00</p>
+<h4>Posterior Std ti</h4><p>R&#770; = 1.0001 &middot; ESS bulk = 9000 &middot; ESS tail = 9000 &#9989;</p><p>MAP = 200,00 ; Mean = 210,00 ; Std = 50,00</p>
+<h3>Data : B2</h3><h4>Posterior calib. date</h4><p>R&#770; = 1.0000 &middot; ESS bulk = 9000 &middot; ESS tail = 9000 &#9989;</p><p>MAP = 2010,00 ; Mean = 2010,00 ; Std = 40,00</p>
+<h4>Posterior Std ti</h4><p>R&#770; = 1.0001 &middot; ESS bulk = 9000 &middot; ESS tail = 9000 &#9989;</p><p>MAP = 150,00 ; Mean = 160,00 ; Std = 50,00</p>
+</body></html>)HTML";
+        const QString text = chronoresults::htmlToText(QString::fromUtf8(page));
+        QVERIFY(chronoresults::looksLike(text));
+        QVERIFY(!chronoresults::looksLike("<p>Bonjour</p>"));
+        const chronoresults::Report r = chronoresults::parse(text);
+        QCOMPARE(r.events, 2);
+        QCOMPARE(r.data, 3);
+        QCOMPARE(r.vars.size(), 8);           // 2 dates d'Event + (date calibrée, σ) pour 3 datations
+        QCOMPARE(r.essThreshold, 1500);
+        const QString s = chronoresults::summarize(r, "Log.html");
+        QVERIFY(s.contains("Not converged (max R̂ = 1.0121 ; min ESS = 504)"));
+        // pire en tête : R̂ en échec (σ de A1), puis l'ESS le plus faible (date de l'Event B, ESS tail 504)
+        const int i1 = int(s.indexOf("1. Datation « A1 »")), i2 = int(s.indexOf("2. Event « B »"));
+        QVERIFY2(i1 > 0 && i2 > i1, qPrintable(s));
+        QVERIFY(s.contains("×3.0"));
+        // σ grand : A1 (300 > 50), B1 (200 > 40), B2 (150 > 40) ; B a toutes ses dates au σ grand (inversion possible)
+        QVERIFY(s.contains("« A1 » (Event « A ») : σ MAP = 300.0 > écart-type de la date = 50.0"));
+        QVERIFY(s.contains("inversion stratigraphique possible : « B » (2 datations)"));
+        QVERIFY(s.contains("Events à une seule datation, au σ grand : date aberrante (outlier) ou inversion stratigraphique possible : « A »"));
+        // comptes par type, verdict calibré sur les proportions, σ grand avec bonne convergence distingué
+        QVERIFY2(s.contains("date de l'événement : 1/2 hors critères (dont R̂ : 0)"), qPrintable(s));
+        QVERIFY(s.contains("σ de la date (Std ti) : 1/3 hors critères (dont R̂ : 1)"));
+        QVERIFY(s.contains("Verdict de convergence") && s.contains("insuffisante (R̂ en échec pour 12.5 %"));
+        QVERIFY(s.contains("dont 2 avec une convergence bonne"));
+        QVERIFY(s.contains("« B1 » (Event « B ») : σ MAP = 200.0 > écart-type de la date = 40.0 (rapport 5.0) ; convergence bonne"));
+        QVERIFY(s.contains("ni d'ajouter des contraintes"));
+        // une seule variable en échec sur beaucoup, R̂ max < 1,02 : « presque atteinte »
+        chronoresults::Report big = r;
+        for (int i = 0; i < 200; ++i) { chronoresults::Variable v; v.kind = "date de l'événement"; v.event = QString("E%1").arg(i); v.rhat = 1.0; v.essBulk = v.essTail = 9000; big.vars << v; }
+        QVERIFY(chronoresults::summarize(big, "Log.html").contains("presque atteinte"));
+        QVERIFY(s.size() < 6000);
+    }
+
+    void levelFollowUp()
+    {
+        using namespace seldon;
+        const QVector<QJsonObject> prev = MethodRunner::requestsFromQuestion("C14 de 3560 ± 20 BP");
+        QCOMPARE(prev.size(), 1);
+        const QVector<QJsonObject> again = MethodRunner::followUpRequests("quel est l'intervalle à 50%", prev);
+        QCOMPARE(again.size(), 1);
+        QCOMPARE(again[0]["level"].toDouble(), 50.0);
+        const RunOutcome r = MethodRunner::run(again);
+        QVERIFY(r.found);
+        QVERIFY2(r.promptBlock.contains("HPD à 50 %"), qPrintable(r.promptBlock));
+        QVERIFY(MethodRunner::followUpRequests("and at 99 % ?", prev).value(0)["level"].toDouble() == 99.0);
+        // la question a ses propres datations, ou ne demande pas de niveau, ou il n'y a rien avant : pas de reprise
+        QVERIFY(MethodRunner::followUpRequests("C14 de 3000 ± 30 BP à 50 %", prev).isEmpty());
+        QVERIFY(MethodRunner::followUpRequests("que signifie la courbe ?", prev).isEmpty());
+        QVERIFY(MethodRunner::followUpRequests("quel est l'intervalle à 50%", {}).isEmpty());
+        // une datation demandée par l'assistant (bloc calcul) se reprend aussi ; un événement non (MCMC)
+        const auto blocks = MethodRunner::extractCalcBlocks("```calcul\n{\"method\":\"tl\",\"age\":800,\"error\":60,\"refYear\":2015}\n```\n");
+        QCOMPARE(MethodRunner::followUpRequests("à 90 % ?", blocks).size(), 1);
+        QVERIFY(MethodRunner::followUpRequests("à 90 % ?", { QJsonObject{ { "method", "event" } } }).isEmpty());
+        // la fiche d'identité interdit de déduire une HPD des quartiles
+        SkillManager m; m.reload(QString());
+        QVERIFY(m.alwaysText().contains("ne la déduis jamais des quartiles"));
     }
 
     void chrAmOnlyDefaultsAndWarnings()
@@ -609,6 +1124,9 @@ private slots:
         QVERIFY(MethodRunner::isModelRequest("Exporte ça en .chr avec une phase"));
         // une datation isolée reste calculée par l'application
         QVERIFY(!MethodRunner::isModelRequest("C14 de 3560 ± 20 BP"));
+        QVERIFY(MethodRunner::isModelRequest("Make a ChronoModel model with two events: 14C 2500 ± 30 BP and 2600 ± 30 BP"));
+        QVERIFY(MethodRunner::isModelRequest("Export this as a .chr file with one phase"));
+        QVERIFY(!MethodRunner::isModelRequest("Calibrate 14C 2500 ± 30 BP"));
         QVERIFY(!MethodRunner::isModelRequest("TL 488 ± 19 ans, mesuré en 2025"));
         QVERIFY(!MethodRunner::isModelRequest("Quel modèle de courbe utiliser pour un C14 ?"));
         QVERIFY(MethodRunner::analyzeQuestion("C14 de 3560 ± 20 BP").found);
@@ -631,18 +1149,18 @@ private slots:
             // budget par défaut des Préférences : la fiche de format doit être là, en tête
             const QStringList pin = MethodRunner::isModelRequest(q) ? QStringList{ "03_chronomodel_creer_modele" } : QStringList();
             QVERIFY(!pin.isEmpty());
-            const auto sel = m.select(q, 5000, QStringList(), pin);
+            const auto sel = m.select(q, AppSettings().skillChars, QStringList(), pin);
             QVERIFY(!sel.isEmpty());
             QCOMPARE(sel.first().skill->id, QString("03_chronomodel_creer_modele"));
             // même si la fiche a été injectée récemment (exclue) ou si le budget est minuscule
             QCOMPARE(m.select(q, 100, { "03_chronomodel_creer_modele" }, pin).first().skill->id, QString("03_chronomodel_creer_modele"));
             // sans épinglage, la fiche est quand même choisie avec le budget par défaut
             bool found = false;
-            for (const auto& x : m.select(q, 5000)) found = found || x.skill->id == "03_chronomodel_creer_modele";
+            for (const auto& x : m.select(q, AppSettings().skillChars)) found = found || x.skill->id == "03_chronomodel_creer_modele";
             QVERIFY2(found, qPrintable(q));
         }
         // pas de doublon
-        const auto sel = m.select(asks[1], 5000, QStringList(), { "03_chronomodel_creer_modele" });
+        const auto sel = m.select(asks[1], AppSettings().skillChars, QStringList(), { "03_chronomodel_creer_modele" });
         int n = 0; for (const auto& x : sel) if (x.skill->id == "03_chronomodel_creer_modele") ++n;
         QCOMPARE(n, 1);
     }
@@ -653,7 +1171,7 @@ private slots:
         auto bad = [](const QString& s) { return ChrBuilder::build(QJsonDocument::fromJson(s.toUtf8()).object()); };
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"gauss","age":-500,"error":0}]}]})").ok);
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"unif","min":5,"max":1}]}]})").ok);
-        QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"14c","age":2500,"error":30}]}]})").ok);
+        QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"dendro","age":2500,"error":30}]}]})").ok);
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"tl","age":488,"error":0}]}]})").ok);
         // archéomagnétisme : valeurs requises selon le processus
         QVERIFY(!bad(R"({"events":[{"name":"a","dates":[{"type":"am","process":"I","inc":65}]}]})").ok);          // alpha95 manquant
@@ -952,13 +1470,24 @@ private slots:
             if (e.method.isEmpty()) continue;
             if (e.method == "event") {                     // événement : au moins deux datations calculables, combinées en MCMC
                 QVERIFY2(MethodRunner::asksEvent(e.text), qPrintable("événement non reconnu : " + e.text));
-                const auto d = MethodRegistry::instance().parse(e.text);
+                auto d = MethodRegistry::instance().parse(e.text);
+                if (d.size() < 2) d = MethodRunner::jsonRequests(e.text);          // datations collées en JSON (avec wiggle)
                 QVERIFY2(d.size() >= 2, qPrintable("datations de l'événement non comprises : " + e.text));
                 for (const QJsonObject& o : d)
                     QVERIFY2(MethodRegistry::instance().compute(o).ok, qPrintable("calcul impossible : " + e.text));
+                if (e.text.contains("\"wiggle\"")) {                              // les décalages sont bien transmis
+                    int w = 0;
+                    for (const QJsonObject& o : d) if (o.contains("wiggle")) ++w;
+                    QVERIFY2(w >= 2, qPrintable("décalages non lus : " + e.text));
+                }
                 methods << e.method;
                 ++checked;
                 continue;
+            }
+            // Date seule avec décalage : l'application calcule la densité de t + δ.
+            if (!MethodRunner::wiggleFromQuestion(e.text).isEmpty()) {
+                const RunOutcome o = MethodRunner::analyzeQuestion(e.text);
+                QVERIFY2(o.count == 1 && o.promptBlock.contains("densité de t + δ"), qPrintable("wiggle non appliqué : " + e.text));
             }
             const auto v = MethodRegistry::instance().parse(e.text);
             QVERIFY2(!v.isEmpty(), qPrintable("exemple non compris : " + e.text));
@@ -1064,6 +1593,18 @@ private slots:
         const QString h6 = md("Coût : $5 et $10, voir `$x^2$` et\n\n```\n$\\alpha$\n```\n");
         QVERIFY(h6.contains("$5") && h6.contains("$10"));
         QVERIFY(h6.contains("$x^2$") && h6.contains("$\\alpha$"));
+        // Tableau avec <br>, code en ligne, ≥ et gras, suivi d'une citation : rien ne doit disparaître.
+        const QString h7 = md(QString::fromUtf8(
+            "| Problème | Recommandation |\n|---|---|\n"
+            "| **R̂ > 1.01** | - Augmenter le thinning<br>- Ajouter de l'annealing (`num_burn`) |\n"
+            "| **ESS très faible (≈ 500)** | - Même recommandation que ci‑dessus, mais envisager d’ajouter **plus de chaînes** (`num_proc` ≥ 4) |\n\n"
+            "> **Note** : contrôler le modèle."));
+        QVERIFY(h7.contains("Augmenter le thinning") && h7.contains("<br />") && h7.contains("Ajouter de l'annealing"));
+        QVERIFY(h7.contains("num_burn") && h7.contains("num_proc") && h7.contains(QString::fromUtf8("≥ 4")));
+        QVERIFY(h7.contains("plus de cha") && h7.contains("ESS tr") && h7.contains(QString::fromUtf8("contrôler le modèle")));
+        QVERIFY(!h7.contains(QChar(0xE000)) && !h7.contains("&lt;br"));
+        const QString h8 = md("H<sub>2</sub>O et 10<sup>3</sup>, mais `<br>` reste du code.");
+        QVERIFY(h8.contains("<sub>2</sub>") && h8.contains("<sup>3</sup>") && h8.contains("&lt;br&gt;"));
     }
 
     // ----------------------------------------------------------------- modèle distant (API compatible OpenAI)
@@ -1209,9 +1750,9 @@ private slots:
     void toolsSchema()
     {
         const auto& all = seldon::tools::all();
-        QCOMPARE(all.size(), 8);
+        QCOMPARE(all.size(), 9);
         const QJsonArray api = seldon::tools::schemaForApi();
-        QCOMPARE(api.size(), 8);
+        QCOMPARE(api.size(), 9);
         static const QRegularExpression okName("^[a-z0-9_]{1,64}$");
         QStringList seen;
         for (const QJsonValue& v : api) {
@@ -1225,7 +1766,8 @@ private slots:
         }
         // chaque outil de calcul vise une méthode qui existe
         for (const auto& d : all)
-            if (!d.methodId.isEmpty() && d.methodId != "event")      // « event » combine les autres méthodes (MCMC)
+            // « event » combine les autres méthodes (MCMC) ; « density_file » écrit un fichier pour le plugin Density
+            if (!d.methodId.isEmpty() && d.methodId != "event" && d.methodId != "density_file")
                 QVERIFY2(seldon::MethodRegistry::instance().byId(d.methodId) != nullptr, qPrintable(d.name));
     }
 
@@ -1354,7 +1896,7 @@ private slots:
         const RemoteConfig cfg{ "http://x/v1", "", "m" };
         const QJsonObject b1 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
                                                                            tools::schemaForApi(), QJsonArray{ am, tm })).object();
-        QCOMPARE(b1.value("tools").toArray().size(), 8);
+        QCOMPARE(b1.value("tools").toArray().size(), 9);
         QCOMPARE(b1.value("tool_choice").toString(), QString("auto"));
         QCOMPARE(b1.value("messages").toArray().size(), 3);
         const QJsonObject b2 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
@@ -1397,7 +1939,7 @@ private slots:
 
         // 1re requête : outils déclarés
         const QJsonObject first = QJsonDocument::fromJson(srv.bodies_[0]).object();
-        QCOMPARE(first.value("tools").toArray().size(), 8);
+        QCOMPARE(first.value("tools").toArray().size(), 9);
 
         eng.submitToolResults({ { cs[0].id, cs[0].name, out.content } });
         QTRY_COMPARE_WITH_TIMEOUT(fin.count(), 1, 5000);
@@ -1564,7 +2106,7 @@ private slots:
         QVERIFY(MethodRunner::run(v).noticeHtml.contains("IntCal20"));
         QVERIFY(m.alwaysText().contains("calcul"));
         // la fiche est sélectionnée pour une question de calcul
-        const auto sel = m.select("Peux-tu calibrer une date C14 et donner les HPD ?", 5000, QStringList());
+        const auto sel = m.select("Peux-tu calibrer une date C14 et donner les HPD ?", AppSettings().skillChars, QStringList());
         bool found = false;
         for (const SkillMatch& mt : sel) if (mt.skill->id == "09_outils_calcul") found = true;
         QVERIFY(found);
@@ -1946,7 +2488,7 @@ private slots:
     void wiggleChrFormat()
     {
         // Dates de l'événement « AM » de test_AM_Gauss_wiggle.chr (archéomag. I + trois gauss avec les trois types de wiggle)
-        const QJsonArray ds = QJsonDocument::fromJson(R"([
+        const QJsonArray ds = QJsonDocument::fromJson(R"JS([
           {"plugin_id":"am","name":"Inclinaison","delta_type":-1,"delta_fixed":0,
            "data":{"alpha95":1,"dec":0,"error_f":2,"field":65,"inc":65,"integration_steps":500,"process_type":1,
                    "refD_curve":"bulgaria_d.ref","refF_curve":"gwh2013uni_f.ref","refI_curve":"gal2002sph2014_i.ref"}},
@@ -1956,7 +2498,7 @@ private slots:
            "data":{"a":0,"age":0,"b":1,"c":0,"curve":"courbe_a.csv","error":100,"mode":"none"}},
           {"plugin_id":"gauss","name":"G(10, 50)","delta_type":0,"delta_fixed":-10,
            "data":{"a":0,"age":10,"b":1,"c":0,"curve":"courbe_a.csv","error":50,"mode":"none"}},
-          {"plugin_id":"gauss","name":"ancien","delta_type":-1,"delta_min":1000,"delta_max":1500,"data":{"age":0,"error":50}}])").array();
+          {"plugin_id":"gauss","name":"ancien","delta_type":-1,"delta_min":1000,"delta_max":1500,"data":{"age":0,"error":50}}])JS").array();
         const QJsonObject am = MethodRunner::normalizeRequest(ds[0].toObject());
         QCOMPARE(am["method"].toString(), QString("am"));
         QCOMPARE(am["process"].toString(), QString("I"));
@@ -1996,7 +2538,109 @@ private slots:
         QVERIFY(bad.errors.join(" ").contains("min < max"));
     }
 
+    // « Pas de recuit » = anneal_recurrence 0 (ChronoModel : Recurrence = 0 désactive le recuit simulé).
+    void noAnnealing()
+    {
+        for (const char* q : { "calcule l'événement sans recuit", "pas de recuit", "désactive le recuit", "annealing = 0", "recuit désactivé" })
+            QCOMPARE(MethodRunner::mcmcFromQuestion(QString::fromUtf8(q)).value("anneal_recurrence").toInt(-1), 0);
+        QVERIFY(!MethodRunner::mcmcFromQuestion("calcule l'événement avec recuit").contains("anneal_recurrence"));
+        const RunOutcome o = MethodRunner::analyzeQuestion(QString::fromUtf8(
+            "calcule l'événement sans recuit, 10000 itérations : {\"method\":\"gauss\",\"age\":1000,\"error\":20}, {\"method\":\"gauss\",\"age\":1010,\"error\":20}"));
+        QVERIFY2(o.promptBlock.contains("sans recuit (anneal_recurrence = 0)"), qPrintable(o.promptBlock.left(600)));
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(
+            R"({"events":[{"name":"E","dates":[{"type":"gauss","age":0,"error":5}]}],"mcmc":{"anneal_recurrence":0}})").object());
+        QCOMPARE(r.chr["mcmc"].toObject()["anneal_recurrence"].toInt(-1), 0);
+        QVERIFY(ChrBuilder::summarize(r.chr).contains("sans recuit"));
+    }
+
     // Export SVG : courbe en vecteurs, image SVG réenregistrée telle quelle, image matricielle incorporée.
+    // Titre du graphique : nom de la datation (champ « name », notamment d'un fichier .chr).
+    void datingPlotTitleUsesDateName()
+    {
+        using namespace seldon;
+        // sans nom : titre générique
+        const RunOutcome a = MethodRunner::run({ QJsonObject{ { "method", "c14" }, { "age", 2500 }, { "error", 30 } } });
+        QCOMPARE(a.plot["title"].toString(), QString("Densités calendaires (calcul SeldonH)"));
+        // date d'un .chr : le « name » est repris dans le titre et dans la légende
+        const QJsonObject chr = QJsonDocument::fromJson(
+            R"({"plugin_id":"14c","name":"Ly-1234","data":{"age":2500,"error":30,"ref_curve":"intcal20.14c"}})").object();
+        const RunOutcome b = MethodRunner::run({ MethodRunner::normalizeRequest(chr) });
+        QCOMPARE(b.plot["title"].toString(), QString("Densité calendaire — Ly-1234"));
+        QVERIFY(b.plot["series"].toArray()[0].toObject()["name"].toString().startsWith("Ly-1234 — "));
+        // bloc json collé dans la question
+        const RunOutcome q = MethodRunner::analyzeQuestion(
+            R"(Calibre {"plugin_id":"14c","name":"Ly-1234","data":{"age":2500,"error":30,"ref_curve":"intcal20.14c"}})");
+        QCOMPARE(q.plot["title"].toString(), QString("Densité calendaire — Ly-1234"));
+        // plusieurs dates nommées, puis fusion avec un autre calcul
+        const RunOutcome c = MethodRunner::run({ QJsonObject{ { "method", "gauss" }, { "name", "G1" }, { "age", 1200 }, { "error", 50 } },
+                                                 QJsonObject{ { "method", "unif" }, { "name", "U1" }, { "min", 1100 }, { "max", 1300 } } });
+        QCOMPARE(c.plot["title"].toString(), QString("Densités calendaires — G1, U1"));
+        const QJsonObject m = tools::mergePlots({ b.plot, c.plot });
+        QCOMPARE(m["title"].toString(), QString("Densités calendaires — Ly-1234, G1, U1"));
+        // outil (modèle distant) : « name » accepté
+        const auto t = tools::execute("calibrer_radiocarbone", R"({"name":"Ly-99","age":2500,"error":30})", DateFormat::BcAd);
+        QCOMPARE(t.run.plot["title"].toString(), QString("Densité calendaire — Ly-99"));
+    }
+
+    // Plusieurs densités : une par ligne sauf demande de superposition ; couleur de la date / de l'Event, sinon défaut.
+    void datingPlotRowsAndColors()
+    {
+        using namespace seldon;
+        // deux dates sans précision : en lignes
+        const RunOutcome a = MethodRunner::analyzeQuestion("C14 2500 ± 30 BP et C14 2600 ± 30 BP");
+        QCOMPARE(a.plot["layout"].toString(), QString("rows"));
+        QVERIFY(a.promptBlock.contains("une densité par ligne"));
+        CurveSpec spec;
+        QVERIFY(CurveSpec::fromJson(a.plot, spec));
+        QVERIFY(spec.stacked());
+        QVERIFY(!a.plot["series"].toArray()[0].toObject().contains("color"));       // couleur par défaut
+        // superposition demandée
+        const RunOutcome b = MethodRunner::analyzeQuestion("C14 2500 ± 30 BP et C14 2600 ± 30 BP sur le même graphe");
+        QCOMPARE(b.plot["layout"].toString(), QString("overlay"));
+        QVERIFY(MethodRunner::asksOverlay("superpose les densités"));
+        QVERIFY(!MethodRunner::asksOverlay("calibre ces deux dates"));
+        QVERIFY(CurveSpec::fromJson(b.plot, spec));
+        QVERIFY(!spec.stacked());
+        // bloc plot du modèle sans « layout » : densités en lignes, autres courbes superposées
+        QVERIFY(CurveSpec::fromJson(QJsonDocument::fromJson(
+            R"({"fill":true,"series":[{"name":"a","x":[1,2,3],"y":[0,1,0]},{"name":"b","x":[1,2,3],"y":[0,2,0]}]})").object(), spec));
+        QVERIFY(spec.stacked());
+        QVERIFY(CurveSpec::fromJson(QJsonDocument::fromJson(
+            R"({"series":[{"name":"a","x":[1,2,3],"y":[0,1,0]},{"name":"b","x":[1,2,3],"y":[0,2,0]}]})").object(), spec));
+        QVERIFY(!spec.stacked());
+        // couleur : « color », ou red/green/blue d'un .chr
+        const RunOutcome c = MethodRunner::run({ QJsonObject{ { "method", "gauss" }, { "age", 1200 }, { "error", 50 }, { "color", "#c0392b" } },
+                                                 MethodRunner::normalizeRequest(QJsonDocument::fromJson(
+                                                     R"({"plugin_id":"gauss","name":"G2","red":71,"green":112,"blue":76,
+                                                         "data":{"age":1300,"error":40}})").object()) });
+        QCOMPARE(c.plot["series"].toArray()[0].toObject()["color"].toString(), QString("#c0392b"));
+        QCOMPARE(c.plot["series"].toArray()[1].toObject()["color"].toString(), QString("#47704c"));
+        QVERIFY(CurveSpec::fromJson(c.plot, spec));
+        QCOMPARE(spec.series[1].color, QColor(71, 112, 76));
+        // outil : couleur et superposition acceptées
+        const auto t = tools::execute("densite_gauss", R"({"age":1200,"error":50,"color":"red","layout":"overlay"})", DateFormat::BcAd);
+        QCOMPARE(t.run.plot["series"].toArray()[0].toObject()["color"].toString(), QString("red"));
+        QCOMPARE(t.run.plot["layout"].toString(), QString("overlay"));
+        // Event : couleur de l'événement pour θ et pour les dates sans couleur ; une date colorée garde la sienne
+        // (JSON sur une seule ligne : moc se perd dans une chaîne brute multiligne contenant « # »)
+        const char* eventJson = R"({"method":"event","name":"US 12","red":200,"green":0,"blue":0,"dates":[{"method":"gauss","age":1200,"error":50},{"method":"gauss","age":1250,"error":50,"color":"#0000ff"}],"mcmc":{"num_iter":2000,"num_burn":200,"num_proc":2,"seeds":[1,2]}})";
+        const RunOutcome e = MethodRunner::run({ QJsonDocument::fromJson(eventJson).object() });
+        const QJsonArray es = e.plot["series"].toArray();
+        QCOMPARE(es.size(), 3);
+        QCOMPARE(es[0].toObject()["color"].toString(), QString("#c80000"));
+        QCOMPARE(es[1].toObject()["color"].toString(), QString("#c80000"));
+        QCOMPARE(es[2].toObject()["color"].toString(), QString("#0000ff"));
+        QCOMPARE(e.plot["title"].toString(), QString("Densités calendaires — US 12"));
+        // rendu en lignes : image et SVG plus hauts quand il y a beaucoup de lignes
+        QJsonArray many;
+        for (int k = 0; k < 10; ++k) many.append(QJsonObject{ { "name", QString("D%1").arg(k) }, { "x", QJsonArray{ 1, 2, 3 } }, { "y", QJsonArray{ 0, 1, 0 } } });
+        QVERIFY(CurveSpec::fromJson(QJsonObject{ { "fill", true }, { "series", many } }, spec));
+        CurveWidget w(spec);
+        QVERIFY(w.exportSize(QSize(800, 500)).height() > 500);
+        QVERIFY(!w.render(QSize(800, 600)).isNull());
+        QVERIFY(w.renderSvg(QSize(800, 790)).contains("D9"));
+    }
+
     void figureSvgExport()
     {
         seldon::CurveSpec sp;

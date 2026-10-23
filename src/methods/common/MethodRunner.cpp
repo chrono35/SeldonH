@@ -1,5 +1,6 @@
 #include "MethodRunner.h"
 
+#include <QFileInfo>
 #include <QHash>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -7,7 +8,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
+#include "CurveStore.h"
+#include "DensityFile.h"
+#include "../c14/C14Method.h"
 #include "EventMcmc.h"
 #include "MethodRegistry.h"
 #include "TextUtil.h"
@@ -50,6 +55,28 @@ QJsonObject plotSeries(const QString& name, const Density& d, DateFormat fmt)
     s["x"] = xs;
     s["y"] = ys;
     return s;
+}
+
+// Courbes de référence d'un calcul (Method::referenceCurves, « rôle|méthode|nom ») en clair, avec leur origine :
+// « IntCal20 (intégrée) », « I : GAL2002sph2014_I (ChronoModel) ; F : GwH2013uni_F (ChronoModel) ».
+QStringList curveLabels(const QStringList& refs)
+{
+    QStringList out;
+    for (const QString& r : refs) {
+        const QStringList p = r.split('|');
+        if (p.size() != 3) continue;
+        const QString path = CurveStore::sourceOf(p[1], p[2]);
+        QString title = path.isEmpty() ? p[2] : QFileInfo(path).completeBaseName();
+        if (p[1] != QLatin1String("am") && QRegularExpression(QStringLiteral("^(intcal|shcal|marine)\\d")).match(p[2]).hasMatch())
+            title = C14Method::curveTitle(p[2]);
+        const QString origin = path.isEmpty() ? QStringLiteral("introuvable")
+                             : path.startsWith(QLatin1String(":/")) ? QStringLiteral("intégrée")
+                             : path.contains(QLatin1String("/CNRS/ChronoModel/")) ? QStringLiteral("ChronoModel")
+                             : QStringLiteral("dossier de l'utilisateur");
+        out << (p[0].isEmpty() ? QString() : p[0] + QStringLiteral(" : ")) + QStringLiteral("%1 (%2)").arg(title, origin);
+    }
+    out.removeDuplicates();
+    return out;
 }
 
 // « 95 », « 99,7 »
@@ -212,6 +239,8 @@ struct EventRun {
     QString html, prompt;
     QJsonArray series;
     QJsonObject trace;
+    QString name;                    // nom donné à l'événement (vide sinon) : titre du graphique
+    bool curves = false;             // au moins une datation utilise une courbe de référence
     double level = MethodRunner::kDefaultLevel;
 };
 
@@ -222,6 +251,8 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     const QString name = rq.value("name").toString().trimmed().isEmpty() ? QStringLiteral("Événement") : rq.value("name").toString().trimmed();
     const QJsonArray dates = rq.value("dates").toArray();
     const bool named = !rq.value("name").toString().trimmed().isEmpty();
+    if (named) E.name = name;
+    const QString eventColor = MethodRunner::colorOf(rq);
     const QString head = QStringLiteral("%1 — combinaison bayésienne de %2 datation%3 (modèle d'événement de ChronoModel, MCMC)")
                              .arg(named ? QStringLiteral("Événement « %1 »").arg(name) : name).arg(dates.size()).arg(dates.size() > 1 ? "s" : "");
     E.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
@@ -236,10 +267,14 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     // 1. Chaque datation est calibrée par sa méthode.
     std::vector<EventDateInput> inputs;
     std::vector<MethodResult> calibs;
+    QStringList curveRefs;           // courbes de référence de toutes les datations
     QStringList names;
+    QStringList colors;              // couleur de chaque datation (sinon celle de l'événement, sinon défaut)
     double lo = 1e300, hi = -1e300;
     for (int k = 0; k < dates.size(); ++k) {
         QJsonObject d = MethodRunner::normalizeRequest(dates[k].toObject());
+        const QString dc = MethodRunner::colorOf(d);
+        colors << (dc.isEmpty() ? eventColor : dc);
         const QString method = d.value("method").toString().toLower();
         if (method.isEmpty() || method == "event") return fail(QStringLiteral("la datation %1 n'a pas de « method » valide").arg(k + 1));
         d["method"] = method;
@@ -251,6 +286,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         if (label.isEmpty()) label = desc.isEmpty() ? QStringLiteral("Date %1").arg(k + 1) : desc;
         const MethodResult r = reg.compute(d);
         if (!r.ok) return fail(QStringLiteral("datation %1 (%2) : %3").arg(k + 1).arg(label, r.error));
+        curveRefs << reg.referenceCurves(d);
         Wiggle w;
         QString werr;
         if (!wiggleFromJson(d.value("wiggle"), w, werr)) return fail(QStringLiteral("datation %1 (%2) : %3").arg(k + 1).arg(label, werr));
@@ -269,6 +305,12 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         }
         calibs.push_back(shown);
         names << label;
+    }
+
+    if (const QStringList cl = curveLabels(curveRefs); !cl.isEmpty()) {
+        E.html += QStringLiteral("<p><i>Courbe%1 de référence : %2</i></p>").arg(cl.size() > 1 ? "s" : "", cl.join(" ; ").toHtmlEscaped());
+        E.prompt += QStringLiteral("Courbe%1 de référence : %2.\n").arg(cl.size() > 1 ? "s" : "", cl.join(" ; "));
+        E.curves = true;
     }
 
     // 2. Période d'étude (loi a priori uniforme de θ).
@@ -375,11 +417,14 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     }
     McmcSettings used = ms;
     used.numChains = int(M);
+    const QString annealText = used.annealRecurrence > 0
+        ? QStringLiteral("recuit T max = 2^%1 tous les %2 itérations (dwell %3)").arg(used.annealTemp).arg(used.annealRecurrence).arg(used.annealDwell)
+        : QStringLiteral("sans recuit (anneal_recurrence = 0)");
     const QString mcmcLine = QStringLiteral("%1 chaînes ; burn-in %2 ; adaptation ≤ %3 lots de %4 ; acquisition %5 itérations (thinning %6, "
-                                            "%7 tirages par chaîne) ; mixing %8 ; recuit T max = 2^%9 tous les %10 itérations (dwell %11)")
+                                            "%7 tirages par chaîne) ; mixing %8 ; %9")
                                  .arg(M).arg(used.numBurn).arg(used.maxBatches).arg(used.iterPerBatch).arg(used.numIter).arg(used.thinning)
                                  .arg(R.thetaTraces.empty() ? 0 : int(R.thetaTraces.front().size()))
-                                 .arg(text::numAuto(used.mixingLevel, 4)).arg(used.annealTemp).arg(used.annealRecurrence).arg(used.annealDwell);
+                                 .arg(text::numAuto(used.mixingLevel, 4)).arg(annealText);
     const QString period = QStringLiteral("%1 → %2%3").arg(dateformat::format(tmin, fmt), dateformat::format(tmax, fmt),
                                                         autoPeriod ? QStringLiteral(" (calculée d'après les datations)") : QString());
     E.html += QStringLiteral("<p><i>MCMC : %1. Période d'étude (a priori uniforme de θ) : %2. Graines : %3 (à réutiliser pour "
@@ -392,11 +437,13 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
 
     // 8. Figures : θ (rempli) + calibrations (traits) ; traces de θ par chaîne.
     QJsonObject ts0 = plotSeries(QStringLiteral("%1 : θ a posteriori").arg(name), R.theta, fmt);
+    if (!eventColor.isEmpty()) ts0["color"] = eventColor;
     E.series.append(ts0);
     for (size_t k = 0; k < inputs.size(); ++k) {
         QJsonObject s = plotSeries((inputs[k].wiggle.type != Wiggle::None ? QStringLiteral("%1 (calibration de t + δ)") : QStringLiteral("%1 (calibration)")).arg(names[int(k)]), calibs[k].density, fmt);
         s["fill"] = false;
         s["width"] = 1.2;
+        if (!colors[int(k)].isEmpty()) s["color"] = colors[int(k)];
         E.series.append(s);
     }
     QJsonArray traces;
@@ -425,8 +472,27 @@ void MethodRunner::setProgressHandler(std::function<bool(const QString&, double)
 bool MethodRunner::asksEvent(const QString& question)
 {
     static const QRegularExpression re(QStringLiteral(
-        R"(\b(event|events|evenement|combine|combiner|combinaison|combinees?|combines|regroupe\w*|meme evenement)\b)"));
+        R"(\b(event|events|evenement|combine|combiner|combinaison|combinees?|combines|regroupe\w*|meme evenement|combined|combining|same event)\b)"));
     return re.match(text::fold(question)).hasMatch();
+}
+
+bool MethodRunner::asksOverlay(const QString& question)
+{
+    static const QRegularExpression re(QStringLiteral(
+        R"(\b(superpos\w*|en superposition|(?:sur )?(?:le |la )?mem(?:e)? (?:graphe|graphique|figure|axe|ligne|cadre)|une seule ligne|overlay|overlaid|superimpos\w*|(?:on )?(?:the )?same (?:graph|plot|figure|axis|axes|panel|chart))\b)"));
+    return re.match(text::fold(question)).hasMatch();
+}
+
+QString MethodRunner::colorOf(const QJsonObject& o)
+{
+    const QString c = o.value("color").toString().trimmed();
+    if (!c.isEmpty()) return c;
+    if (o.value("red").isDouble() && o.value("green").isDouble() && o.value("blue").isDouble()) {
+        auto ch = [&](const char* k) { return std::clamp(o.value(k).toInt(), 0, 255); };
+        return QStringLiteral("#%1%2%3").arg(ch("red"), 2, 16, QChar('0')).arg(ch("green"), 2, 16, QChar('0'))
+                                        .arg(ch("blue"), 2, 16, QChar('0'));
+    }
+    return {};
 }
 
 QJsonObject MethodRunner::mcmcFromQuestion(const QString& question, double* tmin, double* tmax)
@@ -438,14 +504,21 @@ QJsonObject MethodRunner::mcmcFromQuestion(const QString& question, double* tmin
     if (const auto mm = burn.match(q); mm.hasMatch()) { m["num_burn"] = double(num(mm.captured(1))); q.remove(mm.capturedStart(), mm.capturedLength()); }
     static const QRegularExpression iter(QStringLiteral(R"((\d[\d\s.\x{00A0}\x{202F}]*\d|\d)\s*(?:iterations?|iter)\b)"));
     if (const auto mm = iter.match(q); mm.hasMatch()) m["num_iter"] = double(num(mm.captured(1)));
-    static const QRegularExpression chains(QStringLiteral(R"((\d{1,2})\s*chaines?\b)"));
+    static const QRegularExpression chains(QStringLiteral(R"((\d{1,2})\s*(?:chaines?|chains?)\b)"));
     if (const auto mm = chains.match(q); mm.hasMatch()) m["num_proc"] = mm.captured(1).toInt();
     static const QRegularExpression thin(QStringLiteral(R"((?:thinning|intervalle d'echantillonnage)\s*(?:de\s*|=\s*|:\s*)?(\d+))"));
     if (const auto mm = thin.match(q); mm.hasMatch()) m["thinning_interval"] = mm.captured(1).toInt();
+    // « pas de recuit », « sans recuit », « désactive le recuit », « annealing = 0 » : recuit simulé désactivé, comme
+    // ChronoModel (MCMCSettingsDialog : « Set Recurrence to 0 to disable simulated annealing »).
+    static const QRegularExpression noAnneal(QStringLiteral(
+        R"(\b(?:pas|sans|aucun|desactiv\w*|supprim\w*|enlev\w*|coup\w*|no|without|disable\w*|remove|turn\w*\s+off|switch\w*\s+off)\s+(?:de\s+|du\s+|le\s+|l'|the\s+)?(?:simulated\s+)?(?:recuit|annealing)\b)"
+        R"(|\b(?:recuit|annealing)\s*(?:=|:)?\s*0\b)"
+        R"(|\b(?:recuit|annealing)\s+(?:desactiv\w*|disabled|off)\b)"));
+    if (noAnneal.match(q).hasMatch()) m["anneal_recurrence"] = 0;
     static const QRegularExpression seeds(QStringLiteral(R"((?:graines?|seeds?)\s*(?:=|:)?\s*(\d+(?:\s*[;,]\s*\d+)*))"));
     if (const auto mm = seeds.match(q); mm.hasMatch()) m["seeds"] = mm.captured(1);
     static const QRegularExpression period(QStringLiteral(
-        R"(periode d'etude\s*(?:de|:|=)?\s*(-?\d+)\s*(?:a|-|–|→|et)\s*(-?\d+))"));
+        R"((?:periode d'etude|study period)\s*(?:de|from|of|:|=)?\s*(-?\d+)\s*(?:a|-|–|→|et|to|and)\s*(-?\d+))"));
     if (const auto mm = period.match(q); mm.hasMatch() && tmin && tmax) {
         *tmin = mm.captured(1).toDouble(); *tmax = mm.captured(2).toDouble();
     }
@@ -456,14 +529,14 @@ double MethodRunner::requestedLevel(const QString& question)
 {
     QString q = text::fold(question);
     // α95 (cône de confiance archéomagnétique) n'est pas un niveau de confiance d'intervalle : on l'efface d'abord.
-    static const QRegularExpression alpha(QStringLiteral(R"(cone de confiance|(?:alpha|α|\ba)\s*-?\s*95\b)"));
+    static const QRegularExpression alpha(QStringLiteral(R"(cone de confiance|cone of confidence|(?:alpha|α|\ba)\s*-?\s*95\b)"));
     q.remove(alpha);
     // 1) « hpd 99 », « confiance de 90 % », « crédibilité 99,7 » : « % » facultatif
     static const QRegularExpression kw(QStringLiteral(
-        R"(\b(?:hpd|confiance|credibilite)\b[^\d\n%]{0,30}?(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:%|pour ?cent|\b))"));
+        R"(\b(?:hpd|confiance|credibilite|confidence|credib\w*)\b[^\d\n%]{0,30}?(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:%|pour ?cent|\b))"));
     // 2) « niveau / seuil / probabilité / intervalle / région / à N % » : « % » obligatoire
     static const QRegularExpression pct(QStringLiteral(
-        R"((?:\b(?:niveau|seuil|probabilite|intervalles?|regions?|a)\b)[^\d\n%]{0,20}?(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:%|pour ?cent))"));
+        R"((?:\b(?:niveau|seuil|probabilite|intervalles?|regions?|a|level|threshold|probability|intervals?|at)\b)[^\d\n%]{0,20}?(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:%|pour ?cent))"));
     for (const QRegularExpression* re : { &kw, &pct }) {
         auto it = re->globalMatch(q);
         while (it.hasNext()) {
@@ -485,26 +558,77 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     QString html = QStringLiteral("<b>🧮 Calcul fait par SeldonH</b> <i>(méthodes de ChronoModel — valeurs exactes, non générées par le modèle)</i>");
     QString prompt = QStringLiteral("[Résultat de calcul de SeldonH — valeurs exactes, à reprendre telles quelles sans les recalculer ni les contredire]\n");
     QJsonArray series;
+    QStringList plotNames;           // noms des datations / événements tracés : titre du graphique
     QVector<double> levelsUsed;
     if (fmt != DateFormat::BcAd)
         prompt += QStringLiteral("Format des dates : %1. Toutes les dates ci-dessous sont déjà exprimées dans ce format.\n").arg(dateformat::title(fmt));
 
     bool anyEvent = false;
+    bool anyCurve = false;           // au moins une courbe de référence : le modèle doit la rappeler
+    bool overlay = false;            // « layout »: « overlay » demandé : densités superposées ; sinon une par ligne
+    bool anyColor = false;
     for (const QJsonObject& rq0 : requests) {
+        if (rq0.value("layout").toString() == QLatin1String("overlay")) overlay = true;
+        if (!colorOf(rq0).isEmpty()) anyColor = true;
         const QJsonObject rq = normalizeRequest(rq0);
+        if (rq.value("method").toString() == QLatin1String("density_file")) {
+            // Fichier de densité pour le plugin Density de ChronoModel (loi classique placée sur l'axe du temps).
+            const DensityFileResult F = buildDensityFile(rq);
+            const QString head = F.ok ? QStringLiteral("Fichier de densité pour ChronoModel — %1%2")
+                                            .arg(F.description, F.placement.isEmpty() ? QString() : QStringLiteral(" ; ") + F.placement)
+                                      : QStringLiteral("Fichier de densité pour ChronoModel");
+            html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
+            prompt += QStringLiteral("\n%1\n").arg(head);
+            if (!F.ok) {
+                html += QStringLiteral("<p><i>Calcul impossible : %1.</i></p>").arg(F.error.toHtmlEscaped());
+                prompt += QStringLiteral("Calcul impossible : %1.\n").arg(F.error);
+                continue;
+            }
+            levelsUsed << kDefaultLevel;
+            appendSummary(html, prompt, F.density, hpdIntervals(F.density, 95.0), hpdIntervals(F.density, 68.0),
+                          densityStats(F.density), kDefaultLevel, fmt);
+            // Le lien porte la spécification (et non les valeurs) : le fichier est recalculé à l'enregistrement,
+            // ce qui marche aussi dans une conversation rouverte depuis l'historique.
+            const QByteArray spec = QJsonDocument(rq).toJson(QJsonDocument::Compact)
+                                        .toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+            html += QStringLiteral("<p>📄 <b>%1</b> : %2 valeurs de %3 à %4 (pas %5). "
+                                   "<a href=\"seldon://densityfile?spec=%6\">Enregistrer le fichier…</a></p>")
+                        .arg(F.fileName.toHtmlEscaped()).arg(F.points)
+                        .arg(QString::number(F.tmin, 'g', 10), QString::number(F.tmax, 'g', 10), QString::number(F.step, 'g', 6),
+                             QString::fromLatin1(spec));
+            for (const QString& w : F.warnings) {
+                html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(w.toHtmlEscaped());
+                prompt += QStringLiteral("Avertissement : %1\n").arg(w);
+            }
+            prompt += QStringLiteral("Fichier « %1 » préparé par SeldonH (%2 valeurs de %3 à %4, format du plugin Density : tmin, tmax, "
+                                     "puis les valeurs). L'utilisateur l'enregistre avec le lien « Enregistrer le fichier… » ; il doit être "
+                                     "placé dans le dossier Calib/Density de ChronoModel (ChronoModel relancé). Dans un modèle : "
+                                     "{\"type\":\"density\",\"curve\":\"%1\"}. Ne recopie pas les valeurs du fichier.\n")
+                          .arg(F.fileName).arg(F.points).arg(QString::number(F.tmin, 'g', 10), QString::number(F.tmax, 'g', 10));
+            QJsonObject ser = plotSeries(F.fileName, F.density, fmt);
+            if (const QString col = colorOf(rq); !col.isEmpty()) ser["color"] = col;
+            series.append(ser);
+            if (!plotNames.contains(F.fileName)) plotNames << F.fileName;
+            continue;
+        }
         if (rq.value("method").toString() == "event") {
             const EventRun E = runEvent(rq, fmt);
             html += E.html;
             prompt += E.prompt;
             if (E.ok) {
                 anyEvent = true;
+                anyCurve = anyCurve || E.curves;
                 levelsUsed << E.level;
                 for (const QJsonValue& s : E.series) series.append(s);
+                if (!E.name.isEmpty() && !plotNames.contains(E.name)) plotNames << E.name;
                 if (!E.trace.isEmpty()) out.extraPlots << E.trace;
             }
             continue;
         }
         QString head = reg.describe(rq);
+        // Nom de la datation (champ « name », notamment d'un fichier .chr) : en tête de la fiche et dans le titre du graphique.
+        const QString dateName = rq.value("name").toString().trimmed();
+        if (!dateName.isEmpty()) head = head.isEmpty() ? dateName : QStringLiteral("%1 — %2").arg(dateName, head);
         MethodResult r = reg.compute(rq);
 
         // Décalage (wiggle) d'une date seule : comme ChronoModel (Date::calibrateWiggle), la densité de t + δ est la
@@ -520,8 +644,50 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
             r.stats = densityStats(r.density);
         }
 
+        // Période d'étude (tmin / tmax, années calendaires signées) : comme ChronoModel, la densité est calculée sur
+        // cette période seulement, puis ramenée à une aire de 1. Sans période : toute la courbe de référence.
+        QString periodNote;
+        const double pmin = numOf(rq, { "tmin" }, std::nan("")), pmax = numOf(rq, { "tmax" }, std::nan(""));
+        if (r.ok && (std::isfinite(pmin) || std::isfinite(pmax))) {
+            const double lo = std::isfinite(pmin) ? pmin : -std::numeric_limits<double>::infinity();
+            const double hi = std::isfinite(pmax) ? pmax : std::numeric_limits<double>::infinity();
+            Density d;
+            d.step = r.density.step;
+            for (size_t i = 0; i < r.density.t.size(); ++i)
+                if (r.density.t[i] >= lo && r.density.t[i] <= hi) { d.t.push_back(r.density.t[i]); d.v.push_back(r.density.v[i]); }
+            const double full = densityArea(r.density), kept = d.valid() ? densityArea(d) : 0.0;
+            periodNote = QStringLiteral("période d'étude %1 → %2")
+                             .arg(std::isfinite(pmin) ? dateformat::format(pmin, fmt) : QStringLiteral("…"),
+                                  std::isfinite(pmax) ? dateformat::format(pmax, fmt) : QStringLiteral("…"));
+            if (!(kept > 0)) {
+                r = MethodResult::failure(QStringLiteral("aucune probabilité sur la %1").arg(periodNote));
+            } else {
+                const bool cutOld = d.t.front() > r.density.t.front() + 0.5 * r.density.step;
+                const bool cutNew = d.t.back() < r.density.t.back() - 0.5 * r.density.step;
+                for (double& y : d.v) y /= kept;
+                QStringList warn;
+                for (const QString& w : r.warnings)        // la limite de la courbe n'est plus en cause si la période la coupe avant
+                    if (!(cutOld && w.contains(QLatin1String("limite ancienne"))) && !(cutNew && w.contains(QLatin1String("limite récente"))))
+                        warn << w;
+                if (full > 0 && kept / full < 0.99)
+                    warn << QStringLiteral("la %1 ne contient que %2 % de la probabilité calculée sur toute la courbe : résultat restreint à cette période")
+                                .arg(periodNote, text::numAuto(100.0 * kept / full, 1));
+                r.density = d;
+                r.hpd95 = hpdIntervals(d, 95.0);
+                r.hpd68 = hpdIntervals(d, 68.0);
+                r.stats = densityStats(d);
+                r.warnings = warn;
+            }
+            head += QStringLiteral(" — %1").arg(periodNote);
+        }
+
         html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
         prompt += QStringLiteral("\n%1\n").arg(head);
+        if (const QStringList cl = curveLabels(reg.referenceCurves(rq)); !cl.isEmpty()) {
+            html += QStringLiteral("<p><i>Courbe%1 de référence : %2</i></p>").arg(cl.size() > 1 ? "s" : "", cl.join(" ; ").toHtmlEscaped());
+            prompt += QStringLiteral("Courbe%1 de référence : %2.\n").arg(cl.size() > 1 ? "s" : "", cl.join(" ; "));
+            anyCurve = true;
+        }
 
         if (!r.ok) {
             html += QStringLiteral("<p><i>Calcul impossible : %1.</i></p>").arg(r.error.toHtmlEscaped());
@@ -541,7 +707,10 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         for (const QString& w : r.warnings) html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(w.toHtmlEscaped());
         for (const QString& w : r.warnings) prompt += QStringLiteral("Avertissement : %1.\n").arg(w);
 
-        series.append(plotSeries(head, r.density, fmt));
+        QJsonObject ser = plotSeries(head, r.density, fmt);
+        if (const QString col = colorOf(rq); !col.isEmpty()) ser["color"] = col;
+        series.append(ser);
+        if (!dateName.isEmpty() && !plotNames.contains(dateName)) plotNames << dateName;
     }
 
     // Remplissage du graphique : niveau demandé s'il est le même pour toutes les dates, sinon 95 %.
@@ -553,12 +722,18 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         : QStringLiteral("Résume par les HPD à 95 % et 68 %");
     prompt += QStringLiteral("\nConsigne : présente ces résultats (intervalles, éventuelle multimodalité, précision) "
                              "pour un archéologue et rappelle les hypothèses de la méthode. Le graphique est DÉJÀ tracé par l'application "
-                             "dans le panneau de droite (courbe bleue, région HPD à %2 % remplie, sans échelle verticale) : n'écris aucun "
+                             "dans le panneau de droite (%4, région HPD à %2 % remplie, sans échelle verticale) : n'écris aucun "
                              "bloc « plot » pour ces densités et ne décris aucun autre élément graphique (couleurs, légende, intervalles "
                              "en rouge…). %1 %3 : jamais de « 1σ » ou « 2σ » pour une densité calibrée. N'invente aucune autre valeur.\n")
                   .arg(fmt == DateFormat::BcAd ? QStringLiteral("Les années sont signées dans les graphiques (négatif = avant J.-C.).")
                                                : QStringLiteral("Les dates sont exprimées en %1.").arg(dateformat::title(fmt)),
-                       levelText(plotLevel), summary);
+                       levelText(plotLevel), summary,
+                       overlay ? QStringLiteral("densités superposées, avec une légende")
+                       : series.size() > 1 ? QStringLiteral("une densité par ligne, sur un axe des dates commun, chacune nommée")
+                       : anyColor ? QStringLiteral("courbe de la couleur indiquée") : QStringLiteral("courbe bleue"));
+    if (anyCurve)
+        prompt += QStringLiteral("Rappelle dans ta réponse la ou les courbes de référence utilisées, telles qu'indiquées ci-dessus "
+                                 "(nom et origine : intégrée à SeldonH, ChronoModel ou dossier de l'utilisateur).\n");
     if (anyEvent)
         prompt += QStringLiteral("Pour l'événement : la densité a posteriori de θ est la courbe remplie, les calibrations individuelles des "
                                  "datations sont tracées en traits, et les traces des chaînes MCMC sont dans un autre onglet. Explique ce que "
@@ -567,7 +742,8 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
                                  "conseille d'augmenter le nombre d'itérations ou de chaînes.\n");
 
     if (!series.isEmpty()) {
-        out.plot["title"] = QStringLiteral("Densités calendaires (calcul SeldonH)");
+        out.plot["title"] = tools::datingPlotTitle(plotNames, int(series.size()));
+        out.plot["dates"] = QJsonArray::fromStringList(plotNames);     // repris par tools::mergePlots pour refaire le titre
         out.plot["xlabel"] = dateformat::axisLabel(fmt);
         if (dateformat::isAge(fmt)) out.plot["xreverse"] = true;      // ordre chronologique de gauche à droite
         out.plot["ylabel"] = QStringLiteral("Densité de probabilité");
@@ -575,6 +751,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         out.plot["yaxis"] = false;       // pas d'échelle verticale pour une densité
         out.plot["hpd"] = plotLevel;     // seule la région HPD (95 % ou niveau demandé) est remplie
         out.plot["series"] = series;
+        out.plot["layout"] = overlay ? QStringLiteral("overlay") : QStringLiteral("rows");
     }
     out.noticeHtml = html;
     out.promptBlock = prompt;
@@ -584,28 +761,99 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
 bool MethodRunner::isModelRequest(const QString& question)
 {
     const QString q = text::fold(question);
-    static const QRegularExpression model(QStringLiteral(R"(\b(modele|modeles|modeliser|modelisation)\b|\.chr\b|projet chronomodel)"));
+    static const QRegularExpression model(QStringLiteral(R"(\b(modele|modeles|modeliser|modelisation|model|models|modelling|modeling)\b|\.chr\b|projet chronomodel|chronomodel project)"));
     static const QRegularExpression context(QStringLiteral(
-        R"(\b(chronomodel|evenement|evenements|phase|phases|contrainte|contraintes|stratigraph\w*|fais|faire|cree|creer|construi\w*|genere|generer|prepare|exporte\w*)\b)"));
+        R"(\b(chronomodel|evenement|evenements|phase|phases|contrainte|contraintes|stratigraph\w*|fais|faire|cree|creer|construi\w*|genere|generer|prepare|exporte\w*)"
+        R"(|event|events|constraints?|bounds?|create|build|make|generate|export\w*)\b)"));
     return model.match(q).hasMatch() && context.match(q).hasMatch();
 }
 
 RunOutcome MethodRunner::analyzeQuestion(const QString& question, DateFormat format)
 {
-    if (isModelRequest(question)) return RunOutcome();
-    QVector<QJsonObject> rq = MethodRegistry::instance().parse(question);
+    QVector<QJsonObject> rq = requestsFromQuestion(question);
+    if (rq.isEmpty()) return RunOutcome();
+    const DateFormat fmt = dateformat::detect(question, format);
+    double a = 0, b = 0;
+    if (periodFromQuestion(question, a, b)) {
+        const double c1 = dateformat::toCalendar(a, fmt), c2 = dateformat::toCalendar(b, fmt);
+        for (QJsonObject& o : rq) { o["tmin"] = std::min(c1, c2); o["tmax"] = std::max(c1, c2); }
+    }
+    return run(rq, fmt);
+}
+
+bool MethodRunner::periodFromQuestion(const QString& question, double& from, double& to)
+{
+    int ws = -1, wl = 0;
+    wiggleFromQuestion(question, &ws, &wl);                  // « décalage entre 10 et 30 » n'est pas une période
+    QString t = question;
+    if (ws >= 0) t.replace(ws, wl, QString(wl, QLatin1Char(' ')));
+    const QString q = text::fold(t);
+    const QString num = QStringLiteral(R"((-?\d+(?:[.,]\d+)?)\s*(av\.?\s*j\.?\s*-?\s*c\.?|avant\s+j\.?\s*-?\s*c\.?|bce?\b|apr\.?\s*j\.?\s*-?\s*c\.?|ad\b|ce\b)?)");
+    const QString sep = QStringLiteral(R"(\s*(?:a|au|jusqu'a|et|-|–|→|to|and)\s*)");
+    static const QRegularExpression explicitRe(QStringLiteral(
+        R"(\b(?:periode\s+d'etude|study\s+period|periode|period|support|domaine|intervalle\s+d'etude|time\s+range)\s*(?:de|du|from|of|:|=|sur|entre|between)?\s*)")
+        + num + sep + num);
+    static const QRegularExpression rangeRe(QStringLiteral(R"(\b(?:entre|between|de|from)\s+)") + num + sep + num);
+    auto val = [](const QString& n, const QString& era) {
+        double v = text::toNumber(n);
+        if (era.startsWith(QLatin1String("av")) || era.startsWith(QLatin1String("bc"))) v = -std::abs(v);
+        return v;
+    };
+    QRegularExpressionMatch m = explicitRe.match(q);
+    if (!m.hasMatch() && !q.contains(QLatin1String("unif"))) m = rangeRe.match(q);
+    if (!m.hasMatch()) return false;
+    from = val(m.captured(1), m.captured(2));
+    to = val(m.captured(3), m.captured(4));
+    return from != to;
+}
+
+QVector<QJsonObject> MethodRunner::followUpRequests(const QString& question, const QVector<QJsonObject>& previous, DateFormat format)
+{
+    // « Et à 50 % ? », « refais la datation entre 0 et 2000 » : pas de nouvelle datation, seulement un autre niveau
+    // et/ou une période d'étude. On reprend la dernière datation calculée (hors événement : son MCMC serait relancé
+    // avec d'autres tirages).
+    const double level = requestedLevel(question);
+    double a = 0, b = 0;
+    const bool period = periodFromQuestion(question, a, b);
+    if ((level <= 0 && !period) || previous.isEmpty() || !requestsFromQuestion(question).isEmpty() || isModelRequest(question)) return {};
+    const DateFormat fmt = dateformat::detect(question, format);
+    QVector<QJsonObject> out;
+    for (QJsonObject o : previous) {
+        o = normalizeRequest(o);
+        if (o.value("method").toString() == QLatin1String("event") || o.value("method").toString() == QLatin1String("density_file")) continue;
+        if (level > 0) o["level"] = level;
+        if (period) {
+            const double c1 = dateformat::toCalendar(a, fmt), c2 = dateformat::toCalendar(b, fmt);
+            o["tmin"] = std::min(c1, c2);
+            o["tmax"] = std::max(c1, c2);
+        }
+        out << o;
+    }
+    return out;
+}
+
+QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question)
+{
+    if (isModelRequest(question)) return {};
+    // Décalage (wiggle) écrit dans la question : son passage est masqué avant de lire les datations, sinon
+    // « décalage de 20 ± 5 ans » serait pris pour une datation de plus.
+    int wStart = -1, wLen = 0;
+    const QJsonObject wiggle = wiggleFromQuestion(question, &wStart, &wLen);
+    QString datesText = question;
+    if (!wiggle.isEmpty() && wStart >= 0) datesText.replace(wStart, wLen, QString(wLen, QChar(' ')));
+    QVector<QJsonObject> rq = MethodRegistry::instance().parse(datesText);
     // Fragment JSON collé dans la question (bloc chronomodel, .chr) : ses valeurs sont exactes, elles priment.
     if (const QVector<QJsonObject> js = jsonRequests(question); !js.isEmpty()) rq = js;
     // Décalage écrit dans la question (« avec un wiggle entre 100 et 300 ») : appliqué s'il n'y a qu'une date ;
     // avec plusieurs dates on ne sait pas laquelle est concernée, le modèle le demandera.
     if (rq.size() == 1 && !rq[0].contains("wiggle") && rq[0].value("method").toString() != "event")
-        if (const QJsonObject w = wiggleFromQuestion(question); !w.isEmpty()) rq[0]["wiggle"] = w;
+        if (!wiggle.isEmpty()) rq[0]["wiggle"] = wiggle;
     const double level = requestedLevel(question);
     // « Calcule l'événement à partir de ces datations » : une seule demande « event » qui les combine (MCMC).
     if (rq.size() >= 2 && asksEvent(question)) {
         QJsonObject ev{ { "method", "event" } };
         static const QRegularExpression nameRe(QStringLiteral(
-            R"RX((?:event|[ée]v[éè]nement)\s*(?:«\s*([^»]{1,40}?)\s*»|"([^"]{1,40})"|(?:nomm[ée]|appel[ée])\s+([^\s,;:.]{1,40})))RX"),
+            R"RX((?:event|[ée]v[éè]nement)\s*(?:«\s*([^»]{1,40}?)\s*»|"([^"]{1,40})"|(?:nomm[ée]|appel[ée]|named|called)\s+([^\s,;:.]{1,40})))RX"),
             QRegularExpression::CaseInsensitiveOption);
         if (const auto m = nameRe.match(question); m.hasMatch())
             ev["name"] = (m.captured(1) + m.captured(2) + m.captured(3)).trimmed();
@@ -620,7 +868,9 @@ RunOutcome MethodRunner::analyzeQuestion(const QString& question, DateFormat for
     }
     if (level > 0)
         for (QJsonObject& o : rq) if (!o.contains("level")) o["level"] = level;
-    return run(rq, dateformat::detect(question, format));
+    if (asksOverlay(question))
+        for (QJsonObject& o : rq) o["layout"] = QStringLiteral("overlay");
+    return rq;
 }
 
 namespace {
@@ -719,7 +969,8 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
             o.remove(r[0]);
         }
     static const char* const renames[][2] = { { "ref_curve", "curve" }, { "delta_r", "deltaR" }, { "delta_r_error", "deltaRerr" },
-                                              { "ref_year", "refYear" }, { "err", "error" }, { "sigma", "error" } };
+                                              { "ref_year", "refYear" }, { "err", "error" }, { "sigma", "error" },
+                                              { "fraction", "f14c" } };       // plugin f14c du .chr : « fraction »
     for (const auto& r : renames)
         if (o.contains(r[0]) && !o.contains(r[1])) { o[r[1]] = o.value(r[0]); o.remove(r[0]); }
     if (o.value("curve").isString()) {
@@ -737,6 +988,8 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
         { "gaussienne", "gauss" }, { "normal", "gauss" }, { "normale", "gauss" },
         { "uniforme", "unif" }, { "uniform", "unif" },
         { "archeomagnetisme", "am" }, { "archeomag", "am" },
+        { "densite tabulee", "density_file" }, { "fichier densite", "density_file" }, { "fichier de densite", "density_file" },
+        { "density file", "density_file" }, { "densityfile", "density_file" },
         { "evenement", "event" }, { "events", "event" } };
     if (alias.contains(m)) m = alias.value(m);
     if (!m.isEmpty()) o["method"] = m;
@@ -758,31 +1011,39 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
     return o;
 }
 
-QJsonObject MethodRunner::wiggleFromQuestion(const QString& question)
+QJsonObject MethodRunner::wiggleFromQuestion(const QString& question, int* start, int* length)
 {
-    const QString q = text::fold(question);
-    static const QRegularExpression kw(QStringLiteral(R"(\b(wiggle|wiggle[- ]matching|decalage|delta(?!\s*r\b)|δ(?!\s*r\b))\b)"));
-    const auto k = kw.match(q);
+    // Sur le texte d'origine (pas de fold) pour pouvoir masquer le passage : accents tolérés dans les motifs.
+    constexpr auto CI = QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption;
+    static const QRegularExpression kw(QStringLiteral(
+        R"(\b(?:wiggle(?:[- ]matching)?|d[ée]calage|offset|shift|delta(?!\s*r\b))\b|δ(?!\s*r\b))"), CI);
+    const auto k = kw.match(question);
     if (!k.hasMatch()) return {};
-    const QString tail = q.mid(k.capturedEnd(), 80);
+    const int from = int(k.capturedEnd());
+    const QString tail = question.mid(from, 80);
     const QString num = QStringLiteral(R"((-?\d+(?:[.,]\d+)?))");
+    auto done = [&](const QRegularExpressionMatch& m, const QJsonObject& w) {
+        if (start) *start = int(k.capturedStart());
+        if (length) *length = from + int(m.capturedEnd()) - int(k.capturedStart());
+        return w;
+    };
     // « entre 100 et 300 », « de 100 à 300 », « [100 ; 300] »
-    static const QRegularExpression range(QStringLiteral(R"(^\D{0,25}?(?:entre\s+|de\s+|\[\s*))") + num
-                                          + QStringLiteral(R"(\s*(?:et|a|à|;|,|-)\s*)") + num);
+    static const QRegularExpression range(QStringLiteral(R"(^\D{0,25}?(?:entre\s+|de\s+|between\s+|from\s+|\[\s*))") + num
+                                          + QStringLiteral(R"(\s*(?:et|à|a|and|to|;|,|-)\s*)") + num + QStringLiteral(R"(\s*\]?)"), CI);
     if (const auto m = range.match(tail); m.hasMatch()) {
         double a = text::toNumber(m.captured(1)), b = text::toNumber(m.captured(2));
         if (a > b) std::swap(a, b);
-        return QJsonObject{ { "type", "range" }, { "min", a }, { "max", b } };
+        return done(m, QJsonObject{ { "type", "range" }, { "min", a }, { "max", b } });
     }
     // « 20 ± 5 » : gaussien
     static const QRegularExpression gauss(QStringLiteral(R"(^\D{0,25}?)") + num + QStringLiteral(R"(\s*)") + text::plusMinus()
-                                          + QStringLiteral(R"(\s*(\d+(?:[.,]\d+)?))"));
+                                          + QStringLiteral(R"(\s*(\d+(?:[.,]\d+)?))"), CI);
     if (const auto m = gauss.match(tail); m.hasMatch())
-        return QJsonObject{ { "type", "gaussian" }, { "mean", text::toNumber(m.captured(1)) }, { "error", text::toNumber(m.captured(2)) } };
+        return done(m, QJsonObject{ { "type", "gaussian" }, { "mean", text::toNumber(m.captured(1)) }, { "error", text::toNumber(m.captured(2)) } });
     // « wiggle de 20 ans » : fixe
-    static const QRegularExpression fixed(QStringLiteral(R"(^\D{0,15}?)") + num);
+    static const QRegularExpression fixed(QStringLiteral(R"(^\D{0,15}?)") + num, CI);
     if (const auto m = fixed.match(tail); m.hasMatch())
-        return QJsonObject{ { "type", "fixed" }, { "value", text::toNumber(m.captured(1)) } };
+        return done(m, QJsonObject{ { "type", "fixed" }, { "value", text::toNumber(m.captured(1)) } });
     return {};
 }
 
@@ -792,7 +1053,7 @@ QVector<QJsonObject> MethodRunner::jsonRequests(const QString& text)
     for (const QJsonObject& raw : topLevelObjects(text)) {
         const QJsonObject o = normalizeRequest(raw);
         const QString m = o.value("method").toString();
-        if (!m.isEmpty() && (m == "event" || MethodRegistry::instance().byId(m)) && out.size() < 12) out << o;
+        if (!m.isEmpty() && (m == "event" || m == "density_file" || MethodRegistry::instance().byId(m)) && out.size() < 12) out << o;
     }
     return out;
 }
@@ -812,7 +1073,7 @@ QVector<QJsonObject> MethodRunner::extractCalcBlocks(const QString& answer)
             if (raw.value("method").toString().isEmpty() && !(calcFence && raw.contains("plugin_id"))) continue;
             const QJsonObject o = normalizeRequest(raw);
             const QString m = o.value("method").toString();
-            if (!calcFence && m != "event" && !MethodRegistry::instance().byId(m)) continue;
+            if (!calcFence && m != "event" && m != "density_file" && !MethodRegistry::instance().byId(m)) continue;
             out << o;
         }
     }

@@ -14,6 +14,7 @@ SOURCES += \
     main.cpp \
     mainwindow.cpp \
     src/core/ChrBuilder.cpp \
+    src/core/ChronoResults.cpp \
     src/core/ConversationStore.cpp \
     src/llm/LlmCore.cpp \
     src/llm/LlmEngine.cpp \
@@ -32,6 +33,7 @@ HEADERS += \
     src/core/AppSettings.h \
     src/core/ChatText.h \
     src/core/ChrBuilder.h \
+    src/core/ChronoResults.h \
     src/core/ConversationStore.h \
     src/llm/LlmCore.h \
     src/llm/LlmEngine.h \

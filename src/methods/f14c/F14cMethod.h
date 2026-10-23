@@ -20,6 +20,7 @@ public:
     bool usesValueErrors() const override { return true; }
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
+    QStringList referenceCurves(const QJsonObject& p) const override;
 
     // Résout un nom de courbe : dossier f14c d'abord, puis courbes d'âge de c14 (converties).
     static const RefCurve* resolveCurve(const QString& name);

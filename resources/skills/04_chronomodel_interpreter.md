@@ -1,7 +1,7 @@
 ---
 name: Interpréter les résultats de ChronoModel
 description: HPD, intervalles de crédibilité, convergence MCMC, phases, valeurs aberrantes
-keywords: wiggle, decalage, interpreter, interpretation, resultat, resultats, hpd, credibilite, intervalle, posterieur, posteriori, convergence, gelman, rubin, acceptation, trace, autocorrelation, duree, debut, fin, aberrant, outlier, resume, analyser
+keywords: wiggle, decalage, interpreter, interpretation, resultat, resultats, hpd, credibilite, intervalle, posterieur, posteriori, convergence, gelman, rubin, acceptation, trace, autocorrelation, duree, debut, fin, aberrant, outlier, resume, analyser, offset, interpret, result, results, credible, interval, posterior, acceptance, duration, start, begin, end, summary, summarize, analyse, analyze
 priority: 10
 ---
 **Lire un résultat**
