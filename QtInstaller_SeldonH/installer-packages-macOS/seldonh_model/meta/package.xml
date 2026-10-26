@@ -6,7 +6,7 @@
     <ReleaseDate>2026-10-22</ReleaseDate>
     <Default>true</Default>
     <SortingPriority>50</SortingPriority>
-    <Dependencies>seldonh.app</Dependencies>
+    <Dependencies>seldonh_app</Dependencies>
     <Licenses>
         <License name="Licence du modèle de langage" file="LICENCE-modele.txt"/>
     </Licenses>

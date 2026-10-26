@@ -1,5 +1,5 @@
 /**************************************************************************
-** SeldonH - installscript.qs (composant seldonh.app)
+** SeldonH - installscript.qs (composant seldonh_app)
 ** Raccourcis : menu Démarrer + Bureau sous Windows, entrée de menu sous Linux.
 **************************************************************************/
 

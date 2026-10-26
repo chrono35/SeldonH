@@ -7,7 +7,7 @@
 #  Usage :
 #     bash QtInstaller_SeldonH/QtIFW_script_deb.sh                  installeur complet
 #     bash QtInstaller_SeldonH/QtIFW_script_deb.sh rebuild          force la recompilation de llama.cpp et de QtKeychain
-#     bash QtInstaller_SeldonH/QtIFW_script_deb.sh nomodel          installeur sans modèle (~100 Mo)
+#     bash QtInstaller_SeldonH/QtIFW_script_deb.sh noModel          installeur sans modèle (~100 Mo)
 #     MODEL=Qwen3.5-4B-Q3_K_M.gguf bash QtInstaller_SeldonH/QtIFW_script_deb.sh   autre modèle
 #
 #  Un seul installeur pour tous les PC : llama.cpp est livré avec ses backends chargés au démarrage
@@ -42,15 +42,15 @@ REBUILD=0
 for a in "$@"; do
     case "$a" in
         rebuild) REBUILD=1 ;;
-        nomodel) MODEL="" ;;
+        nomodel|noModel|NOMODEL) MODEL="" ;;
     esac
 done
 
 INST="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$INST/.." && pwd)"
 PKGS="$INST/installer-packages-deb"
-DATA="$PKGS/seldonh.app/data"
-MODEL_DIR="$PKGS/seldonh.model/data/models"
+DATA="$PKGS/seldonh_app/data"
+MODEL_DIR="$PKGS/seldonh_model/data/models"
 BUILD_DIR="$ROOT/build/linux64-Release"
 LLAMA="$ROOT/third_party/llama-install"
 KEYCHAIN="$ROOT/third_party/qtkeychain-install"
@@ -60,7 +60,7 @@ echo "➡️  1 - Vérification des chemins"
 [ -x "$QTDIR/bin/qmake" ]        || { echo "❌ Qt introuvable : $QTDIR (variable QTDIR)"; exit 1; }
 [ -x "$IFW/binarycreator" ]      || { echo "❌ QtIFW introuvable : $IFW (variable IFW)"; exit 1; }
 if [ -n "$MODEL" ] && [ ! -f "$ROOT/models/$MODEL" ]; then
-    echo "❌ modèle introuvable : $ROOT/models/$MODEL (le télécharger, ou argument nomodel)"; exit 1
+    echo "❌ modèle introuvable : $ROOT/models/$MODEL (le télécharger, ou argument noModel)"; exit 1
 fi
 command -v patchelf >/dev/null || echo "⚠️  patchelf absent (sudo apt install patchelf) : le lanceur SeldonH.sh restera indispensable"
 
@@ -95,15 +95,15 @@ rm -f "$BUILD_DIR/SeldonH"
 EXE="$BUILD_DIR/SeldonH"
 [ -x "$EXE" ] || { echo "❌ exécutable introuvable : $EXE"; exit 1; }
 
-echo "➡️  4 - Préparation du composant seldonh.app"
+echo "➡️  4 - Préparation du composant seldonh_app"
 rm -rf "$DATA"
 mkdir -p "$DATA/lib" "$DATA/plugins"
 cp "$EXE" "$DATA/"
 cp "$ROOT/resources/icons/seldonh_256.png" "$DATA/seldonh.png"
-cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh.app/meta/llama.cpp-LICENSE.txt"
-cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh.app/meta/qtkeychain-LICENSE.txt"
-cp "$ROOT/LICENSE" "$PKGS/seldonh.app/meta/SeldonH-LICENSE.txt"
-cp "$ROOT/COPYING" "$PKGS/seldonh.app/meta/GPL-3.0.txt"
+cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh_app/meta/llama.cpp-LICENSE.txt"
+cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh_app/meta/qtkeychain-LICENSE.txt"
+cp "$ROOT/LICENSE" "$PKGS/seldonh_app/meta/SeldonH-LICENSE.txt"
+cp "$ROOT/COPYING" "$PKGS/seldonh_app/meta/GPL-3.0.txt"
 cp "$ROOT/LICENSE" "$ROOT/COPYING" "$DATA/"
 # llama.cpp : libllama, libggml, libggml-base (+ liens symboliques) et backends libggml-cpu-*.so, libggml-vulkan.so
 cp -a "$LLAMA"/lib/*.so* "$DATA/lib/"
@@ -168,13 +168,13 @@ if command -v patchelf >/dev/null; then
 fi
 echo "   $(ls "$DATA/lib" | wc -l) bibliothèques, $(du -sh "$DATA" | cut -f1) au total"
 
-echo "➡️  7 - Composant seldonh.model"
+echo "➡️  7 - Composant seldonh_model"
 EXCLUDE=()
 SUFFIX=""
 if [ -z "$MODEL" ]; then
     echo "   pas de modèle embarqué"
-    EXCLUDE=(--exclude seldonh.model)
-    SUFFIX="_sansModele"
+    EXCLUDE=(--exclude seldonh_model)
+    SUFFIX="_noModel"
 else
     mkdir -p "$MODEL_DIR"
     find "$MODEL_DIR" -name '*.gguf' ! -name "$MODEL" -delete   # un seul .gguf (SeldonH charge le premier)
@@ -188,7 +188,7 @@ fi
 
 echo "➡️  8 - Version $VERSION et date $DATE_ISO dans config.xml / package.xml"
 sed -i -E "s|<Version>[^<]*</Version>|<Version>$VERSION</Version>|; s|<ReleaseDate>[^<]*</ReleaseDate>|<ReleaseDate>$DATE_ISO</ReleaseDate>|" \
-    "$INST/installer-config/config.xml" "$PKGS/seldonh.app/meta/package.xml" "$PKGS/seldonh.model/meta/package.xml"
+    "$INST/installer-config/config.xml" "$PKGS/seldonh_app/meta/package.xml" "$PKGS/seldonh_model/meta/package.xml"
 
 INSTALLER="SeldonH_v${VERSION}_${QT_VER_STR}_linux64_${DATE_FILE}_Installer${SUFFIX}.run"
 echo "➡️  9 - binarycreator : $INSTALLER"

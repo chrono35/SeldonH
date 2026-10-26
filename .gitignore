@@ -93,14 +93,12 @@ CMakeLists.txt.user*
 *.gguf
 
 # Déploiement (QtInstaller_SeldonH) : fichiers rassemblés par les scripts et installeurs produits
-# composant QtIFW « seldonh.app » : nom en .app (ignoré plus haut), mais meta/ doit être versionné
-!/QtInstaller_SeldonH/installer-packages-*/seldonh.app/
 /third_party/llama-build*/
 /QtInstaller_SeldonH/installer-packages-*/*/data/
-/QtInstaller_SeldonH/installer-packages-*/seldonh.app/meta/llama.cpp-LICENSE.txt
-/QtInstaller_SeldonH/installer-packages-*/seldonh.app/meta/qtkeychain-LICENSE.txt
-/QtInstaller_SeldonH/installer-packages-*/seldonh.app/meta/SeldonH-LICENSE.txt
-/QtInstaller_SeldonH/installer-packages-*/seldonh.app/meta/GPL-3.0.txt
+/QtInstaller_SeldonH/installer-packages-*/seldonh_app/meta/llama.cpp-LICENSE.txt
+/QtInstaller_SeldonH/installer-packages-*/seldonh_app/meta/qtkeychain-LICENSE.txt
+/QtInstaller_SeldonH/installer-packages-*/seldonh_app/meta/SeldonH-LICENSE.txt
+/QtInstaller_SeldonH/installer-packages-*/seldonh_app/meta/GPL-3.0.txt
 /QtInstaller_SeldonH/SeldonH_v*_Installer*
 /QtInstaller_SeldonH/staging/
 /QtInstaller_SeldonH/dmg_content/

@@ -7,7 +7,7 @@ rem
 rem  Usage (depuis n'importe quel dossier) :
 rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat               installeur complet
 rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat rebuild       force la recompilation de llama.cpp et de QtKeychain
-rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat nomodel       installeur sans modele (~80 Mo)
+rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat noModel       installeur sans modele (~80 Mo)
 rem     set MODEL=Qwen3.5-4B-Q3_K_M.gguf  (avant l'appel) pour embarquer un autre modele
 rem
 rem  Un seul installeur pour tous les PC : llama.cpp est livre avec ses backends
@@ -39,14 +39,14 @@ rem --------------------------------------------------------------------------
 set REBUILD=0
 for %%a in (%*) do (
     if /i "%%a"=="rebuild" set REBUILD=1
-    if /i "%%a"=="nomodel" set MODEL=
+    if /i "%%a"=="noModel" set MODEL=
 )
 
 for %%I in ("%~dp0..") do set ROOT=%%~fI
 set INST=%ROOT%\QtInstaller_SeldonH
 set PKGS=%INST%\installer-packages-winOS
-set APPDATA_DIR=%PKGS%\seldonh.app\data
-set MODEL_DIR=%PKGS%\seldonh.model\data\models
+set APPDATA_DIR=%PKGS%\seldonh_app\data
+set MODEL_DIR=%PKGS%\seldonh_model\data\models
 set BUILD_DIR=%ROOT%\build\win64-Release
 set LLAMA=%ROOT%\third_party\llama-install
 set KEYCHAIN=%ROOT%\third_party\qtkeychain-install
@@ -110,15 +110,15 @@ set EXE=%BUILD_DIR%\SeldonH.exe
 if not exist "%EXE%" set EXE=%BUILD_DIR%\release\SeldonH.exe
 if not exist "%EXE%" ( echo ERREUR : SeldonH.exe introuvable dans %BUILD_DIR% & goto :fail )
 
-echo  4 - Preparation du composant seldonh.app
+echo  4 - Preparation du composant seldonh_app
 if exist "%APPDATA_DIR%" rmdir /s /q "%APPDATA_DIR%"
 mkdir "%APPDATA_DIR%"
 copy /y "%EXE%" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\resources\icons\SeldonH.ico" "%APPDATA_DIR%\" >nul
-copy /y "%ROOT%\third_party\llama.cpp\LICENSE" "%PKGS%\seldonh.app\meta\llama.cpp-LICENSE.txt" >nul
-copy /y "%ROOT%\third_party\qtkeychain\COPYING" "%PKGS%\seldonh.app\meta\qtkeychain-LICENSE.txt" >nul
-copy /y "%ROOT%\LICENSE" "%PKGS%\seldonh.app\meta\SeldonH-LICENSE.txt" >nul
-copy /y "%ROOT%\COPYING" "%PKGS%\seldonh.app\meta\GPL-3.0.txt" >nul
+copy /y "%ROOT%\third_party\llama.cpp\LICENSE" "%PKGS%\seldonh_app\meta\llama.cpp-LICENSE.txt" >nul
+copy /y "%ROOT%\third_party\qtkeychain\COPYING" "%PKGS%\seldonh_app\meta\qtkeychain-LICENSE.txt" >nul
+copy /y "%ROOT%\LICENSE" "%PKGS%\seldonh_app\meta\SeldonH-LICENSE.txt" >nul
+copy /y "%ROOT%\COPYING" "%PKGS%\seldonh_app\meta\GPL-3.0.txt" >nul
 copy /y "%ROOT%\LICENSE" "%APPDATA_DIR%\LICENSE.txt" >nul
 copy /y "%ROOT%\COPYING" "%APPDATA_DIR%\COPYING.txt" >nul
 rem llama.cpp : libllama.dll, ggml.dll, ggml-base.dll et backends ggml-cpu-*.dll, ggml-vulkan.dll
@@ -138,12 +138,12 @@ for %%L in (libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll) do (
     if not exist "%APPDATA_DIR%\%%L" copy /y "%MINGW%\bin\%%L" "%APPDATA_DIR%\" >nul
 )
 
-echo  6 - Composant seldonh.model
+echo  6 - Composant seldonh_model
 set EXCLUDE=
 if not defined MODEL (
     echo     pas de modele embarque
-    set EXCLUDE=--exclude seldonh.model
-    set SUFFIX=_sansModele
+    set EXCLUDE=--exclude seldonh_model
+    set SUFFIX=_noModel
     goto :model_done
 )
 set SUFFIX=
@@ -165,7 +165,7 @@ if not "%SRC_SIZE%"=="%DST_SIZE%" (
 
 echo  7 - Version %VERSION% et date %DATE_ISO% dans config.xml / package.xml
 powershell -NoProfile -Command ^
-  "$files = @('%INST%\installer-config\config.xml','%PKGS%\seldonh.app\meta\package.xml','%PKGS%\seldonh.model\meta\package.xml');" ^
+  "$files = @('%INST%\installer-config\config.xml','%PKGS%\seldonh_app\meta\package.xml','%PKGS%\seldonh_model\meta\package.xml');" ^
   "foreach ($f in $files) { $t = [IO.File]::ReadAllText($f);" ^
   "  $t = $t -replace '<Version>[^<]*</Version>', '<Version>%VERSION%</Version>' -replace '<ReleaseDate>[^<]*</ReleaseDate>', '<ReleaseDate>%DATE_ISO%</ReleaseDate>';" ^
   "  [IO.File]::WriteAllText($f, $t, (New-Object Text.UTF8Encoding $false)) }"

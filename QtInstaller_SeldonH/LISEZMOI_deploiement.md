@@ -6,9 +6,13 @@ llama.cpp et QtKeychain (si besoin) → compilation Release de SeldonH → bibli
 
 | Système | Script | Résultat |
 |---|---|---|
-| Windows 64 bits (MinGW) | `QtInstaller_SeldonH\QtIFW_script_winOS.bat [rebuild] [nomodel]` | `SeldonH_v1.0.0_Qt6_11_2_win64_AAAAMMJJ_Installer.exe` |
-| Debian / Ubuntu x86_64 | `bash QtInstaller_SeldonH/QtIFW_script_deb.sh [rebuild] [nomodel]` | `SeldonH_v1.0.0_Qt6_11_2_linux64_AAAAMMJJ_Installer.run` |
-| macOS universel (x86_64 + arm64) | `bash QtInstaller_SeldonH/QtIFW_script_macOS.sh [rebuild] [nomodel] [nodmg]` | `SeldonH_v1.0.0_Qt6_11_1_macOS13_AAAAMMJJ_Installer.app` + `.dmg` |
+| Windows 64 bits (MinGW) | `QtInstaller_SeldonH\QtIFW_script_winOS.bat [rebuild] [noModel]` | `SeldonH_v1.0.0_Qt6_11_2_win64_AAAAMMJJ_Installer.exe` |
+| Debian / Ubuntu x86_64 | `bash QtInstaller_SeldonH/QtIFW_script_deb.sh [rebuild] [noModel]` | `SeldonH_v1.0.0_Qt6_11_2_linux64_AAAAMMJJ_Installer.run` |
+| macOS universel (x86_64 + arm64) | `bash QtInstaller_SeldonH/QtIFW_script_macOS.sh [rebuild] [noModel] [nodmg]` | `SeldonH_v1.0.0_Qt6_11_1_macOS13_AAAAMMJJ_Installer.app` + `.dmg` |
+
+**Installeurs sans modèle** (`_noModel`, ~80-100 Mo : l'utilisateur choisit un modèle distant ou son propre `.gguf`) :
+`QtIFW_script_winOS_noModel.bat`, `QtIFW_script_deb_noModel.sh`, `QtIFW_script_macOS_noModel.sh`.
+Ils appellent le script principal avec l'argument `noModel` (les autres arguments sont transmis).
 
 Les chemins (Qt, MinGW, QtIFW), la version et le modèle sont en tête de chaque script, bloc **A VERIFIER**.
 
@@ -49,16 +53,16 @@ compilé par `scripts/build_qtkeychain.sh` (macOS, Linux) ou `scripts\build_qtke
 
 ## Licences affichées par l'installeur
 
-SeldonH est sous **GPL-3.0-or-later** (comme ChronoModel). Les scripts copient dans `seldonh.app/meta/` :
+SeldonH est sous **GPL-3.0-or-later** (comme ChronoModel). Les scripts copient dans `seldonh_app/meta/` :
 `SeldonH-LICENSE.txt` (= `LICENSE`, notice et composants tiers), `GPL-3.0.txt` (= `COPYING`),
 `llama.cpp-LICENSE.txt` (MIT) et `qtkeychain-LICENSE.txt` (BSD 2 clauses), déclarés dans `package.xml` (`<Licenses>`).
 `LICENSE` et `COPYING` sont aussi installés à côté de l'application.
 
 ## Contenu de l'installeur
 
-* `seldonh.app` (obligatoire) : exécutable, Qt, llama.cpp, QtKeychain, `LICENSE` + `COPYING`, raccourcis (menu Démarrer + Bureau sous Windows,
+* `seldonh_app` (obligatoire) : exécutable, Qt, llama.cpp, QtKeychain, `LICENSE` + `COPYING`, raccourcis (menu Démarrer + Bureau sous Windows,
   entrée de menu `~/.local/share/applications` sous Linux).
-* `seldonh.model` (coché par défaut, décochable) : `Qwen3.5-4B-Q4_K_M.gguf` dans `models/`.
+* `seldonh_model` (coché par défaut, décochable) : `Qwen3.5-4B-Q4_K_M.gguf` dans `models/`.
   Autre modèle : `MODEL=Qwen3.5-4B-Q3_K_M.gguf`.
 * Dossier d'installation : `C:\Program Files\SeldonH` ; Linux `~/SeldonH` (pas de root, lanceur `SeldonH.sh`) ;
   macOS `/Applications/SeldonH/SeldonH.app`, modèle dans `/Applications/SeldonH/models`
@@ -88,4 +92,4 @@ compilation universelle (`QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64"`, llama.cpp un
 
 ## À faire avant diffusion
 
-* Coller la licence réelle du modèle dans `installer-packages-*/seldonh.model/meta/LICENCE-modele.txt`.
+* Coller la licence réelle du modèle dans `installer-packages-*/seldonh_model/meta/LICENCE-modele.txt`.

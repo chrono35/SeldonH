@@ -9,7 +9,7 @@
 #  A lancer avec bash (pas sh) :
 #     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh             installeur complet + .dmg
 #     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh rebuild     force la recompilation de llama.cpp et de QtKeychain
-#     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh nomodel     installeur sans modèle
+#     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh noModel     installeur sans modèle
 #     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh nodmg       pas de .dmg (installeur .app seul)
 #     MODEL=Qwen3.5-4B-Q3_K_M.gguf bash QtInstaller_SeldonH/QtIFW_script_macOS.sh   autre modèle
 #
@@ -49,7 +49,7 @@ MAKE_DMG=1
 for a in "$@"; do
     case "$a" in
         rebuild) REBUILD=1 ;;
-        nomodel) MODEL="" ;;
+        nomodel|noModel|NOMODEL) MODEL="" ;;
         nodmg)   MAKE_DMG=0 ;;
     esac
 done
@@ -58,8 +58,8 @@ METAL=ON
 INST="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$INST/.." && pwd)"
 PKGS="$INST/installer-packages-macOS"
-DATA="$PKGS/seldonh.app/data"
-MODEL_DIR="$PKGS/seldonh.model/data/models"
+DATA="$PKGS/seldonh_app/data"
+MODEL_DIR="$PKGS/seldonh_model/data/models"
 BUILD_DIR="$ROOT/build/macOS-Release"
 LLAMA="$ROOT/third_party/llama-install"
 KEYCHAIN="$ROOT/third_party/qtkeychain-install"
@@ -83,7 +83,7 @@ echo "➡️  1 - Vérification des chemins"
 [ -x "$IFW/binarycreator" ]        || { echo "❌ QtIFW introuvable : $IFW"; exit 1; }
 is_universal "$QT_ROOT/lib/QtCore.framework/QtCore" || { echo "❌ Le kit Qt n'est pas universel (x86_64 + arm64)"; exit 1; }
 if [ -n "$MODEL" ] && [ ! -f "$ROOT/models/$MODEL" ]; then
-    echo "❌ modèle introuvable : $ROOT/models/$MODEL (le télécharger, ou argument nomodel)"; exit 1
+    echo "❌ modèle introuvable : $ROOT/models/$MODEL (le télécharger, ou argument noModel)"; exit 1
 fi
 
 echo "➡️  2 - llama.cpp (Metal, universel)"
@@ -161,23 +161,23 @@ MACOS_MIN=$(otool -l "$EXE" 2>/dev/null | awk '/minos/{print $2; exit}')
 if [ -n "${MACOS_MIN:-}" ]; then MACOS_TAG="macOS${MACOS_MIN%%.*}"; else MACOS_TAG="macOS"; fi
 echo "   Cible macOS : $MACOS_TAG (minos $MACOS_MIN)"
 
-echo "➡️  9 - Composant seldonh.app"
+echo "➡️  9 - Composant seldonh_app"
 rm -rf "$DATA"
 mkdir -p "$DATA"
 ditto "$BUNDLE" "$DATA/SeldonH.app"
 cp "$ROOT/LICENSE" "$ROOT/COPYING" "$DATA/"      # à côté du bundle (/Applications/SeldonH), hors signature
-cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh.app/meta/llama.cpp-LICENSE.txt"
-cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh.app/meta/qtkeychain-LICENSE.txt"
-cp "$ROOT/LICENSE" "$PKGS/seldonh.app/meta/SeldonH-LICENSE.txt"
-cp "$ROOT/COPYING" "$PKGS/seldonh.app/meta/GPL-3.0.txt"
+cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh_app/meta/llama.cpp-LICENSE.txt"
+cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh_app/meta/qtkeychain-LICENSE.txt"
+cp "$ROOT/LICENSE" "$PKGS/seldonh_app/meta/SeldonH-LICENSE.txt"
+cp "$ROOT/COPYING" "$PKGS/seldonh_app/meta/GPL-3.0.txt"
 
-echo "➡️  10 - Composant seldonh.model"
+echo "➡️  10 - Composant seldonh_model"
 EXCLUDE=()
 SUFFIX=""
 if [ -z "$MODEL" ]; then
     echo "   pas de modèle embarqué"
-    EXCLUDE=(--exclude seldonh.model)
-    SUFFIX="_sansModele"
+    EXCLUDE=(--exclude seldonh_model)
+    SUFFIX="_noModel"
 else
     mkdir -p "$MODEL_DIR"
     find "$MODEL_DIR" -name '*.gguf' ! -name "$MODEL" -delete   # un seul .gguf (SeldonH charge le premier)
@@ -191,7 +191,7 @@ fi
 
 echo "➡️  11 - Version $VERSION et date $DATE_ISO dans config.xml / package.xml"
 sed -i '' -E "s|<Version>[^<]*</Version>|<Version>$VERSION</Version>|; s|<ReleaseDate>[^<]*</ReleaseDate>|<ReleaseDate>$DATE_ISO</ReleaseDate>|" \
-    "$INST/installer-config/config.xml" "$PKGS/seldonh.app/meta/package.xml" "$PKGS/seldonh.model/meta/package.xml"
+    "$INST/installer-config/config.xml" "$PKGS/seldonh_app/meta/package.xml" "$PKGS/seldonh_model/meta/package.xml"
 
 INSTALLER="SeldonH_v${VERSION}_${QT_VER_STR}_${MACOS_TAG}_${DATE_FILE}_Installer${SUFFIX}"
 echo "➡️  12 - binarycreator : $INSTALLER.app"
