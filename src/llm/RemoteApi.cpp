@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "RemoteApi.h"
 
 #include <QHostAddress>
@@ -5,6 +33,7 @@
 #include <QJsonDocument>
 
 #include <algorithm>
+#include <initializer_list>
 
 namespace seldon {
 namespace remote {
@@ -202,6 +231,7 @@ QVector<SseEvent> SseParser::parseLine(const QByteArray& line)
     const QJsonArray choices = o.value("choices").toArray();
     if (!choices.isEmpty()) {
         const QJsonObject delta = choices[0].toObject().value("delta").toObject();
+        ev.finishReason = choices[0].toObject().value("finish_reason").toString();   // null -> chaîne vide
         ev.text = delta.value("content").toString();                       // null -> chaîne vide
         ev.reasoning = delta.value("reasoning_content").toString();
         if (ev.reasoning.isEmpty()) ev.reasoning = delta.value("reasoning").toString();
@@ -213,11 +243,41 @@ QVector<SseEvent> SseParser::parseLine(const QByteArray& line)
         ev.promptTokens = usage.value("prompt_tokens").toInt(-1);
         ev.completionTokens = usage.value("completion_tokens").toInt(-1);
     }
-    if (!ev.text.isEmpty() || !ev.reasoning.isEmpty() || !ev.toolCalls.isEmpty() || ev.promptTokens >= 0 || ev.completionTokens >= 0) out << ev;
+    if (!ev.text.isEmpty() || !ev.reasoning.isEmpty() || !ev.toolCalls.isEmpty() || ev.promptTokens >= 0 || ev.completionTokens >= 0
+        || !ev.finishReason.isEmpty())
+        out << ev;
     return out;
 }
 
-QString textFromFullResponse(const QByteArray& body, int* promptTokens, int* completionTokens)
+QHash<QString, ModelLimits> parseModelLimits(const QByteArray& body)
+{
+    QHash<QString, ModelLimits> out;
+    const QJsonDocument d = QJsonDocument::fromJson(body);
+    const QJsonArray arr = d.isObject() ? d.object().value("data").toArray() : d.array();
+    auto firstInt = [](const QJsonObject& o, std::initializer_list<const char*> keys) {
+        for (const char* k : keys) {
+            const QJsonValue v = o.value(QLatin1String(k));
+            const int n = v.isDouble() ? int(v.toDouble()) : v.toString().toInt();
+            if (n > 0) return n;
+        }
+        return 0;
+    };
+    for (const QJsonValue& v : arr) {
+        const QJsonObject o = v.toObject();
+        const QString id = o.value("id").toString();
+        if (id.isEmpty()) continue;
+        const QJsonObject top = o.value("top_provider").toObject();
+        ModelLimits m;
+        m.context = firstInt(o, { "context_length", "max_context_length", "context_window", "max_model_len" });
+        if (m.context == 0) m.context = firstInt(top, { "context_length" });
+        m.maxOutput = firstInt(top, { "max_completion_tokens" });
+        if (m.maxOutput == 0) m.maxOutput = firstInt(o, { "max_output_tokens", "max_completion_tokens" });
+        if (m.context > 0 || m.maxOutput > 0) out.insert(id, m);
+    }
+    return out;
+}
+
+QString textFromFullResponse(const QByteArray& body, int* promptTokens, int* completionTokens, QString* finishReason)
 {
     const QJsonDocument d = QJsonDocument::fromJson(body);
     if (!d.isObject()) return {};
@@ -227,6 +287,7 @@ QString textFromFullResponse(const QByteArray& body, int* promptTokens, int* com
     if (completionTokens) *completionTokens = usage.value("completion_tokens").toInt(-1);
     const QJsonArray choices = o.value("choices").toArray();
     if (choices.isEmpty()) return {};
+    if (finishReason) *finishReason = choices[0].toObject().value("finish_reason").toString();
     return choices[0].toObject().value("message").toObject().value("content").toString();
 }
 

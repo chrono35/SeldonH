@@ -1,8 +1,38 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "ChatView.h"
 
 #include "../core/MathText.h"
 
 #include <QApplication>
+#include <QBuffer>
+#include <QUrl>
 #include <QPalette>
 #include <QScrollBar>
 #include <QTextDocument>
@@ -94,9 +124,39 @@ void ChatView::setActions(int index, const QStringList& linksHtml)
     render();
 }
 
+void ChatView::addFigure(int id, const QImage& img, const QString& caption)
+{
+    if (img.isNull()) return;
+    figures_[id] = FigureImage{ img, 1, caption };
+    Item it;
+    it.kind = Item::Figure;
+    it.figure = id;
+    items_.append(it);
+    render();
+}
+
+void ChatView::setFigure(int id, const QImage& img)
+{
+    auto f = figures_.find(id);
+    if (f == figures_.end() || img.isNull()) return;
+    f->img = img;
+    ++f->version;              // nouvelle adresse : le document ne réutilise pas l'ancienne image en cache
+    render();
+}
+
+QVariant ChatView::loadResource(int type, const QUrl& name)
+{
+    if (type == QTextDocument::ImageResource && name.scheme() == QLatin1String("seldon-fig")) {
+        const auto f = figures_.constFind(name.path().toInt());
+        return f == figures_.constEnd() ? QVariant() : QVariant::fromValue(f->img);
+    }
+    return QTextBrowser::loadResource(type, name);
+}
+
 void ChatView::clearAll()
 {
     items_.clear();
+    figures_.clear();
     timer_.stop();
     render();
 }
@@ -107,7 +167,7 @@ void ChatView::scheduleRender()
     if (!timer_.isActive()) timer_.start();
 }
 
-QString ChatView::bubble(const Item& it) const
+QString ChatView::bubble(const Item& it, bool forExport) const
 {
     const QPalette pal = QApplication::palette();
     const bool dark = pal.color(QPalette::Window).lightness() < 128;
@@ -125,6 +185,26 @@ QString ChatView::bubble(const Item& it) const
         who = tr("Vous"); inner = it.html; break;
     case Item::Notice:
         bg = noticeBg; who = QString(); inner = it.html; break;
+    case Item::Figure: {
+        // Vignette cliquable (ouvre la figure dans le panneau de droite) ; à l'export, l'image est intégrée en PNG.
+        bg = asstBg; who = QString();
+        const FigureImage f = figures_.value(it.figure);
+        const QSize sz = f.img.deviceIndependentSize().toSize();
+        QString src = QStringLiteral("seldon-fig:%1?v=%2").arg(it.figure).arg(f.version);
+        if (forExport) {
+            QByteArray png;
+            QBuffer buf(&png);
+            buf.open(QIODevice::WriteOnly);
+            f.img.save(&buf, "PNG");
+            src = QStringLiteral("data:image/png;base64,") + QString::fromLatin1(png.toBase64());
+        }
+        const QString img = QStringLiteral("<img src=\"%1\" width=\"%2\" height=\"%3\">").arg(src).arg(sz.width()).arg(sz.height());
+        inner = forExport ? img : QStringLiteral("<a href=\"seldon://figure/%1\">%2</a>").arg(it.figure).arg(img);
+        inner += QStringLiteral("<br><small style=\"color:%1\">📈 %2%3</small>")
+                     .arg(muted, f.caption.toHtmlEscaped(),
+                          forExport ? QString() : tr(" — cliquer pour l'ouvrir dans le panneau de droite (zoom, export)"));
+        break;
+    }
     case Item::Assistant:
         bg = asstBg; who = QStringLiteral("SeldonH");
         if (it.html.isEmpty())
@@ -167,7 +247,7 @@ QString ChatView::exportHtml() const
 {
     QString html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>SeldonH</title></head>"
                    "<body style=\"font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:900px;margin:2em auto\">";
-    for (const Item& it : items_) html += bubble(it);
+    for (const Item& it : items_) html += bubble(it, true);
     return html + "</body></html>";
 }
 

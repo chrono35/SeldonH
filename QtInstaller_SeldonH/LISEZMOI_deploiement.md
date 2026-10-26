@@ -30,7 +30,7 @@ La clé API d'un modèle distant n'est pas enregistrée dans les réglages : `Se
 du système grâce à [QtKeychain](https://github.com/frankosterfeld/qtkeychain) (licence BSD 2 clauses, version 0.17.0),
 compilé par `scripts/build_qtkeychain.sh` (macOS, Linux) ou `scripts\build_qtkeychain_win.bat` (Windows) dans
 `third_party/qtkeychain-install`, puis lié par `qtkeychain.pri`. Les scripts QtIFW le compilent s'il est absent
-(argument `rebuild` : recompilé avec llama.cpp).
+(argument `rebuild` : recompilé avec llama.cpp). Compilation vérifiée sous macOS et Windows ; reste à faire sous Linux.
 
 | Système | Trousseau | Livré dans l'installeur |
 |---|---|---|
@@ -47,9 +47,16 @@ compilé par `scripts/build_qtkeychain.sh` (macOS, Linux) ou `scripts\build_qtke
 * Préférences : une Base URL en `http://` vers une autre machine que celle-ci, avec une clé, affiche un avertissement
   et demande confirmation à l'enregistrement (la clé circulerait en clair).
 
+## Licences affichées par l'installeur
+
+SeldonH est sous **GPL-3.0-or-later** (comme ChronoModel). Les scripts copient dans `seldonh.app/meta/` :
+`SeldonH-LICENSE.txt` (= `LICENSE`, notice et composants tiers), `GPL-3.0.txt` (= `COPYING`),
+`llama.cpp-LICENSE.txt` (MIT) et `qtkeychain-LICENSE.txt` (BSD 2 clauses), déclarés dans `package.xml` (`<Licenses>`).
+`LICENSE` et `COPYING` sont aussi installés à côté de l'application.
+
 ## Contenu de l'installeur
 
-* `seldonh.app` (obligatoire) : exécutable, Qt, llama.cpp, QtKeychain, raccourcis (menu Démarrer + Bureau sous Windows,
+* `seldonh.app` (obligatoire) : exécutable, Qt, llama.cpp, QtKeychain, `LICENSE` + `COPYING`, raccourcis (menu Démarrer + Bureau sous Windows,
   entrée de menu `~/.local/share/applications` sous Linux).
 * `seldonh.model` (coché par défaut, décochable) : `Qwen3.5-4B-Q4_K_M.gguf` dans `models/`.
   Autre modèle : `MODEL=Qwen3.5-4B-Q3_K_M.gguf`.
@@ -82,4 +89,3 @@ compilation universelle (`QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64"`, llama.cpp un
 ## À faire avant diffusion
 
 * Coller la licence réelle du modèle dans `installer-packages-*/seldonh.model/meta/LICENCE-modele.txt`.
-* Ajouter la licence de SeldonH elle-même dans `seldonh.app/meta/package.xml` (`<Licenses>`).

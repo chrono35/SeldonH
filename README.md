@@ -11,6 +11,9 @@ main.cpp, mainwindow.*          fenêtre : dialogue (HTML) + saisie + panneau gr
 src/llm/LlmCore.*               moteur : enveloppe C++ pure de llama.cpp (sans Qt, testable seule)
 src/llm/LlmEngine.*             adaptateur Qt : le moteur tourne dans son propre QThread
 src/llm/RemoteApi.*  RemoteEngine.*  modèle distant : API Chat Completions compatible OpenAI (Base URL + clé), réponse en flux SSE
+src/core/SecretStore.*          clé API rangée dans le trousseau du système (QtKeychain) ; repli en clair signalé dans les Préférences
+src/core/AutoTune.*             « Optimiser pour ce modèle » : contexte, longueur de réponse et budget des compétences calculés
+                                d'après le modèle, la mémoire et la vitesse mesurée
 src/skills/SkillManager.*       base de compétences (fiches Markdown) + sélection par mots-clés
 src/core/ChrBuilder.*           spécification JSON courte  ->  fichier .chr complet et valide
 src/core/ConversationStore.*    historique : une conversation = un fichier JSON (tours pour la reprise + journal d'affichage), écriture atomique
@@ -23,7 +26,8 @@ src/core/ChatText.h             séparation réflexion / réponse (balises <thin
 src/ui/ChatView.*               rendu Markdown -> HTML du dialogue
 src/core/MathText.*              formules LaTeX du modèle -> HTML (grec, racines, fractions, exposants, indices) pour le dialogue
 src/ui/HelpView.*               mode d'emploi (onglet Aide, F1, /aide) ; source unique : resources/help/aide.html, lisible aussi dans un navigateur
-src/ui/FigurePanel.*            images (glisser-déposer) et courbes (bloc ```plot) ; avec "fill", seule la région HPD (95 % par défaut, clé "hpd") est remplie
+src/ui/FigurePanel.*            courbes (calculs, bloc ```plot), export PNG / SVG ; avec "fill", seule la région HPD (95 % par défaut, clé "hpd") est remplie ;
+                                vignettes (thumbnailJson) rappelées dans le dialogue par ChatView::addFigure (lien seldon://figure/<id>)
 resources/skills/*.md           compétences intégrées (à enrichir)
 tests/                          tests unitaires (tst_core) et outil en ligne de commande (llm_cli)
 ```
@@ -34,8 +38,18 @@ tests/                          tests unitaires (tst_core) et outil en ligne de 
 2. `LlmCore` formate la conversation avec le gabarit du modèle, réutilise le cache KV (seul le nouveau texte est
    évalué), génère en streaming, et oublie les plus anciens échanges si le contexte est plein.
 3. L'interface affiche la réponse au fil de l'eau. Deux blocs de code spéciaux sont reconnus :
-   - ```` ```chronomodel ```` : spécification de modèle -> lien « Enregistrer le modèle (.chr) » ;
+   - ```` ```chronomodel ```` : spécification de modèle, non affichée telle quelle (`ChrBuilder::displayMarkdown`) : résumé
+     « Modèle ChronoModel prêt » + lien « Enregistrer le modèle (.chr) » si `ChrBuilder::build` réussit, sinon liste de ce
+     qui manque (événement sans date, nom ou relation inconnus) ; le JSON n'est montré que sur demande explicite ;
    - ```` ```plot ```` : courbe -> onglet du panneau de droite.
+
+### Réponses coupées
+Une réponse qui s'arrête avant sa fin naturelle est détectée (`GenStats::truncation`) : limite « Longueur max. d'une
+réponse » atteinte (local) ou `finish_reason: "length"` (distant), contexte plein, flux distant interrompu (erreur en
+cours de réponse, ou ni `[DONE]` ni `finish_reason`). SeldonH l'écrit sous la réponse et propose **▶ Continuer la
+réponse** : le modèle reçoit le début de sa réponse et la consigne de continuer ; la suite s'ajoute au même tour (un bloc
+`chronomodel` coupé redevient complet). En mode réflexion, `AppSettings::kThinkingReserve` (2 048 tokens) s'ajoute à la
+limite pour que la réflexion ne raccourcisse pas la réponse.
 
 ### Calculs faits par l'application, pas par le modèle
 Un petit modèle ne sait pas calibrer et invente des règles fausses. Les formules de ChronoModel (plugins 14C, F14C,
@@ -69,7 +83,7 @@ Deux façons de déclencher un calcul :
 Ajouter une méthode : créer `src/methods/<id>/<Id>Method.{h,cpp}` (classe dérivée de `Method`), ses courbes dans
 `curves/` avec un `<id>.qrc`, l'inscrire dans `methods.pri` et dans `MethodRegistry.cpp`.
 
-Les modules sont sous licence GPL-3.0-or-later comme ChronoModel dont ils sont dérivés.
+Ces modules sont dérivés de ChronoModel (CNRS) et distribués, comme tout SeldonH, sous licence GPL-3.0-or-later (voir « Licence »).
 
 Le LLM ne produit **jamais** le `.chr` complet : il remplit un JSON de ~10 champs et `ChrBuilder` ajoute les
 200 champs obligatoires (identifiants, UUID, MCMC, plage tmin/tmax, positions…). C'est ce qui rend le résultat
@@ -86,12 +100,26 @@ fiable avec un petit modèle.
 
 ## Compiler
 
-Prérequis : Qt 6, CMake, un compilateur C++17 (Xcode sur macOS).
+Prérequis : Qt 6, CMake, git, un compilateur C++17 (Xcode sur macOS, MinGW du kit Qt sous Windows) ;
+sous Linux, en plus : `pkg-config libsecret-1-dev`.
 
 ```bash
-./scripts/build_llama.sh        # clone et compile llama.cpp (Metal sur macOS) -> third_party/llama-install
-qmake SeldonH.pro && make       # ou ouvrir SeldonH.pro dans Qt Creator
+./scripts/build_llama.sh                        # clone et compile llama.cpp (Metal sur macOS) -> third_party/llama-install
+QTDIR=~/Qt/6.11.1/macos ./scripts/build_qtkeychain.sh   # QtKeychain -> third_party/qtkeychain-install
+qmake SeldonH.pro && make                       # ou ouvrir SeldonH.pro dans Qt Creator
 ```
+
+Windows : `scripts\build_llama_win.bat` et `scripts\build_qtkeychain_win.bat` (variable `QTDIR`, par défaut
+`C:\Qt\6.11.2\mingw_64`), puis `qmake` / `mingw32-make`.
+
+**QtKeychain** (0.17.0, licence BSD 2 clauses) range la clé API du modèle distant dans le trousseau du système :
+Trousseau macOS (bibliothèque statique universelle), Gestionnaire d'identifiants Windows (`libqt6keychain.dll`),
+Secret Service sous Linux (GNOME Keyring, KWallet… ; `libqt6keychain.so`). Compilation vérifiée sous macOS et Windows.
+Sans `third_party/qtkeychain-install`, `qmake` affiche un avertissement et SeldonH est construit sans trousseau :
+la clé est alors enregistrée en clair dans les réglages, ce que les Préférences indiquent. Les Préférences avertissent
+aussi, et demandent confirmation, quand la Base URL est en `http://` vers une autre machine avec une clé.
+
+Installeurs (Windows, Debian/Ubuntu, macOS) : voir `QtInstaller_SeldonH/LISEZMOI_deploiement.md`.
 
 Sur macOS, `build_llama.sh` produit des bibliothèques **universelles** (arm64 + x86_64), comme ChronoModel, pour
 fonctionner avec n'importe quel kit Qt. Pour Apple Silicon seulement : `ARCHS=arm64 ./scripts/build_llama.sh`
@@ -169,3 +197,21 @@ c++ ... tests/llm_cli.cpp src/llm/LlmCore.cpp ... -o llm_cli            # voir l
 - Âges 14C conventionnels toujours lus en BP. Pour l'archéomagnétisme, la reconnaissance en français est limitée :
   le bloc `calcul` (JSON) est la voie fiable.
 - Les HPD sont calculés à 95 % et 68 % (seuils donnés par ChronoModel), sur la grille de la courbe de référence.
+
+## Licence
+
+SeldonH est un logiciel libre : Copyright © CNRS 2026, auteur Philippe DUFRESNE. Il est distribué sous
+**GNU General Public License, version 3 ou (à votre choix) toute version ultérieure** (`SPDX-License-Identifier:
+GPL-3.0-or-later`), la même licence que ChronoModel, dont il reprend les méthodes de datation (`src/methods`,
+Copyright © CNRS 2014 - 2026, auteurs Philippe LANOS, Helori LANOS, Philippe DUFRESNE).
+Notice : `LICENSE` ; texte complet : `COPYING` ; chaque fichier source porte l'en-tête de licence.
+
+Composants tiers, chacun sous sa propre licence, compatible avec la GPL v3 :
+
+| composant | licence | usage |
+|---|---|---|
+| ChronoModel | GPL-3.0-or-later | méthodes de datation, courbes, format `.chr` |
+| llama.cpp / ggml | MIT | moteur d'inférence local |
+| QtKeychain | BSD 2 clauses | clé API dans le trousseau du système |
+| Qt 6 | LGPL v3 (édition open source) | interface ; liaison dynamique |
+| Qwen3.5-4B (installeur, facultatif) | Apache 2.0 | modèle de langage, fichier `.gguf` séparé chargé à l'exécution |

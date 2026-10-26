@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "ChrBuilder.h"
 
 #include <QJsonArray>
@@ -481,8 +509,9 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
             ++nextDate;
             dates.append(out);
         }
+        // Modèle incomplet : un événement sans date ne peut pas être calculé par ChronoModel.
         if (!isBound && dates.isEmpty())
-            R.warnings << QStringLiteral("L'événement « %1 » n'a aucune date.").arg(name);
+            R.errors << QStringLiteral("L'événement « %1 » n'a aucune date : ajoutez au moins une datation (ou faites-en une borne).").arg(name);
         o["dates"] = dates;
 
         // Champs propres aux événements de courbe : toujours présents dans les projets réels (valeur 0 hors courbe).
@@ -513,7 +542,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         QVector<QPair<QString, QString>> pairs;          // (plus ancien, plus récent)
         auto add = [&](const QString& olderName, const QString& youngerName, const QString& shown) {
             if (!ids.contains(olderName) || !ids.contains(youngerName)) {
-                R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : nom inconnu.").arg(what, shown);
+                R.errors << QStringLiteral("Contrainte %1 « %2 » : nom inconnu (il ne correspond à aucun élément du modèle).").arg(what, shown);
                 return;
             }
             if (olderName == youngerName) { R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : même élément.").arg(what, shown); return; }
@@ -526,8 +555,8 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
             pairs.append({ olderName, youngerName });
         };
         auto relationFail = [&](const QString& shown) {
-            R.warnings << QStringLiteral("Contrainte %1 « %2 » ignorée : relation non reconnue (utiliser par ex. avant / après, "
-                                         "antérieur / postérieur, en dessous / au-dessus, précède / succède).").arg(what, shown);
+            R.errors << QStringLiteral("Contrainte %1 « %2 » : relation non reconnue (préciser par ex. avant / après, "
+                                       "antérieur / postérieur, en dessous / au-dessus, précède / succède).").arg(what, shown);
         };
         for (const QJsonValue& v : list) {
             if (v.isObject()) {
@@ -668,6 +697,85 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
     R.suggestedName = slug(spec.value("name").toString());
     R.ok = R.errors.isEmpty();
     return R;
+}
+
+namespace {
+
+// Résumé affiché à la place du bloc de modèle.
+QString modelCard(const QString& json)
+{
+    QJsonParseError pe;
+    const QJsonDocument d = QJsonDocument::fromJson(json.toUtf8(), &pe);
+    if (pe.error != QJsonParseError::NoError || !d.isObject())
+        return QStringLiteral("> ⚠ **Modèle ChronoModel illisible** : la description produite n'est pas valide. "
+                              "Demandez à l'assistant de la réécrire.");
+    const QJsonObject spec = d.object();
+    const ChrResult r = ChrBuilder::build(spec);
+    if (!r.ok) {
+        QString s = QStringLiteral("> ⚠ **Modèle ChronoModel incomplet : pas encore enregistrable.**\n>\n");
+        for (const QString& e : r.errors) s += QStringLiteral("> - %1\n").arg(e);
+        return s + QStringLiteral(">\n> Donnez les informations manquantes : SeldonH proposera l'enregistrement d'un fichier complet.");
+    }
+    int dates = 0;
+    const QJsonArray events = spec.value("events").toArray();
+    for (const QJsonValue& e : events) dates += e.toObject().value("dates").toArray().size();
+    const int phases = spec.value("phases").toArray().size();
+    const int constraints = spec.value("event_constraints").toArray().size() + spec.value("phase_constraints").toArray().size();
+    QStringList what;
+    what << QStringLiteral("%1 événement%2").arg(events.size()).arg(events.size() > 1 ? "s" : "")
+         << QStringLiteral("%1 datation%2").arg(dates).arg(dates > 1 ? "s" : "");
+    if (phases > 0) what << QStringLiteral("%1 phase%2").arg(phases).arg(phases > 1 ? "s" : "");
+    if (constraints > 0) what << QStringLiteral("%1 contrainte%2").arg(constraints).arg(constraints > 1 ? "s" : "");
+    const QString name = spec.value("name").toString().trimmed();
+    return QStringLiteral("> 📦 **Modèle ChronoModel prêt**%1 : %2. Enregistrez-le avec « 💾 Enregistrer le modèle (.chr) » "
+                          "sous cette réponse.")
+        .arg(name.isEmpty() ? QString() : QStringLiteral(" « %1 »").arg(name), what.join(", "));
+}
+
+QString foldText(const QString& s)
+{
+    QString out;
+    for (const QChar c : s.normalized(QString::NormalizationForm_D))
+        if (c.category() != QChar::Mark_NonSpacing) out += c.toLower();
+    return out;
+}
+
+} // namespace
+
+QString ChrBuilder::displayMarkdown(const QString& md, bool showJson)
+{
+    static const QRegularExpression block("^```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^```[ \\t]*$",
+                                          QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption |
+                                          QRegularExpression::CaseInsensitiveOption);
+    QString out;
+    qsizetype pos = 0;
+    auto it = block.globalMatch(md);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        const QString body = m.captured(2);
+        const bool model = m.captured(1).compare(QLatin1String("chronomodel"), Qt::CaseInsensitive) == 0
+                        || QJsonDocument::fromJson(body.toUtf8()).object().contains("events");
+        if (!model) continue;
+        out += md.mid(pos, m.capturedStart() - pos);
+        if (showJson) out += m.captured(0) + QStringLiteral("\n\n");
+        out += modelCard(body);
+        pos = m.capturedEnd();
+    }
+    QString rest = md.mid(pos);
+    // Bloc de modèle encore ouvert (réponse en cours d'écriture, ou coupée) : rien d'incomplet à l'écran.
+    static const QRegularExpression open("^```[ \\t]*chronomodel[ \\t]*$",
+                                         QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+    if (!showJson)
+        if (const auto mo = open.match(rest); mo.hasMatch())
+            rest = rest.left(mo.capturedStart()) + QStringLiteral("*📦 Préparation du modèle ChronoModel…*");
+    return out + rest;
+}
+
+bool ChrBuilder::asksForJson(const QString& question)
+{
+    static const QRegularExpression re(QStringLiteral("\\bjson\\b|bloc (de code )?chronomodel|specification (json |du modele|de modele)|"
+                                                      "code (source )?du modele|structure (json|du (fichier|modele))"));
+    return re.match(foldText(question)).hasMatch();
 }
 
 bool ChrBuilder::extractSpec(const QString& md, QJsonObject& spec, QString* err)

@@ -1,5 +1,34 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "SettingsDialog.h"
 
+#include "../core/AutoTune.h"
 #include "../core/ChatText.h"
 #include "../core/SecretStore.h"
 #include "../llm/RemoteApi.h"
@@ -173,6 +202,24 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     form->addRow(QString(), remoteWarning_);
 
     // --- commun
+    optimizeBtn_ = new QPushButton(tr("Optimiser pour ce modèle"));
+    optimizeBtn_->setToolTip(tr("Propose la taille du contexte (modèle local), la longueur max. d'une réponse et le budget des "
+                                "compétences d'après le modèle (contexte, taille), la mémoire de l'ordinateur et la vitesse "
+                                "mesurée. Les champs sont remplis : vérifiez puis validez par OK."));
+    optimizeStatus_ = new QLabel;
+    optimizeStatus_->setObjectName(QStringLiteral("optimizeStatus"));
+    optimizeStatus_->setWordWrap(true);
+    {
+        auto* w = new QWidget;
+        auto* h = new QHBoxLayout(w);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->addWidget(optimizeBtn_);
+        h->addStretch();
+        form->addRow(tr("Réglages automatiques"), w);
+    }
+    form->addRow(QString(), optimizeStatus_);
+    connect(optimizeBtn_, &QPushButton::clicked, this, &SettingsDialog::optimize);
+
     temp_ = new QDoubleSpinBox;
     temp_->setRange(0.0, 2.0);
     temp_->setSingleStep(0.1);
@@ -184,6 +231,11 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     maxTokens_->setRange(64, 8192);
     maxTokens_->setSingleStep(100);
     maxTokens_->setValue(s.maxTokens);
+    maxTokens_->setSuffix(tr(" tokens"));
+    maxTokens_->setToolTip(tr("Au-delà, la réponse est coupée : SeldonH le signale et propose « Continuer la réponse ». "
+                              "En mode réflexion (modèle local), %1 tokens supplémentaires sont réservés à la réflexion. "
+                              "Avec un modèle distant de raisonnement, son raisonnement caché compte aussi dans cette limite.")
+                               .arg(AppSettings::kThinkingReserve));
     form->addRow(tr("Longueur max. d'une réponse"), maxTokens_);
 
     thinking_ = new QCheckBox(tr("Mode réflexion (modèle local ; plus lent)"));
@@ -250,6 +302,7 @@ void SettingsDialog::updateBackendRows()
         form_->setRowVisible(w, remote);
     form_->setRowVisible(httpWarning_, remote && remote::sendsKeyInClear(remoteUrl_->text(), remoteKey_->text()));
     form_->setRowVisible(remoteStatus_, remote && !remoteStatus_->text().isEmpty());
+    form_->setRowVisible(optimizeStatus_, !optimizeStatus_->text().isEmpty());
     thinking_->setEnabled(!remote);
 }
 
@@ -294,6 +347,7 @@ void SettingsDialog::listRemoteModels()
         listBtn_->setEnabled(true);
         const int status = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray body = r->isOpen() ? r->readAll() : QByteArray();
+        remoteLimits_ = remote::parseModelLimits(body);
         if (r->error() != QNetworkReply::NoError && status == 0) {
             remoteStatus_->setText(tr("<span style='color:#b00020'>Connexion impossible : %1</span>").arg(r->errorString().toHtmlEscaped()));
         } else if (status >= 400) {
@@ -309,7 +363,67 @@ void SettingsDialog::listRemoteModels()
         }
         updateBackendRows();
         r->deleteLater();
+        if (optimizeAfterList_) { optimizeAfterList_ = false; applyOptimization(); }
     });
+}
+
+// Modèle distant : les limites viennent de la liste /models (relue si besoin) ; modèle local : du modèle chargé.
+void SettingsDialog::optimize()
+{
+    if (remoteRadio_->isChecked()) {
+        if (!remoteLimits_.contains(remoteModel_->currentText().trimmed()) && !remoteUrl_->text().trimmed().isEmpty()) {
+            optimizeAfterList_ = true;
+            optimizeStatus_->setText(tr("Interrogation du serveur…"));
+            updateBackendRows();
+            listRemoteModels();
+            return;
+        }
+    }
+    applyOptimization();
+}
+
+void SettingsDialog::applyOptimization()
+{
+    TuneInput in;
+    in.remote   = remoteRadio_->isChecked();
+    in.thinking = thinking_->isChecked();
+    if (in.remote) {
+        const remote::ModelLimits lim = remoteLimits_.value(remoteModel_->currentText().trimmed());
+        in.remoteContext   = lim.context;
+        in.remoteMaxOutput = lim.maxOutput;
+    } else {
+        // Les caractéristiques ne sont connues qu'une fois le modèle chargé.
+        if (localInfo_.description.empty() || model_->text().trimmed() != base_.modelPath) {
+            optimizeStatus_->setText(tr("<span style='color:#b35c00'>Chargez d'abord ce modèle (validez par OK), puis relancez "
+                                        "l'optimisation.</span>"));
+            updateBackendRows();
+            return;
+        }
+        in.trainContext = localInfo_.trainContext;
+        in.nLayer = localInfo_.nLayer; in.nEmbd = localInfo_.nEmbd;
+        in.nHead = localInfo_.nHead;   in.nHeadKv = localInfo_.nHeadKv;
+        in.modelBytes = localInfo_.modelBytes;
+        in.memTotal   = localInfo_.memTotal;
+        in.onGpu      = localInfo_.onGpu && gpu_->isChecked();
+        in.tokPerSec  = localTps_;
+    }
+    const TuneResult r = autoTune(in);
+
+    QStringList set;
+    if (r.nCtx > 0) {
+        const int i = ctx_->findData(r.nCtx);
+        if (i >= 0) ctx_->setCurrentIndex(i);
+        set << tr("contexte %1").arg(r.nCtx);
+    }
+    maxTokens_->setValue(r.maxTokens);
+    skillChars_->setValue(r.skillChars);
+    set << tr("réponse max. %1 tokens").arg(r.maxTokens) << tr("compétences %1 caractères").arg(r.skillChars);
+    QString html = tr("<b>Proposé :</b> %1. Vérifiez puis validez par OK.").arg(set.join(QStringLiteral(" · ")));
+    if (!in.remote && localTps_ <= 0)
+        html += tr("<br><i>Posez une question puis relancez l'optimisation pour tenir compte de la vitesse réelle.</i>");
+    for (const QString& n : r.notes) html += QStringLiteral("<br><small>%1</small>").arg(n.toHtmlEscaped());
+    optimizeStatus_->setText(html);
+    updateBackendRows();
 }
 
 AppSettings SettingsDialog::settings() const

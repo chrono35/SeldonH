@@ -1,4 +1,39 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2014 - 2026
+
+Authors :
+	Philippe LANOS
+	Helori LANOS
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This file contains dating methods derived from ChronoModel
+(https://chronomodel.com), distributed under the same license.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "MethodRunner.h"
+
+#include <QLocale>
 
 #include <QFileInfo>
 #include <QHash>
@@ -257,6 +292,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
                              .arg(named ? QStringLiteral("Événement « %1 »").arg(name) : name).arg(dates.size()).arg(dates.size() > 1 ? "s" : "");
     E.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
     E.prompt += QStringLiteral("\n%1\n").arg(head);
+    const int headHtmlEnd = E.html.size(), headPromptEnd = E.prompt.size();   // la période d'étude viendra juste après
     auto fail = [&](const QString& why) {
         E.html += QStringLiteral("<p><i>Calcul impossible : %1.</i></p>").arg(why.toHtmlEscaped());
         E.prompt += QStringLiteral("Calcul impossible : %1.\n").arg(why);
@@ -325,6 +361,12 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         tmax = std::ceil((hi + margin) / 10.0) * 10.0;
     }
     if (!(tmax > tmin)) return fail(QStringLiteral("période d'étude invalide (tmin doit être inférieur à tmax)"));
+    // Affichée en tête, juste après le titre : elle situe la datation avant les résultats.
+    const QString period = QStringLiteral("%1 → %2").arg(dateformat::format(tmin, fmt), dateformat::format(tmax, fmt));
+    const QString periodWhy = autoPeriod ? QStringLiteral("calculée d'après les datations") : QStringLiteral("fixée dans la demande");
+    E.html.insert(headHtmlEnd, QStringLiteral("<p><b>Période d'étude</b> : %1 <i>(a priori uniforme de θ, %2)</i></p>")
+                                   .arg(period.toHtmlEscaped(), periodWhy));
+    E.prompt.insert(headPromptEnd, QStringLiteral("Période d'étude (a priori uniforme de θ, %1) : %2.\n").arg(periodWhy, period));
 
     // 3. MCMC
     QString levelWarning;
@@ -397,10 +439,11 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     }
     E.html += QStringLiteral("<table cellspacing='0' cellpadding='3'><tr><th align='left'>Variable</th><th>R̂</th><th>ESS bulk</th>"
                              "<th>ESS tail</th><th>Acceptation</th></tr>%1</table>").arg(drows);
-    E.html += QStringLiteral("<p><i>Seuils de ChronoModel : R̂ &lt; 1,01 et ESS ≥ %1 (500 par chaîne) : satisfaisant ; R̂ &lt; 1,05 et ESS ≥ %2 "
-                             "(100 par chaîne) : à surveiller ; au-delà : non convergé. Acceptation : marche aléatoire du bloc (t, σ) "
-                             "et décalage rigide de θ (cible ≈ 30–46 %).</i></p>")
-                  .arg(text::num(500.0 * double(M), 0), text::num(100.0 * double(M), 0));
+    const QLocale fr(QLocale::French);
+    E.html += QStringLiteral("<p><small><i>Lecture (seuils de ChronoModel) : R̂ &lt; 1,01 et ESS ≥ %1 (500 par chaîne) → satisfaisant ; "
+                             "R̂ &lt; 1,05 et ESS ≥ %2 (100 par chaîne) → à surveiller ; au-delà → non convergé. "
+                             "Acceptation visée ≈ 30–46 % (marche aléatoire du bloc (t, σ), décalage rigide de θ).</i></small></p>")
+                  .arg(fr.toString(500 * int(M)), fr.toString(100 * int(M)));
     E.prompt += QStringLiteral("Convergence : %1. Seuils : R̂ < 1,01 et ESS ≥ %2 satisfaisant ; R̂ < 1,05 et ESS ≥ %3 douteux ; sinon non convergé.\n")
                     .arg(label).arg(text::num(500.0 * double(M), 0), text::num(100.0 * double(M), 0));
     for (const VarDiagnostic& v : R.diagnostics)
@@ -425,15 +468,32 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
                                  .arg(M).arg(used.numBurn).arg(used.maxBatches).arg(used.iterPerBatch).arg(used.numIter).arg(used.thinning)
                                  .arg(R.thetaTraces.empty() ? 0 : int(R.thetaTraces.front().size()))
                                  .arg(text::numAuto(used.mixingLevel, 4)).arg(annealText);
-    const QString period = QStringLiteral("%1 → %2%3").arg(dateformat::format(tmin, fmt), dateformat::format(tmax, fmt),
-                                                        autoPeriod ? QStringLiteral(" (calculée d'après les datations)") : QString());
-    E.html += QStringLiteral("<p><i>MCMC : %1. Période d'étude (a priori uniforme de θ) : %2. Graines : %3 (à réutiliser pour "
-                             "reproduire le calcul). Adaptation : %4. Durée : %5 s.</i></p>")
-                  .arg(mcmcLine.toHtmlEscaped(), period.toHtmlEscaped(), seeds.join(";"),
-                       adapt.isEmpty() ? QStringLiteral("toutes les chaînes adaptées") : adapt.join(", ").toHtmlEscaped(),
-                       text::num(R.elapsedMs / 1000.0, 1));
-    E.prompt += QStringLiteral("MCMC : %1. Période d'étude : %2. Graines : %3. %4.\n")
-                    .arg(mcmcLine, period, seeds.join(";"), adapt.isEmpty() ? QStringLiteral("Toutes les chaînes sont adaptées") : adapt.join(", "));
+    // Tableau des paramètres, une ligne par étape du MCMC (dans l'ordre où elles se déroulent).
+    const int kept = R.thetaTraces.empty() ? 0 : int(R.thetaTraces.front().size());
+    auto mrow = [](const QString& k, const QString& v) {
+        return QStringLiteral("<tr><td valign='top'>%1</td><td valign='top'>%2</td></tr>").arg(k, v);
+    };
+    QString mrows;
+    mrows += mrow(QStringLiteral("Chaînes"), QString::number(M));
+    mrows += mrow(QStringLiteral("Burn-in"), QStringLiteral("%1 itérations").arg(fr.toString(used.numBurn)));
+    mrows += mrow(QStringLiteral("Adaptation des pas"),
+                  QStringLiteral("jusqu'à %1 lots de %2 itérations — %3")
+                      .arg(fr.toString(used.maxBatches), fr.toString(used.iterPerBatch),
+                           adapt.isEmpty() ? QStringLiteral("toutes les chaînes adaptées") : adapt.join(", ").toHtmlEscaped()));
+    mrows += mrow(QStringLiteral("Acquisition"),
+                  QStringLiteral("%1 itérations, 1 tirage gardé sur %2 (thinning) → %3 tirages par chaîne")
+                      .arg(fr.toString(used.numIter), fr.toString(used.thinning), fr.toString(kept)));
+    mrows += mrow(QStringLiteral("Mixing"), text::numAuto(used.mixingLevel, 4).toHtmlEscaped());
+    mrows += mrow(QStringLiteral("Recuit simulé"),
+                  used.annealRecurrence > 0
+                      ? QStringLiteral("toutes les %1 itérations, température jusqu'à 2<sup>%2</sup> pendant %3 itérations")
+                            .arg(fr.toString(used.annealRecurrence)).arg(used.annealTemp).arg(fr.toString(used.annealDwell))
+                      : QStringLiteral("désactivé (anneal_recurrence = 0)"));
+    mrows += mrow(QStringLiteral("Graines"), QStringLiteral("%1 <i>(à réutiliser pour reproduire le calcul)</i>").arg(seeds.join(";")));
+    mrows += mrow(QStringLiteral("Durée du calcul"), QStringLiteral("%1 s").arg(text::num(R.elapsedMs / 1000.0, 1)));
+    E.html += QStringLiteral("<p><b>Paramètres du MCMC</b></p><table cellspacing='0' cellpadding='3'>%1</table>").arg(mrows);
+    E.prompt += QStringLiteral("MCMC : %1. Graines : %2. %3.\n")
+                    .arg(mcmcLine, seeds.join(";"), adapt.isEmpty() ? QStringLiteral("Toutes les chaînes sont adaptées") : adapt.join(", "));
 
     // 8. Figures : θ (rempli) + calibrations (traits) ; traces de θ par chaîne.
     QJsonObject ts0 = plotSeries(QStringLiteral("%1 : θ a posteriori").arg(name), R.theta, fmt);
@@ -555,7 +615,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     out.count = requests.size();
 
     const MethodRegistry& reg = MethodRegistry::instance();
-    QString html = QStringLiteral("<b>🧮 Calcul fait par SeldonH</b> <i>(méthodes de ChronoModel — valeurs exactes, non générées par le modèle)</i>");
+    QString html = QStringLiteral("<b>🧮 Calcul fait par SeldonH</b> <i>(méthodes de ChronoModel)</i>");
     QString prompt = QStringLiteral("[Résultat de calcul de SeldonH — valeurs exactes, à reprendre telles quelles sans les recalculer ni les contredire]\n");
     QJsonArray series;
     QStringList plotNames;           // noms des datations / événements tracés : titre du graphique

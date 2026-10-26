@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #pragma once
 
 #include <QCoreApplication>
@@ -23,7 +51,7 @@ struct AppSettings {
     int     nGpuLayers  = 999;       // 0 = CPU seul
 #endif
     double  temperature = 0.7;
-    int     maxTokens   = 1200;
+    int     maxTokens   = 2048;      // longueur max. d'une réponse (tokens), réflexion non comprise
     bool    thinking    = false;     // mode réflexion (plus lent, meilleur sur les raisonnements)
     int     skillChars  = 6000;      // budget de texte des compétences injectées par question (≈ 1 700 tokens)
     QString skillsDir;               // dossier des compétences utilisateur
@@ -38,6 +66,11 @@ struct AppSettings {
     bool    remoteTools = true;      // appel d'outils natif (les calculs de SeldonH sont appelés par le modèle)
     QString userPrompt;              // consignes personnelles ajoutées à chaque question (ex. « réponses courtes »)
     bool    keepHistory = true;      // enregistre automatiquement les conversations (volet Historique), sur cet ordinateur
+
+    // Mode réflexion (modèle local) : la réflexion a son propre budget, ajouté à maxTokens, pour qu'elle ne
+    // raccourcisse pas la réponse. LlmCore plafonne de toute façon à la moitié du contexte.
+    static constexpr int kThinkingReserve = 2048;
+    int effectiveMaxTokens(bool remote) const { return maxTokens + ((thinking && !remote) ? kThinkingReserve : 0); }
 
     // Serveur distant proposé par défaut (API compatible OpenAI, sans clé)
     static QString defaultRemoteUrl()   { return QStringLiteral("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"); }

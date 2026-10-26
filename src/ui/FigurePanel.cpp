@@ -1,8 +1,34 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "FigurePanel.h"
 
 #include <QApplication>
-#include <QDragEnterEvent>
-#include <QDropEvent>
 #include <QFileDialog>
 #include <QBuffer>
 #include <QFile>
@@ -12,7 +38,6 @@
 #include <QJsonArray>
 #include <QLabel>
 #include <QMessageBox>
-#include <QMimeData>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPair>
@@ -171,6 +196,17 @@ void CurveWidget::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     paintTo(p, rect());
+}
+
+QImage CurveWidget::renderHiDpi(const QSize& logical, qreal dpr) const
+{
+    const qreal k = std::max<qreal>(1.0, dpr);
+    QImage img(QSize(int(std::ceil(logical.width() * k)), int(std::ceil(logical.height() * k))), QImage::Format_ARGB32);
+    img.setDevicePixelRatio(k);
+    img.fill(Qt::white);
+    QPainter p(&img);
+    paintTo(p, QRect(QPoint(0, 0), logical));
+    return img;
 }
 
 QImage CurveWidget::render(const QSize& size) const
@@ -366,57 +402,18 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     }
 }
 
-// ---------------------------------------------------------------- ImageView
-
-ImageView::ImageView(const QImage& img, const QByteArray& svgSource, QWidget* parent)
-    : QWidget(parent), img_(img), svg_(svgSource)
-{
-    setMinimumSize(200, 150);
-}
-
-QByteArray ImageView::toSvg(const QString& title) const
-{
-    if (!svg_.isEmpty()) return svg_;
-    QByteArray out;
-    if (img_.isNull()) return out;
-    QBuffer buf(&out);
-    buf.open(QIODevice::WriteOnly);
-    QSvgGenerator gen;
-    gen.setOutputDevice(&buf);
-    gen.setSize(img_.size());
-    gen.setViewBox(QRect(QPoint(0, 0), img_.size()));
-    gen.setTitle(title);
-    QPainter p(&gen);
-    p.drawImage(QPoint(0, 0), img_);             // image matricielle incorporée (PNG en base64)
-    p.end();
-    return out;
-}
-
-void ImageView::paintEvent(QPaintEvent*)
-{
-    QPainter p(this);
-    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    p.fillRect(rect(), palette().color(QPalette::Base));
-    if (img_.isNull()) return;
-    const QSize s = img_.size().scaled(size() - QSize(8, 8), Qt::KeepAspectRatio);
-    p.drawImage(QRect(QPoint((width() - s.width()) / 2, (height() - s.height()) / 2), s), img_);
-}
-
 // -------------------------------------------------------------- FigurePanel
 
 FigurePanel::FigurePanel(QWidget* parent) : QWidget(parent)
 {
-    setAcceptDrops(true);
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(0, 0, 0, 0);
 
     auto* bar = new QHBoxLayout;
-    auto* title = new QLabel(tr("<b>Graphiques et images</b>"));
-    auto* openBtn = new QPushButton(tr("Ouvrir une image…"));
+    auto* title = new QLabel(tr("<b>Graphiques</b>"));
     auto* saveBtn = new QPushButton(tr("Enregistrer…"));
     bar->addWidget(title);
     bar->addStretch();
-    bar->addWidget(openBtn);
     bar->addWidget(saveBtn);
     lay->addLayout(bar);
 
@@ -425,7 +422,7 @@ FigurePanel::FigurePanel(QWidget* parent) : QWidget(parent)
     tabs_->setDocumentMode(true);
     lay->addWidget(tabs_, 1);
 
-    placeholder_ = new QLabel(tr("Aucune figure.\nGlissez une image ici, ou demandez à l'assistant de tracer une courbe."));
+    placeholder_ = new QLabel(tr("Aucune figure.\nLes courbes calculées par SeldonH s'ouvrent ici (clic sur une figure de la conversation)."));
     static_cast<QLabel*>(placeholder_)->setAlignment(Qt::AlignCenter);
     static_cast<QLabel*>(placeholder_)->setWordWrap(true);
     lay->addWidget(placeholder_, 1);
@@ -436,7 +433,6 @@ FigurePanel::FigurePanel(QWidget* parent) : QWidget(parent)
         delete w;
         updatePlaceholder();
     });
-    connect(openBtn, &QPushButton::clicked, this, &FigurePanel::openImage);
     connect(saveBtn, &QPushButton::clicked, this, &FigurePanel::saveCurrent);
     updatePlaceholder();
 }
@@ -469,26 +465,6 @@ void FigurePanel::showPage(QWidget* page, const QString& title)
     updatePlaceholder();
 }
 
-void FigurePanel::addImage(const QImage& img, const QString& title, const QByteArray& svgSource)
-{
-    const int i = tabs_->addTab(new ImageView(img, svgSource), title);
-    tabs_->setCurrentIndex(i);
-    updatePlaceholder();
-}
-
-bool FigurePanel::addImageFile(const QString& path)
-{
-    QImage img(path);
-    if (img.isNull()) return false;
-    QByteArray svg;
-    if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
-        QFile f(path);
-        if (f.open(QIODevice::ReadOnly)) svg = f.readAll();
-    }
-    addImage(img, QFileInfo(path).fileName(), svg);
-    return true;
-}
-
 void FigurePanel::addCurves(const CurveSpec& spec)
 {
     auto* w = new CurveWidget(spec);
@@ -511,6 +487,15 @@ bool FigurePanel::replaceCurvesJson(QWidget* page, const QJsonObject& o, QString
     return true;
 }
 
+QImage FigurePanel::thumbnailJson(const QJsonObject& o, int width, qreal dpr)
+{
+    CurveSpec spec;
+    if (!CurveSpec::fromJson(o, spec)) return {};
+    const CurveWidget w(spec);                  // jamais affiché : sert seulement à dessiner
+    const QSize size = w.exportSize(QSize(width, int(std::lround(width * 0.55))));
+    return w.renderHiDpi(size, dpr);
+}
+
 bool FigurePanel::addCurvesJson(const QJsonObject& o, QString* err)
 {
     CurveSpec spec;
@@ -519,17 +504,10 @@ bool FigurePanel::addCurvesJson(const QJsonObject& o, QString* err)
     return true;
 }
 
-void FigurePanel::openImage()
-{
-    const QStringList files = QFileDialog::getOpenFileNames(
-        this, tr("Ouvrir des images"), QString(), tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.svg *.webp)"));
-    for (const QString& f : files) addImageFile(f);
-}
-
 void FigurePanel::saveCurrent()
 {
     QWidget* w = tabs_->currentWidget();
-    if (!qobject_cast<CurveWidget*>(w) && !qobject_cast<ImageView*>(w)) return;     // ex. onglet d'aide : rien à enregistrer
+    if (!qobject_cast<CurveWidget*>(w)) return;     // ex. onglet d'aide : rien à enregistrer
     const QString pngFilter = tr("Image PNG (*.png)"), svgFilter = tr("Image vectorielle SVG (*.svg)");
     QString selected = pngFilter;
     QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer la figure"), tabs_->tabText(tabs_->currentIndex()) + ".png",
@@ -547,12 +525,11 @@ bool FigurePanel::saveCurrentTo(const QString& path, QString* err) const
 {
     QWidget* w = tabs_->currentWidget();
     auto* c = qobject_cast<CurveWidget*>(w);
-    auto* v = qobject_cast<ImageView*>(w);
-    if (!c && !v) { if (err) *err = tr("Aucune figure à enregistrer."); return false; }
+    if (!c) { if (err) *err = tr("Aucune figure à enregistrer."); return false; }
     const QString title = tabs_->tabText(tabs_->currentIndex());
-    const QSize size = c ? c->exportSize(QSize(1600, 1000)) : QSize();
+    const QSize size = c->exportSize(QSize(1600, 1000));
     if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
-        const QByteArray svg = c ? c->renderSvg(c->exportSize(QSize(800, 500)), title) : v->toSvg(title);
+        const QByteArray svg = c->renderSvg(c->exportSize(QSize(800, 500)), title);
         QFile f(path);
         if (svg.isEmpty() || !f.open(QIODevice::WriteOnly) || f.write(svg) != svg.size()) {
             if (err) *err = tr("Impossible d'écrire %1.").arg(path);
@@ -560,20 +537,9 @@ bool FigurePanel::saveCurrentTo(const QString& path, QString* err) const
         }
         return true;
     }
-    const QImage img = c ? c->render(size) : v->image();
+    const QImage img = c->render(size);
     if (img.isNull() || !img.save(path, "PNG")) { if (err) *err = tr("Impossible d'écrire %1.").arg(path); return false; }
     return true;
-}
-
-void FigurePanel::dragEnterEvent(QDragEnterEvent* e)
-{
-    if (e->mimeData()->hasUrls()) e->acceptProposedAction();
-}
-
-void FigurePanel::dropEvent(QDropEvent* e)
-{
-    for (const QUrl& u : e->mimeData()->urls())
-        if (u.isLocalFile()) addImageFile(u.toLocalFile());
 }
 
 } // namespace seldon

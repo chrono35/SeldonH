@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "LlmCore.h"
 
 #include "llama.h"
@@ -86,6 +114,7 @@ bool LlmCore::load(const LlmParams& p, std::string& err, const std::function<boo
 
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = p.nGpuLayers;
+    nGpuLayers_ = p.nGpuLayers;
 
     struct Prog { const std::function<bool(float)>* cb; } prog{ &onProgress };
     if (onProgress) {
@@ -162,6 +191,41 @@ std::string LlmCore::description() const
     char buf[256] = {0};
     llama_model_desc(model_, buf, sizeof(buf));
     return buf;
+}
+
+ModelInfo LlmCore::info() const
+{
+    ModelInfo m;
+    if (!model_) return m;
+    m.description  = description();
+    m.contextSize  = nCtx_;
+    m.trainContext = llama_model_n_ctx_train(model_);
+    m.nLayer       = llama_model_n_layer(model_);
+    m.nEmbd        = llama_model_n_embd(model_);
+    m.nHead        = llama_model_n_head(model_);
+    m.nHeadKv      = llama_model_n_head_kv(model_);
+    m.modelBytes   = llama_model_size(model_);
+    m.nParams      = llama_model_n_params(model_);
+
+    // Périphérique : premier GPU (dédié ou intégré) si des couches y sont confiées, sinon le processeur (RAM).
+    ggml_backend_dev_t chosen = nullptr;
+    if (nGpuLayers_ != 0) {
+        for (size_t i = 0; i < ggml_backend_dev_count() && !chosen; ++i) {
+            ggml_backend_dev_t d = ggml_backend_dev_get(i);
+            const auto t = ggml_backend_dev_type(d);
+            if (t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) chosen = d;
+        }
+    }
+    m.onGpu = chosen != nullptr;
+    if (!chosen) chosen = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (chosen) {
+        size_t freeMem = 0, totalMem = 0;
+        ggml_backend_dev_memory(chosen, &freeMem, &totalMem);
+        m.memTotal = totalMem;          // Metal : taille de travail recommandée (≈ 2/3 à 3/4 de la mémoire unifiée)
+        const char* name = ggml_backend_dev_description(chosen);
+        m.device = name ? name : "";
+    }
+    return m;
 }
 
 int LlmCore::trainContextSize() const
@@ -357,12 +421,13 @@ bool LlmCore::generate(const std::vector<ChatMessage>& chat, const SamplingParam
     t0 = Clock::now();
     bool ok = true;
     int limit = std::min(maxNew, nCtx_ - static_cast<int>(prompt.size()) - 1);
+    bool eog = false;
 
     for (int i = 0; i < limit; ++i) {
         if (stop_.load()) { st.stoppedByUser = true; break; }
 
         llama_token tok = llama_sampler_sample(smpl, ctx_, -1);
-        if (llama_vocab_is_eog(vocab_, tok)) break;
+        if (llama_vocab_is_eog(vocab_, tok)) { eog = true; break; }
 
         pending += pieceOf(tok);
         const size_t cut = utf8CompletePrefix(pending);
@@ -386,6 +451,12 @@ bool LlmCore::generate(const std::vector<ChatMessage>& chat, const SamplingParam
         if (i == limit - 1 && static_cast<int>(cached_.size()) >= nCtx_ - 1) st.contextFull = true;
     }
     if (ok && !pending.empty() && onPiece) onPiece(pending);   // octets résiduels
+    // Boucle terminée sans jeton de fin ni arrêt : la réponse est coupée. Limite demandée atteinte, ou limite réduite
+    // par la place restante dans le contexte (ou par la moitié du contexte, plafond de maxNew).
+    if (ok && !eog && !st.stoppedByUser && st.generated >= limit) {
+        st.tokenLimit = std::max(0, limit);
+        st.truncation = (limit >= sp.maxTokens) ? GenStats::TokenLimit : GenStats::ContextFull;
+    }
     st.genMs = msSince(t0);
     llama_sampler_free(smpl);
 

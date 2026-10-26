@@ -1,9 +1,38 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 // RemoteApi : outils purs (sans réseau) pour parler à un modèle distant via une API « Chat Completions »
 // compatible OpenAI (OpenAI, Mistral, OpenRouter, Groq, Together, Ollama /v1, LM Studio, llama-server, vLLM…).
 // Séparés du moteur réseau pour être testables sans connexion.
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
@@ -56,6 +85,7 @@ struct SseEvent {
     bool    done = false;         // « data: [DONE] »
     QString error;                // message d'erreur renvoyé dans le flux
     QVector<ToolCallDelta> toolCalls;   // fragments d'appels d'outils
+    QString finishReason;         // « stop », « length » (réponse coupée : limite de tokens), « tool_calls »… ; vide si absent
 };
 
 namespace remote {
@@ -112,13 +142,18 @@ private:
 QVector<ToolCall> toolCallsFromFullResponse(const QByteArray& body);
 
 // Réponse complète non diffusée (serveur qui ignore stream:true) -> texte ; vide si absent.
-QString textFromFullResponse(const QByteArray& body, int* promptTokens = nullptr, int* completionTokens = nullptr);
+QString textFromFullResponse(const QByteArray& body, int* promptTokens = nullptr, int* completionTokens = nullptr,
+                             QString* finishReason = nullptr);
 
 // Message d'erreur lisible à partir du corps JSON d'une réponse HTTP d'erreur.
 QString errorMessage(const QByteArray& body, int httpStatus);
 
 // Identifiants de modèles d'une réponse GET /models.
 QStringList parseModelList(const QByteArray& body);
+// Limites annoncées par la liste /models, quand le serveur les donne (OpenRouter : context_length et
+// top_provider.max_completion_tokens ; Mistral : max_context_length ; vLLM : max_model_len…). 0 = inconnu.
+struct ModelLimits { int context = 0; int maxOutput = 0; };
+QHash<QString, ModelLimits> parseModelLimits(const QByteArray& body);
 
 } // namespace remote
 } // namespace seldon

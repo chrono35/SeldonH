@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 // LlmCore : enveloppe C++ pure (aucune dépendance Qt) autour de l'API C de llama.cpp.
 //
 // Responsabilités :
@@ -64,6 +92,28 @@ struct GenStats {
     bool   stoppedByUser  = false;
     bool   contextFull    = false;
     bool   startsInThink  = false;  // le prompt se termine par "<think>\n" (mode réflexion)
+
+    // Réponse coupée avant sa fin naturelle (ni jeton de fin, ni arrêt demandé par l'utilisateur) :
+    //   TokenLimit  : « Longueur max. d'une réponse » atteinte (local), ou finish_reason = "length" (distant) ;
+    //   ContextFull : plus de place dans le contexte pour continuer (local) ;
+    //   StreamCut   : flux distant interrompu (erreur en cours de réponse, ou fin sans [DONE] ni finish_reason).
+    enum Truncation { NotTruncated = 0, TokenLimit, ContextFull, StreamCut };
+    int         truncation = NotTruncated;
+    int         tokenLimit = 0;          // limite de tokens appliquée à cette réponse
+    std::string truncationDetail;        // message d'erreur du flux (StreamCut), sinon vide
+};
+
+// Caractéristiques du modèle chargé et du périphérique de calcul (pour « Optimiser pour ce modèle »).
+struct ModelInfo {
+    std::string description;            // ex. "qwen35 4B Q4_K_M"
+    int         contextSize  = 0;       // contexte créé (tokens)
+    int         trainContext = 0;       // contexte d'entraînement du modèle
+    int         nLayer = 0, nEmbd = 0, nHead = 0, nHeadKv = 0;
+    uint64_t    modelBytes = 0;         // taille des poids
+    uint64_t    nParams    = 0;
+    bool        onGpu      = false;     // couches confiées à un GPU (Metal, Vulkan…)
+    std::string device;                 // nom du périphérique
+    uint64_t    memTotal   = 0;         // mémoire de ce périphérique (GPU ; sinon RAM) ; 0 = inconnue
 };
 
 class LlmCore {
@@ -93,6 +143,7 @@ public:
 
     // --- Informations / utilitaires ---
     std::string description() const;     // ex. "qwen35 4B Q4_K_M"
+    ModelInfo   info() const;            // vide si aucun modèle
     int  contextSize() const { return nCtx_; }
     int  trainContextSize() const;
     int  countTokens(const std::string& text) const;
@@ -113,6 +164,7 @@ private:
     const llama_vocab*   vocab_ = nullptr;
     int                  nCtx_  = 0;
     int                  nBatch_ = 512;
+    int                  nGpuLayers_ = 0;
     std::string          chatTemplate_;       // modèle Jinja embarqué dans le GGUF
     bool                 chatML_ = false;     // format ChatML géré en interne
     bool                 templateHasThinkSwitch_ = false;

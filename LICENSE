@@ -1,0 +1,73 @@
+License
+GNU General Public License, version 3 or (at your option) any later version
+
+Copyright (c) 2026 CNRS
+Authors: Philippe DUFRESNE
+Dating methods (src/methods) derived from ChronoModel, Copyright (c) 2014 - 2026 CNRS,
+authors: Philippe LANOS, Helori LANOS, Philippe DUFRESNE.
+
+SeldonH is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+SeldonH is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+The complete license text is provided in the COPYING file of this distribution.
+Official text: https://www.gnu.org/licenses/gpl-3.0.html
+
+SPDX-License-Identifier: GPL-3.0-or-later
+
+Third-Party Components
+
+This software uses the following third-party components, each distributed under
+its own license:
+
+ChronoModel (dating methods, reference curves)
+
+    Website: https://chronomodel.com/
+    Source: https://github.com/Chronomodel/chronomodel
+    License: GNU General Public License v3.0 or later
+    Usage: calibration methods (14C, F14C, Gauss, Unif, TL/OSL, AM) ported to
+           src/methods, and the .chr project format
+
+llama.cpp / ggml
+
+    Website: https://github.com/ggml-org/llama.cpp
+    License: MIT License
+    Local copy: llama.cpp-LICENSE.txt in the installer, third_party/llama.cpp/LICENSE
+    Usage: local inference engine for the language model
+
+QtKeychain
+
+    Website: https://github.com/frankosterfeld/qtkeychain
+    License: BSD 2-Clause License
+    Local copy: qtkeychain-LICENSE.txt in the installer, third_party/qtkeychain/COPYING
+    Usage: storage of the API key in the system keychain
+
+Qt
+
+    Website: https://www.qt.io/
+    License: GNU Lesser General Public License v3.0 (open source edition)
+    License URL: https://www.gnu.org/licenses/lgpl-3.0.html
+    Usage: application framework (linked dynamically: frameworks on macOS,
+           shared libraries on Windows and Linux)
+
+Language model (optional component of the installer)
+
+    Qwen3.5-4B (GGUF quantization), License: Apache License 2.0
+    Distributed as a separate data file (models/*.gguf), not linked into SeldonH.
+    See LICENCE-modele.txt in the installer.
+
+License Compatibility
+
+The MIT and BSD 2-Clause licenses are permissive and compatible with the
+GNU GPL v3. Qt is used under the LGPL v3, which permits use by a GPL v3
+program. The Apache License 2.0 of the language model is compatible with the
+GNU GPL v3; the model is in any case a separate work loaded at run time.
+The combined work is therefore distributed under the terms of the GNU GPL v3
+or later.
+
+Note: This notice must be preserved in all copies or substantial portions of the software.

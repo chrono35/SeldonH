@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Package>
+    <DisplayName>SeldonH</DisplayName>
+    <Description>Assistant d'aide à la datation : datations simples, création et interprétation de modèles ChronoModel</Description>
+    <Version>1.0.0</Version>
+    <ReleaseDate>2026-10-22</ReleaseDate>
+    <Default>true</Default>
+    <ForcedInstallation>true</ForcedInstallation>
+    <SortingPriority>100</SortingPriority>
+    <Script>installscript.qs</Script>
+    <Licenses>
+        <License name="SeldonH (GNU GPL v3 ou ultérieure)" file="SeldonH-LICENSE.txt"/>
+        <License name="GNU General Public License v3" file="GPL-3.0.txt"/>
+        <License name="llama.cpp (licence MIT)" file="llama.cpp-LICENSE.txt"/>
+        <License name="QtKeychain (licence BSD 2 clauses)" file="qtkeychain-LICENSE.txt"/>
+    </Licenses>
+</Package>

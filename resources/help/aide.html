@@ -58,7 +58,7 @@
   <li><a href="#evenement">4 bis. Combiner des datations en un événement</a></li>
   <li><a href="#modele">5. Créer un modèle ChronoModel</a></li>
   <li><a href="#interpreter">6. Interpréter des résultats</a></li>
-  <li><a href="#graphiques">7. Graphiques et images</a></li>
+  <li><a href="#graphiques">7. Graphiques</a></li>
   <li><a href="#competences">8. Enrichir les compétences</a></li>
   <li><a href="#reglages">9. Préférences</a></li>
   <li><a href="#limites">10. Limites connues</a></li>
@@ -76,8 +76,8 @@
 <h2 id="interface">2. L'interface</h2>
 <ul>
   <li><b>Zone de dialogue</b> (à gauche, en haut) : vos questions et les réponses. Sous une réponse, des liens permettent de la copier ou, pour un modèle ChronoModel, de l'enregistrer en <code>.chr</code>.</li>
-  <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code> ou une image).</li>
-  <li><b>Panneau graphiques</b> (à droite) : une courbe par calcul, vos images, et cet onglet d'aide. <code>F4</code> l'affiche ou le masque.</li>
+  <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code>, ou les résultats de ChronoModel en <code>.html</code>). Les images ne sont pas acceptées : le modèle de langage ne reçoit que du texte.</li>
+  <li><b>Panneau graphiques</b> (à droite, fermé au démarrage) : une courbe par calcul, et cet onglet d'aide. Un clic sur une figure de la conversation l'ouvre ; <code>F4</code> l'affiche ou le masque.</li>
   <li><b>Volet Historique</b> (à gauche, repliable) : vos conversations, la plus récente en haut (voir plus bas). Une fine bande avec une flèche le replie ou le déplie : <b>volet ouvert, elle est à sa droite</b> (◀ pour le replier) ; volet replié, elle reste au bord gauche de la fenêtre (▶ pour le rouvrir). Raccourci : <code>Ctrl+Maj+H</code> (<code>⌘⇧H</code> sur Mac), ou le menu <i>Affichage</i>.</li>
   <li><b>Menus</b> : <i>Fichier</i> (nouvelle conversation, modèle, enregistrer la conversation en HTML), <i>Édition</i> (Préférences), <i>Compétences</i>, <i>Affichage</i>, <i>Aide</i>.</li>
 </ul>
@@ -95,7 +95,7 @@
 <table><tr><td class="warn"><b>Confidentialité :</b> l'historique est stocké <b>en clair sur cet ordinateur</b>, dans le dossier de données de SeldonH. Il contient aussi le texte des fichiers que vous avez joints. Il n'est jamais envoyé nulle part par SeldonH. Pour ne rien conserver, décochez « Enregistrer automatiquement les conversations » dans les Préférences, puis effacez l'historique existant.</td></tr></table>
 
 <h2 id="dater">3. Faire une datation</h2>
-<p>Écrivez simplement la mesure avec son erreur. SeldonH reconnaît la méthode, calcule, affiche une fiche de résultat dans la conversation et trace la densité dans le panneau de droite ; le modèle de langage commente ensuite.</p>
+<p>Écrivez simplement la mesure avec son erreur. SeldonH reconnaît la méthode, calcule, affiche une fiche de résultat et la figure de la densité dans la conversation. Cliquez sur la figure pour l'ouvrir dans le panneau des graphiques, à droite (zoom, export PNG ou SVG) ; ce panneau, fermé au démarrage, s'ouvre aussi par <i>Affichage &gt; Panneau graphiques</i> (F4). Le modèle de langage commente ensuite.</p>
 
 <table>
   <tr><th>Méthode</th><th>Exemple (cliquez)</th><th>À savoir</th></tr>
@@ -224,7 +224,7 @@
 <table><tr><td class="warn"><b>Limites :</b> un seul événement, sans contrainte ni phase (pour cela, créez un modèle et lancez-le dans ChronoModel). La densité de θ est lissée avec la largeur de Silverman, et non celle de Sheather-Jones de ChronoModel : de petites différences d'arrondi des HPD sont normales.</td></tr></table>
 
 <h2 id="modele">5. Créer un modèle ChronoModel</h2>
-<p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage propose alors une spécification, que SeldonH transforme en fichier <code>.chr</code> en un clic (lien <i>Enregistrer en .chr</i> sous la réponse).</p>
+<p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage prépare une spécification, que SeldonH vérifie : si le modèle est complet, la réponse affiche « 📦 Modèle ChronoModel prêt » et le lien <i>💾 Enregistrer le modèle (.chr)</i> ; s'il manque quelque chose (un événement sans date, une relation peu claire, un nom inconnu), SeldonH le liste et n'enregistre rien tant que ce n'est pas complété. La spécification JSON n'est pas affichée ; demandez-la explicitement (« montre le JSON du modèle ») pour la voir.</p>
 <p>Exemples de demandes :</p>
 <ul>
   <li><a class="ex">Fais-moi un modèle ChronoModel avec deux phases, Phase ancienne puis Phase récente. US 12 (phase ancienne) : date gaussienne -520 ± 35. US 10 (phase récente) : date gaussienne -430 ± 40. US 12 est plus ancienne que US 10.</a></li>
@@ -246,12 +246,11 @@
 </ul>
 <p>Le modèle s'appuie sur les compétences de SeldonH (HPD, traces MCMC, contraintes, durées de phase…) mais reste un assistant : vérifiez toute conclusion importante.</p>
 
-<h2 id="graphiques">7. Graphiques et images</h2>
+<h2 id="graphiques">7. Graphiques</h2>
 <ul>
-  <li>Chaque calcul ajoute un onglet de courbe. Demandez aussi un tracé : <a class="ex">Trace une gaussienne de moyenne -500 et d'écart-type 40</a></li>
-  <li><b>Glissez-déposez</b> une image sur le panneau, ou utilisez <i>Ouvrir une image…</i>.</li>
+  <li>Chaque calcul affiche sa figure dans la conversation et ajoute un onglet de courbe au panneau. Demandez aussi un tracé : <a class="ex">Trace une gaussienne de moyenne -500 et d'écart-type 40</a></li>
   <li>Les datations d'une même question sont superposées sur une seule figure ; un événement ajoute un onglet de traces MCMC.</li>
-  <li><i>Enregistrer…</i> exporte la courbe ou l'image affichée en <b>PNG</b> ou en <b>SVG</b> (choisissez le type dans la boîte d'enregistrement) : une courbe devient un SVG vectoriel, modifiable dans Inkscape ou Illustrator ; une image ouverte depuis un fichier SVG est réenregistrée telle quelle ; une photo reste une image en pixels, placée dans le SVG.</li>
+  <li><i>Enregistrer…</i> exporte la courbe affichée en <b>PNG</b> ou en <b>SVG</b> (choisissez le type dans la boîte d'enregistrement) : le SVG est vectoriel, modifiable dans Inkscape ou Illustrator.</li>
   <li>Fermez un onglet avec sa croix ; <code>F4</code> masque ou affiche tout le panneau.</li>
 </ul>
 
@@ -311,13 +310,14 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <table>
   <tr><th>Réglage</th><th>Effet</th></tr>
   <tr><td>Moteur</td><td><b>Modèle local</b> (fichier GGUF, tout reste sur votre ordinateur) ou <b>modèle distant</b> : un service qui propose une API compatible OpenAI (OpenAI, Mistral, OpenRouter, Groq, Together, Ollama, LM Studio, llama-server…).</td></tr>
-  <tr><td>Base URL, Clé API, Nom du modèle</td><td>Pour le moteur distant. Base URL : l'adresse de l'API, en général terminée par <code>/v1</code> (par exemple <code>https://api.openai.com/v1</code> ou <code>http://localhost:11434/v1</code> pour Ollama). Clé API : laissez vide pour un serveur local sans clé ; elle est enregistrée en clair dans les réglages de SeldonH sur cet ordinateur, ou lue dans la variable d'environnement <code>SELDONH_API_KEY</code> si le champ est vide. <i>Lister les modèles</i> teste la connexion et propose les noms disponibles.</td></tr>
+  <tr><td>Base URL, Clé API, Nom du modèle</td><td>Pour le moteur distant. Base URL : l'adresse de l'API, en général terminée par <code>/v1</code> (par exemple <code>https://api.openai.com/v1</code> ou <code>http://localhost:11434/v1</code> pour Ollama). Clé API : laissez vide pour un serveur local sans clé ; elle est conservée dans le trousseau du système (Trousseau macOS, Gestionnaire d'identifiants Windows, GNOME Keyring ou KWallet sous Linux) — à défaut, en clair dans les réglages, ce que la fenêtre indique sous le champ — ou lue dans la variable d'environnement <code>SELDONH_API_KEY</code> si le champ est vide. Une adresse en <code>http://</code> vers une autre machine fait apparaître un avertissement : la clé y circulerait en clair. <i>Lister les modèles</i> teste la connexion et propose les noms disponibles.</td></tr>
   <tr><td>Modèle (.gguf)</td><td>Fichier du modèle de langage local.</td></tr>
   <tr><td>Taille du contexte</td><td>Quantité de texte (conversation + compétences + fichier joint) que le modèle voit. Plus grand = plus de mémoire vive et plus lent.</td></tr>
   <tr><td>Threads CPU</td><td>« Automatique » convient en général.</td></tr>
   <tr><td>Utiliser le GPU (Metal)</td><td>Accélère le modèle sur un Mac avec un GPU compatible. À décocher si le chargement échoue.</td></tr>
+  <tr><td>Optimiser pour ce modèle</td><td>Remplit la taille du contexte (modèle local), la longueur max. d'une réponse et le budget des compétences d'après le modèle (contexte, taille), la mémoire de l'ordinateur et la vitesse mesurée sur la dernière réponse ; pour un modèle distant, d'après les limites annoncées par le serveur quand il les donne. Les valeurs proposées sont expliquées sous le bouton : vérifiez puis validez par OK.</td></tr>
   <tr><td>Température</td><td>0 : réponses reproductibles ; 0,3 à 0,7 recommandé pour des données chiffrées.</td></tr>
-  <tr><td>Longueur max. d'une réponse</td><td>Nombre maximal de tokens générés.</td></tr>
+  <tr><td>Longueur max. d'une réponse</td><td>Nombre maximal de tokens générés (2 048 par défaut). Au-delà, la réponse est coupée : SeldonH le signale sous la réponse et propose <b>▶ Continuer la réponse</b>. En mode réflexion (modèle local), 2 048 tokens supplémentaires sont réservés à la réflexion.</td></tr>
   <tr><td>Mode réflexion</td><td>Le modèle raisonne avant de répondre : plus lent, utile pour les cas complexes.</td></tr>
   <tr><td>Appel d'outils (modèle distant)</td><td>Case cochée par défaut. Le modèle distant peut alors <b>demander lui-même</b> un calcul (calibration, HPD, archéomagnétisme…) : SeldonH l'exécute sur votre ordinateur avec les méthodes de ChronoModel, puis lui renvoie les valeurs exactes. Seuls la demande (âge, erreur, courbe) et le résultat sont transmis au serveur. Si le serveur ou le modèle ne gère pas les outils, SeldonH le détecte, vous le dit et utilise à la place un bloc de calcul dans la réponse. Le modèle local fonctionne toujours avec ce bloc.</td></tr>
   <tr><td>Budget des compétences</td><td>Nombre maximal de caractères de fiches de compétences ajoutés à chaque question (6000 par défaut, soit environ 1 700 tokens). Plus grand : l'assistant reçoit plus de connaissances, mais il reste moins de place dans la taille du contexte et la réponse démarre plus lentement.</td></tr>
@@ -346,6 +346,8 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <p>Un « outil » est une fonction de SeldonH que le modèle peut demander : <code>calibrer_radiocarbone</code>, <code>calibrer_f14c</code>, <code>dater_luminescence</code>, <code>densite_gauss</code>, <code>densite_uniforme</code>, <code>dater_archeomagnetisme</code>, <code>calculer_evenement</code> (événement à plusieurs datations, MCMC) et <code>courbes_disponibles</code>. Ce sont les mêmes calculs, sur votre ordinateur, quel que soit le modèle. Avec un modèle distant, la demande passe par le mécanisme standard d'appel d'outils de l'API ; avec le modèle local, par un bloc <code>calcul</code> écrit dans la réponse. Dans les deux cas, la fiche de résultat et la courbe apparaissent dans SeldonH, et le serveur ne reçoit que le texte du résultat. Si un modèle distant se trompe d'outil ou en abuse, décochez l'appel d'outils dans les Préférences.</p>
 <h3>Le modèle distant ne répond pas</h3>
 <p>Vérifiez la Base URL (<i>Lister les modèles</i> la teste), la clé API (une erreur 401 la désigne) et le nom exact du modèle (404). Le mode réflexion de SeldonH ne s'applique qu'au modèle local : chez un fournisseur, choisissez un modèle de raisonnement si vous en voulez un.</p>
+<h3>La réponse s'arrête au milieu</h3>
+<p>SeldonH l'indique sous la réponse (limite de longueur atteinte, contexte plein ou connexion interrompue). Cliquez sur <b>▶ Continuer la réponse</b> : le modèle reprend là où il s'est arrêté, dans la même bulle. Si cela arrive souvent, augmentez « Longueur max. d'une réponse » ou utilisez <i>Optimiser pour ce modèle</i> dans les Préférences.</p>
 <h3>Les formules s'affichent avec des signes bizarres</h3>
 <p>Le modèle écrit ses formules en LaTeX (<code>$\sigma = \sqrt{a^2+b^2}$</code>) ; SeldonH les met en forme (lettres grecques, racines, exposants, indices, fractions). L'affichage reste une approximation : les formules très complexes (matrices, alignements) sont seulement mises en lignes. Le texte brut d'une réponse reste copiable avec le lien <i>copier</i>.</p>
 <h3>Les réponses sont lentes</h3>

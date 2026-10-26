@@ -102,6 +102,9 @@ cp "$EXE" "$DATA/"
 cp "$ROOT/resources/icons/seldonh_256.png" "$DATA/seldonh.png"
 cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh.app/meta/llama.cpp-LICENSE.txt"
 cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh.app/meta/qtkeychain-LICENSE.txt"
+cp "$ROOT/LICENSE" "$PKGS/seldonh.app/meta/SeldonH-LICENSE.txt"
+cp "$ROOT/COPYING" "$PKGS/seldonh.app/meta/GPL-3.0.txt"
+cp "$ROOT/LICENSE" "$ROOT/COPYING" "$DATA/"
 # llama.cpp : libllama, libggml, libggml-base (+ liens symboliques) et backends libggml-cpu-*.so, libggml-vulkan.so
 cp -a "$LLAMA"/lib/*.so* "$DATA/lib/"
 ls "$DATA/lib" | grep -E '^libggml-(cpu|vulkan)' | sed 's/^/   backend : /'

@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "RemoteEngine.h"
 
 #include <QMetaType>
@@ -57,6 +85,7 @@ void RemoteEngine::send()
     errBody_.clear();
     fullBody_.clear();
     streamError_.clear();
+    finishReason_.clear();
     promptTokens_ = completionTokens_ = pieces_ = 0;
     stopped_ = thinkOpen_ = gotDone_ = false;
     acc_.clear();
@@ -99,6 +128,7 @@ void RemoteEngine::handleEvents(const QVector<SseEvent>& events)
     for (const SseEvent& ev : events) {
         if (!ev.error.isEmpty()) { streamError_ = ev.error; continue; }
         if (ev.done) { gotDone_ = true; continue; }
+        if (!ev.finishReason.isEmpty()) finishReason_ = ev.finishReason;
         if (ev.promptTokens >= 0) promptTokens_ = ev.promptTokens;
         if (ev.completionTokens >= 0) completionTokens_ = ev.completionTokens;
         for (const ToolCallDelta& d : ev.toolCalls) acc_.add(d);
@@ -190,7 +220,7 @@ void RemoteEngine::onReplyFinished()
 
     if (!sse_.sawEvent() && pieces_ == 0) {           // réponse non diffusée
         int pt = -1, ct = -1;
-        const QString text = remote::textFromFullResponse(fullBody_, &pt, &ct);
+        const QString text = remote::textFromFullResponse(fullBody_, &pt, &ct, &finishReason_);
         const QVector<ToolCall> fullCalls = remote::toolCallsFromFullResponse(fullBody_);
         for (const ToolCall& c : fullCalls) acc_.add(ToolCallDelta{ -1, c.id, c.name, c.arguments, c.extra });
         if (text.isEmpty() && fullCalls.isEmpty()) { fail(tr("Réponse vide ou illisible du serveur : %1").arg(QString::fromUtf8(fullBody_.left(300)).simplified())); return; }
@@ -204,6 +234,16 @@ void RemoteEngine::onReplyFinished()
     st.generated = completionTokens_ > 0 ? completionTokens_ : pieces_;
     st.promptTokens = promptTokens_;
     st.genMs = timer_.elapsed();
+    // Réponse coupée : limite de tokens du serveur, erreur au milieu du flux, ou flux terminé sans [DONE] ni finish_reason.
+    if (finishReason_ == QLatin1String("length")) {
+        st.truncation = GenStats::TokenLimit;
+        st.tokenLimit = sp_.maxTokens;
+    } else if (pieces_ > 0 && !streamError_.isEmpty()) {
+        st.truncation = GenStats::StreamCut;
+        st.truncationDetail = streamError_.toStdString();
+    } else if (pieces_ > 0 && sse_.sawEvent() && !gotDone_ && finishReason_.isEmpty()) {
+        st.truncation = GenStats::StreamCut;
+    }
 
     const QVector<ToolCall> calls = acc_.calls();
     if (!calls.isEmpty() && sentTools_ && toolRounds_ < kMaxToolRounds) {

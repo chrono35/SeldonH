@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "mainwindow.h"
 
 #include <QAction>
@@ -74,6 +102,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(this, &MainWindow::requestReset, engine_, &LlmEngine::resetConversation);
 
     connect(engine_, &LlmEngine::loadProgress, this, [this](double f) { loadBar_->setValue(int(f * 100)); });
+    connect(engine_, &LlmEngine::modelInfoReady, this, [this](const ModelInfo& info) { modelInfo_ = info; lastLocalTps_ = 0; });
     connect(engine_, &LlmEngine::modelLoaded, this, &MainWindow::onModelLoaded);
     connect(engine_, &LlmEngine::modelFailed, this, &MainWindow::onModelFailed);
     connect(engine_, &LlmEngine::started, this, [this](bool think, int prompt, int reused) {
@@ -279,9 +308,11 @@ void MainWindow::buildMenus()
     QAction* fig = view->addAction(tr("Panneau graphiques"));
     figAction_ = fig;
     fig->setCheckable(true);
-    fig->setChecked(true);
     fig->setShortcut(QKeySequence(Qt::Key_F4));
     connect(fig, &QAction::toggled, this, [this](bool on) { splitter_->widget(1)->setVisible(on); });
+    // Fermé au démarrage : les figures sont rappelées en vignettes dans le dialogue ; un clic (ou F4) ouvre le panneau.
+    fig->setChecked(false);
+    splitter_->widget(1)->setVisible(false);
     historyAction_ = view->addAction(tr("Historique des conversations"));
     historyAction_->setCheckable(true);
     historyAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_H));
@@ -326,7 +357,7 @@ void MainWindow::showHelp()
         help_ = new seldon::HelpView;
         connect(help_, &seldon::HelpView::insertRequested, this, &MainWindow::insertExample);
     }
-    if (figAction_ && !figAction_->isChecked()) figAction_->setChecked(true);      // réaffiche le panneau de droite
+    showFiguresPanel();
     figures_->showPage(help_, tr("Aide"));
 }
 
@@ -428,6 +459,7 @@ void MainWindow::chooseModel()
 void MainWindow::openPreferences()
 {
     SettingsDialog dlg(settings_, this);
+    dlg.setLocalModel(modelInfo_, lastLocalTps_);     // modèle local chargé (même si le moteur distant est actif)
     if (dlg.exec() != QDialog::Accepted) return;
     AppSettings n = dlg.settings();
 
@@ -542,6 +574,11 @@ void MainWindow::sendMessage()
     const QList<SkillMatch> matches = skills_.select(q, settings_.skillChars, recentSkillIds(3), pinned);
     const QString knowledge = SkillManager::format(matches);
 
+    if (!turns_.isEmpty() && turns_.last().truncation) {     // nouvelle question : plus de « Continuer » sur la précédente
+        turns_.last().truncation = 0;
+        setTurnActions(turns_.size() - 1);
+    }
+
     Turn t;
     t.question = q;
     for (const SkillMatch& m : matches) t.skillIds << m.skill->id;
@@ -603,10 +640,79 @@ void MainWindow::startGeneration()
 
     SamplingParams sp;
     sp.temperature    = static_cast<float>(settings_.temperature);
-    sp.maxTokens      = settings_.maxTokens;
+    sp.maxTokens      = settings_.effectiveMaxTokens(remoteActive());   // + réserve pour la réflexion (modèle local)
     sp.enableThinking = settings_.thinking;
     if (remoteActive()) emit requestRemoteGenerate(buildChat(), sp);
     else emit requestGenerate(buildChat(), sp);
+}
+
+// Suite d'une réponse coupée : le modèle reçoit la conversation, le début de sa réponse et la consigne de continuer ;
+// le texte produit s'ajoute à la même bulle et au même tour (un bloc ```chronomodel coupé redevient complet).
+void MainWindow::continueAnswer(int turn)
+{
+    if (generating_ || turns_.isEmpty()) return;
+    if (turn != turns_.size() - 1) {
+        statusBar()->showMessage(tr("Seule la dernière réponse peut être continuée."), 5000);
+        return;
+    }
+    if (!modelReady_) {
+        statusBar()->showMessage(tr("Aucun modèle prêt : impossible de continuer la réponse."), 5000);
+        return;
+    }
+    Turn& t = turns_.last();
+    if (!t.truncation || t.answer.isEmpty()) return;
+    t.truncation = 0;
+    chat_->setActions(t.view, {});
+
+    QVector<ChatMessage> chat = buildChat();      // se termine par la question de ce tour
+    chat.append(ChatMessage{ "assistant", t.answer.toStdString() });
+    chat.append(ChatMessage{ "user", "[SeldonH] Ta réponse précédente a été coupée avant la fin. Écris uniquement la suite, en reprenant "
+                          "exactement là où le texte s'arrête, éventuellement au milieu d'un mot, d'une phrase ou d'un bloc de "
+                          "code (dans ce cas, ne rouvre pas le bloc). Ne répète rien de ce qui est déjà écrit, ne résume pas, "
+                          "ne t'excuse pas." });
+
+    continuing_ = true;
+    raw_ = t.answer;                              // la suite s'ajoute à la réponse déjà affichée
+    startsInThink_ = false;
+    generating_ = true;
+    updateControls();
+    statsLabel_->setText(tr("Suite de la réponse…"));
+
+    SamplingParams sp;
+    sp.temperature    = static_cast<float>(settings_.temperature);
+    sp.maxTokens      = settings_.maxTokens;
+    sp.enableThinking = false;                    // pas de nouvelle réflexion : seulement la suite du texte
+    if (remoteActive()) emit requestRemoteGenerate(chat, sp);
+    else emit requestGenerate(chat, sp);
+}
+
+// Le bloc ```chronomodel n'est pas montré tel quel : un résumé (modèle prêt / ce qui manque) le remplace, sauf si la
+// dernière vraie question de l'utilisateur demande explicitement le JSON.
+QString MainWindow::shownAnswer(const QString& answer) const
+{
+    bool showJson = false;
+    for (int i = turns_.size() - 1; i >= 0; --i)
+        if (!turns_[i].synthetic) { showJson = ChrBuilder::asksForJson(turns_[i].question); break; }
+    return ChrBuilder::displayMarkdown(answer, showJson);
+}
+
+QString MainWindow::truncationNotice(const Turn& t) const
+{
+    switch (t.truncation) {
+    case GenStats::TokenLimit:
+        return tr("⚠ Réponse incomplète : limite de %1 tokens atteinte. Cliquez sur « Continuer la réponse », ou augmentez "
+                  "« Longueur max. d'une réponse » dans les Préférences.").arg(t.tokenLimit);
+    case GenStats::ContextFull:
+        return tr("⚠ Réponse incomplète : plus de place dans le contexte (%1 tokens pour la réponse). Cliquez sur « Continuer "
+                  "la réponse », augmentez la taille du contexte ou commencez une nouvelle conversation.").arg(t.tokenLimit);
+    case GenStats::StreamCut:
+        return t.truncationDetail.isEmpty()
+                   ? tr("⚠ Réponse incomplète : la connexion au modèle distant s'est interrompue. Cliquez sur « Continuer la réponse ».")
+                   : tr("⚠ Réponse incomplète : le modèle distant a signalé une erreur (%1). Cliquez sur « Continuer la réponse ».")
+                         .arg(t.truncationDetail);
+    default:
+        return {};
+    }
 }
 
 // Dernières datations de la conversation (au plus 8 tours en arrière) : écrites dans une question de l'utilisateur,
@@ -672,8 +778,8 @@ void MainWindow::onToken(const QString& piece)
     if (turns_.isEmpty()) return;
     raw_ += piece;
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
-    chat_->setAssistant(turns_.last().view, QString::fromStdString(s.answer),
-                        QString::fromStdString(s.thinking), s.thinkingOpen, false);
+    const QString thinking = continuing_ ? turns_.last().thinking : QString::fromStdString(s.thinking);
+    chat_->setAssistant(turns_.last().view, shownAnswer(QString::fromStdString(s.answer)), thinking, !continuing_ && s.thinkingOpen, false);
 }
 
 void MainWindow::finishAssistantMessage(bool interrupted)
@@ -681,11 +787,13 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     if (turns_.isEmpty()) return;
     Turn& t = turns_.last();
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
-    QString answer = QString::fromStdString(s.answer);
-    t.answer = answer;
+    t.answer = QString::fromStdString(s.answer);       // texte complet (avec le bloc de modèle) : historique, enregistrement
+    QString answer = shownAnswer(t.answer);
+    if (!continuing_) t.thinking = QString::fromStdString(s.thinking);
     if (interrupted) answer += tr("\n\n*(réponse interrompue)*");
-    chat_->setAssistant(t.view, answer, QString::fromStdString(s.thinking), false, true);
-    logAssistantText(turns_.size() - 1, answer, QString::fromStdString(s.thinking));
+    else if (t.truncation) answer += QStringLiteral("\n\n*%1*").arg(truncationNotice(t));
+    chat_->setAssistant(t.view, answer, t.thinking, false, true);
+    logAssistantText(turns_.size() - 1, answer, t.thinking);
     setTurnActions(turns_.size() - 1);
 
     applyPlotBlocks(t.answer);
@@ -694,14 +802,23 @@ void MainWindow::finishAssistantMessage(bool interrupted)
 void MainWindow::onFinished(const GenStats& st)
 {
     generating_ = false;
+    if (!turns_.isEmpty()) {
+        Turn& t = turns_.last();
+        t.truncation = st.stoppedByUser ? 0 : st.truncation;
+        t.tokenLimit = st.tokenLimit;
+        t.truncationDetail = QString::fromStdString(st.truncationDetail);
+    }
     finishAssistantMessage(st.stoppedByUser);
+    continuing_ = false;
     saveCurrent();
 
     const double tps = st.genMs > 0 ? st.generated * 1000.0 / st.genMs : 0.0;
+    if (!remoteActive() && st.generated >= 32) lastLocalTps_ = tps;     // pour « Optimiser pour ce modèle »
     QString msg = tr("%1 tokens générés — %2 tok/s").arg(st.generated).arg(tps, 0, 'f', 1);
     if (st.droppedMessages > 0)
         msg += tr(" — %1 ancien(s) message(s) oublié(s) (contexte plein)").arg(st.droppedMessages);
     if (st.contextFull) msg += tr(" — contexte saturé");
+    if (!st.stoppedByUser && st.truncation) msg += tr(" — réponse coupée");
 
     if (!st.stoppedByUser && runRequestedCalculations()) return;      // relance l'assistant avec le résultat
     updateControls();
@@ -715,6 +832,7 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
 {
     if (turns_.isEmpty()) { generating_ = false; updateControls(); return; }
     finishAssistantMessage(false);                      // texte écrit avant les appels (souvent vide)
+    continuing_ = false;
 
     QStringList called;
     for (const ToolCall& c : calls) called << "`" + c.name + "`";
@@ -768,6 +886,7 @@ void MainWindow::onFailed(const QString& error)
 {
     generating_ = false;
     finishAssistantMessage(false);
+    continuing_ = false;
     logNotice(tr("<b>Erreur :</b> %1").arg(error.toHtmlEscaped()));
     saveCurrent();
     updateControls();
@@ -786,8 +905,9 @@ void MainWindow::resetConversation(bool clearFigures)
 {
     turns_.clear();
     display_.clear();
-    datingPlotTurn_ = datingPlotItem_ = -1;
+    datingPlotTurn_ = datingPlotItem_ = datingPlotFig_ = -1;
     datingPlotPage_ = nullptr;
+    chatFigures_.clear();
     convId_.clear();
     convCreated_ = QDateTime();
     chat_->clearAll();
@@ -803,13 +923,16 @@ void MainWindow::attachFile()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Joindre un fichier"), QString(),
-        tr("Fichiers pris en charge (*.chr *.json *.html *.htm *.csv *.tsv *.txt *.md *.png *.jpg *.jpeg *.svg);;"
+        tr("Fichiers pris en charge (*.chr *.json *.html *.htm *.csv *.tsv *.txt *.md);;"
            "Résultats ChronoModel (*.html *.htm);;Tous les fichiers (*)"));
     if (f.isEmpty()) return;
 
     const QString ext = QFileInfo(f).suffix().toLower();
-    if (QStringList{ "png", "jpg", "jpeg", "svg", "bmp", "gif" }.contains(ext)) {
-        if (!figures_->addImageFile(f)) QMessageBox::warning(this, tr("Image"), tr("Image illisible."));
+    if (QStringList{ "png", "jpg", "jpeg", "svg", "bmp", "gif", "webp", "tif", "tiff", "heic" }.contains(ext)) {
+        // Le modèle ne reçoit que du texte : une image jointe ne serait pas vue (risque de réponse inventée).
+        QMessageBox::information(this, tr("Joindre un fichier"),
+                                 tr("Les images ne sont pas prises en charge : le modèle de langage ne reçoit que du texte.\n"
+                                    "Joignez plutôt un tableau (CSV, TXT), un projet ChronoModel (.chr) ou ses résultats (.html)."));
         return;
     }
     QFile file(f);
@@ -865,6 +988,8 @@ void MainWindow::onLink(const QUrl& url)
     else if (action == "help") showHelp();
     else if (action == "insert") insertExample(QUrlQuery(url).queryItemValue(QStringLiteral("q"), QUrl::FullyDecoded));
     else if (action == "chr") saveChrFromTurn(idx);
+    else if (action == "continue") continueAnswer(idx);
+    else if (action == "figure") showFigure(idx);
     else if (action == "densityfile") saveDensityFile(url);
     else if (action == "copy" && idx >= 0 && idx < turns_.size()) QApplication::clipboard()->setText(turns_[idx].answer);
 }
@@ -936,9 +1061,42 @@ void MainWindow::logNotice(const QString& html)
     display_.append(d);
 }
 
+int MainWindow::recallFigure(const QJsonObject& plot)
+{
+    const int id = chatFigures_.size();
+    chatFigures_.append(ChatFigure{ plot, figures_->lastCurves() });
+    const QString title = plot.value("title").toString();
+    chat_->addFigure(id, FigurePanel::thumbnailJson(plot, 520, devicePixelRatioF()), title.isEmpty() ? tr("Courbe") : title);
+    return id;
+}
+
+void MainWindow::showFiguresPanel()
+{
+    if (figAction_ && !figAction_->isChecked()) figAction_->setChecked(true);     // masqué par le menu Affichage (F4)
+    QList<int> sizes = splitter_->sizes();
+    if (sizes.size() == 2 && sizes[1] < 80) {                                      // replié en tirant le séparateur
+        const int total = sizes[0] + sizes[1];
+        splitter_->setSizes({ total * 3 / 5, total * 2 / 5 });
+    }
+}
+
+void MainWindow::showFigure(int id)
+{
+    if (id < 0 || id >= chatFigures_.size()) return;
+    showFiguresPanel();
+    ChatFigure& f = chatFigures_[id];
+    if (f.page) {
+        const QString title = f.plot.value("title").toString();
+        figures_->showPage(f.page, title.isEmpty() ? tr("Courbe") : title);
+    } else if (figures_->addCurvesJson(f.plot)) {   // onglet fermé entre-temps : recréé
+        f.page = figures_->lastCurves();
+    }
+}
+
 bool MainWindow::logPlot(const QJsonObject& plot, QString* err)
 {
     if (!figures_->addCurvesJson(plot, err)) return false;
+    recallFigure(plot);
     DisplayItem d; d.kind = DisplayItem::Plot; d.plot = plot;
     display_.append(d);
     return true;
@@ -958,6 +1116,10 @@ void MainWindow::logDatingPlot(const QJsonObject& plot, int questionTurn)
         const QJsonObject merged = tools::mergePlots({ display_[datingPlotItem_].plot, plot });
         if (figures_->replaceCurvesJson(datingPlotPage_, merged)) {
             display_[datingPlotItem_].plot = merged;
+            if (datingPlotFig_ >= 0 && datingPlotFig_ < chatFigures_.size()) {
+                chatFigures_[datingPlotFig_].plot = merged;
+                chat_->setFigure(datingPlotFig_, FigurePanel::thumbnailJson(merged, 520, devicePixelRatioF()));
+            }
             return;
         }
     }
@@ -965,6 +1127,7 @@ void MainWindow::logDatingPlot(const QJsonObject& plot, int questionTurn)
     datingPlotTurn_ = questionTurn;
     datingPlotItem_ = display_.size() - 1;
     datingPlotPage_ = figures_->lastCurves();
+    datingPlotFig_ = chatFigures_.size() - 1;
 }
 
 int MainWindow::newAssistantBubble()
@@ -991,8 +1154,10 @@ void MainWindow::setTurnActions(int turn)
     const Turn& t = turns_[turn];
     QStringList actions;
     QJsonObject spec;
-    if (ChrBuilder::extractSpec(t.answer, spec))
+    if (ChrBuilder::extractSpec(t.answer, spec) && ChrBuilder::build(spec).ok)      // seulement un modèle complet et valide
         actions << QStringLiteral("<a href=\"seldon://chr/%1\">💾 Enregistrer le modèle (.chr)</a>").arg(turn);
+    if (t.truncation && turn == turns_.size() - 1)
+        actions << tr("<a href=\"seldon://continue/%1\">▶ Continuer la réponse</a>").arg(turn);
     if (!t.answer.isEmpty())
         actions << QStringLiteral("<a href=\"seldon://copy/%1\">Copier</a>").arg(turn);
     if (!actions.isEmpty()) chat_->setActions(t.view, actions);
@@ -1079,7 +1244,7 @@ void MainWindow::openConversation(const QString& id)
             chat_->addNotice(d.text);
             break;
         case DisplayItem::Plot:
-            figures_->addCurvesJson(d.plot);
+            if (figures_->addCurvesJson(d.plot)) recallFigure(d.plot);
             break;
         case DisplayItem::Assistant: {
             const int view = chat_->addAssistant();

@@ -165,8 +165,11 @@ echo "➡️  9 - Composant seldonh.app"
 rm -rf "$DATA"
 mkdir -p "$DATA"
 ditto "$BUNDLE" "$DATA/SeldonH.app"
+cp "$ROOT/LICENSE" "$ROOT/COPYING" "$DATA/"      # à côté du bundle (/Applications/SeldonH), hors signature
 cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh.app/meta/llama.cpp-LICENSE.txt"
 cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh.app/meta/qtkeychain-LICENSE.txt"
+cp "$ROOT/LICENSE" "$PKGS/seldonh.app/meta/SeldonH-LICENSE.txt"
+cp "$ROOT/COPYING" "$PKGS/seldonh.app/meta/GPL-3.0.txt"
 
 echo "➡️  10 - Composant seldonh.model"
 EXCLUDE=()

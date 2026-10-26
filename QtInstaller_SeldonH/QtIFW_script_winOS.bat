@@ -117,6 +117,10 @@ copy /y "%EXE%" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\resources\icons\SeldonH.ico" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\third_party\llama.cpp\LICENSE" "%PKGS%\seldonh.app\meta\llama.cpp-LICENSE.txt" >nul
 copy /y "%ROOT%\third_party\qtkeychain\COPYING" "%PKGS%\seldonh.app\meta\qtkeychain-LICENSE.txt" >nul
+copy /y "%ROOT%\LICENSE" "%PKGS%\seldonh.app\meta\SeldonH-LICENSE.txt" >nul
+copy /y "%ROOT%\COPYING" "%PKGS%\seldonh.app\meta\GPL-3.0.txt" >nul
+copy /y "%ROOT%\LICENSE" "%APPDATA_DIR%\LICENSE.txt" >nul
+copy /y "%ROOT%\COPYING" "%APPDATA_DIR%\COPYING.txt" >nul
 rem llama.cpp : libllama.dll, ggml.dll, ggml-base.dll et backends ggml-cpu-*.dll, ggml-vulkan.dll
 rem (vulkan-1.dll n'est PAS livree : elle vient du pilote graphique ; sans elle, ggml-vulkan.dll est ignoree)
 copy /y "%LLAMA%\bin\*.dll" "%APPDATA_DIR%\" >nul

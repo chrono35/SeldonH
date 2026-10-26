@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 // Tests unitaires (QtTest) des modules sans interface : compétences, ChrBuilder, ChatText.
 #include <QtTest>
 #include <QJsonArray>
@@ -23,6 +51,7 @@
 #include <QRadioButton>
 #include "../src/ui/ChatView.h"
 #include "../src/core/MathText.h"
+#include "../src/core/AutoTune.h"
 #include "../src/core/ChatText.h"
 #include "../src/core/ChrBuilder.h"
 #include "../src/core/ChronoResults.h"
@@ -215,7 +244,7 @@ private slots:
             {"name":"US 10","phases":["B"],"dates":[{"type":"gauss","age":-430,"error":40},{"type":"unif","min":-480,"max":-380}]},
             {"name":"Borne","type":"bound","known_fixed":-700}
           ],
-          "event_constraints": [["US 12","US 10"],["US 12","Inconnu"]],
+          "event_constraints": [["US 12","US 10"]],
           "phase_constraints": [["A","B"]]
         })";
         const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
@@ -226,8 +255,21 @@ private slots:
             QVERIFY2(c.contains(k), k);
         QCOMPARE(c["events"].toArray().size(), 3);
         QCOMPARE(c["curve"].toObject()["process_type"].toInt(), 78);
-        QCOMPARE(c["events_constraints"].toArray().size(), 1);        // la contrainte inconnue est ignorée
-        QVERIFY(!r.warnings.filter("Inconnu").isEmpty());
+        QCOMPARE(c["events_constraints"].toArray().size(), 1);
+        {   // modèle incomplet : contrainte vers un nom inconnu, événement sans date -> pas de fichier
+            QJsonObject bad = QJsonDocument::fromJson(spec.toUtf8()).object();
+            QJsonArray cons;
+            cons.append(QJsonArray{ "US 12", "Inconnu" });       // (une liste à un seul élément serait copiée, pas imbriquée)
+            bad["event_constraints"] = cons;
+            const ChrResult u = ChrBuilder::build(bad);
+            QVERIFY(!u.ok && u.errors.join(" ").contains("Inconnu"));
+            QJsonArray ev = bad["events"].toArray();
+            ev.append(QJsonObject{ { "name", "Event_2" }, { "dates", QJsonArray{} } });
+            bad["events"] = ev;
+            bad.remove("event_constraints");
+            const ChrResult e = ChrBuilder::build(bad);
+            QVERIFY(!e.ok && e.errors.join(" ").contains("Event_2"));
+        }
         const QJsonObject ec = c["events_constraints"].toArray()[0].toObject();
         QCOMPARE(ec["bwd_id"].toInt(), 1);                             // US 12 (plus ancien)
         QCOMPARE(ec["fwd_id"].toInt(), 2);                             // US 10 (plus récent)
@@ -505,9 +547,9 @@ private slots:
         QCOMPARE(order(build(R"([["A","B","C"]])")), QStringList({ "A<B", "B<C" }));
         QCOMPARE(order(build(R"([{"older":"C","younger":"A"},{"a":"B","relation":"above","b":"C"},["C","A"]])")),
                  QStringList({ "C<A", "C<B" }));
-        // relation inconnue : ignorée avec avertissement ; contradiction et cycle : erreurs
+        // relation inconnue, contradiction et cycle : erreurs (pas de fichier incomplet)
         const ChrResult u = build(R"([["A","contemporain de","B"]])");
-        QVERIFY(u.ok && order(u).isEmpty() && u.warnings.join(" ").contains("relation non reconnue"));
+        QVERIFY(!u.ok && u.errors.join(" ").contains("relation non reconnue"));
         QVERIFY(!build(R"([["A","avant","B"],["A","après","B"]])").ok);
         const ChrResult cyc = build(R"([["A","B"],["B","C"],["C","A"]])");
         QVERIFY(!cyc.ok && cyc.errors.join(" ").contains("cycle"));
@@ -1183,6 +1225,37 @@ private slots:
         QVERIFY(!bad(R"({"events":[{"name":"b","type":"bound"}]})").ok);
     }
 
+    // Affichage : le bloc de modèle est remplacé par un résumé ; JSON montré seulement sur demande explicite.
+    void chrDisplay()
+    {
+        const QString ok = "Voici le modèle.\n\n```chronomodel\n{\"name\":\"Site\",\"events\":[{\"name\":\"E1\",\"dates\":"
+                           "[{\"type\":\"c14\",\"age\":3654,\"error\":40}]},{\"name\":\"E2\",\"dates\":[{\"type\":\"gauss\","
+                           "\"age\":-1500,\"error\":30}]}],\"event_constraints\":[[\"E1\",\"avant\",\"E2\"]]}\n```\n\nFin.";
+        const QString d = ChrBuilder::displayMarkdown(ok);
+        QVERIFY2(d.contains("Modèle ChronoModel prêt") && d.contains("2 événements") && d.contains("1 contrainte"), qPrintable(d));
+        QVERIFY(!d.contains("```") && !d.contains("\"events\"") && d.startsWith("Voici le modèle.") && d.endsWith("Fin."));
+        const QString shown = ChrBuilder::displayMarkdown(ok, true);
+        QVERIFY(shown.contains("```chronomodel") && shown.contains("Modèle ChronoModel prêt"));
+
+        // modèle incomplet (événement sans date) : liste de ce qui manque
+        const QString partial = "```chronomodel\n{\"events\":[{\"name\":\"Event_1\",\"dates\":[{\"type\":\"c14\",\"age\":3654,"
+                                "\"error\":40}]},{\"name\":\"Event_2\",\"dates\":[]}],\"event_constraints\":[]}\n```";
+        const QString p = ChrBuilder::displayMarkdown(partial);
+        QVERIFY2(p.contains("incomplet") && p.contains("Event_2"), qPrintable(p));
+        // bloc en cours d'écriture
+        QCOMPARE(ChrBuilder::displayMarkdown("Je prépare :\n```chronomodel\n{\"events\": ["),
+                 QString("Je prépare :\n*📦 Préparation du modèle ChronoModel…*"));
+        // autres blocs inchangés
+        const QString other = "```calcul\n{\"method\":\"c14\"}\n```\n```json\n{\"a\":1}\n```";
+        QCOMPARE(ChrBuilder::displayMarkdown(other), other);
+
+        QVERIFY(ChrBuilder::asksForJson("Montre-moi le JSON du modèle"));
+        QVERIFY(ChrBuilder::asksForJson("affiche le bloc chronomodel"));
+        QVERIFY(ChrBuilder::asksForJson("Donne la spécification du modèle"));
+        QVERIFY(!ChrBuilder::asksForJson("Fais-moi un modèle avec deux événements"));
+        QVERIFY(!ChrBuilder::asksForJson("Crée le fichier chr"));
+    }
+
     void extractSpec()
     {
         QJsonObject spec; QString err;
@@ -1706,6 +1779,129 @@ private slots:
         QVERIFY(srv.requests_[0].startsWith("POST /v1/chat/completions"));
         QVERIFY(srv.requests_[0].contains("Bearer sk-test-123"));
         QCOMPARE(QJsonDocument::fromJson(srv.bodies_[0]).object()["model"].toString(), QString("mon-modele"));
+    }
+
+    // Réponse coupée : finish_reason « length », erreur au milieu du flux, flux terminé sans [DONE].
+    void remoteEngineTruncation()
+    {
+        auto sse = [](const QByteArray& events) {
+            return QByteArray("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n") + events;
+        };
+        auto run = [](MockServer& srv) {
+            seldon::RemoteEngine eng;
+            eng.setConfig({ srv.baseUrl(), "", "m" });
+            QSignalSpy fin(&eng, &seldon::RemoteEngine::finished);
+            seldon::SamplingParams sp; sp.maxTokens = 50;
+            eng.generate({ { "user", "q" } }, sp);
+            if (!QTest::qWaitFor([&] { return fin.count() == 1; }, 5000)) return seldon::GenStats{};
+            return fin[0][0].value<seldon::GenStats>();
+        };
+        {
+            MockServer srv([&](const QByteArray&, const QByteArray&, int) {
+                return sse("data: {\"choices\":[{\"delta\":{\"content\":\"Début\"},\"finish_reason\":null}]}\n\n"
+                           "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"
+                           "data: [DONE]\n\n");
+            });
+            const auto st = run(srv);
+            QCOMPARE(st.truncation, int(seldon::GenStats::TokenLimit));
+            QCOMPARE(st.tokenLimit, 50);
+        }
+        {
+            MockServer srv([&](const QByteArray&, const QByteArray&, int) {
+                return sse("data: {\"choices\":[{\"delta\":{\"content\":\"Fin normale\"},\"finish_reason\":\"stop\"}]}\n\n"
+                           "data: [DONE]\n\n");
+            });
+            QCOMPARE(run(srv).truncation, int(seldon::GenStats::NotTruncated));
+        }
+        {
+            MockServer srv([&](const QByteArray&, const QByteArray&, int) {
+                return sse("data: {\"choices\":[{\"delta\":{\"content\":\"Coupé net\"}}]}\n\n");     // ni finish_reason ni [DONE]
+            });
+            QCOMPARE(run(srv).truncation, int(seldon::GenStats::StreamCut));
+        }
+        {
+            MockServer srv([&](const QByteArray&, const QByteArray&, int) {
+                return sse("data: {\"choices\":[{\"delta\":{\"content\":\"Début\"}}]}\n\n"
+                           "data: {\"error\":{\"message\":\"surcharge\"}}\n\n");
+            });
+            const auto st = run(srv);
+            QCOMPARE(st.truncation, int(seldon::GenStats::StreamCut));
+            QCOMPARE(QString::fromStdString(st.truncationDetail), QString("surcharge"));
+        }
+        // Événement SSE : finish_reason lu, même sans texte
+        seldon::remote::SseParser p;
+        const auto ev = p.feed("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n");
+        QCOMPARE(ev.size(), 1);
+        QCOMPARE(ev[0].finishReason, QString("length"));
+        QString fr;
+        seldon::remote::textFromFullResponse(R"({"choices":[{"message":{"content":"x"},"finish_reason":"length"}]})", nullptr, nullptr, &fr);
+        QCOMPARE(fr, QString("length"));
+    }
+
+    void remoteModelLimits()
+    {
+        const auto lim = seldon::remote::parseModelLimits(R"({"data":[
+            {"id":"or/model","context_length":131072,"top_provider":{"context_length":131072,"max_completion_tokens":8192}},
+            {"id":"mistral-small-latest","max_context_length":32768},
+            {"id":"vllm-model","max_model_len":"16384"},
+            {"id":"gpt-4o-mini"}]})");
+        QCOMPARE(lim.value("or/model").context, 131072);
+        QCOMPARE(lim.value("or/model").maxOutput, 8192);
+        QCOMPARE(lim.value("mistral-small-latest").context, 32768);
+        QCOMPARE(lim.value("vllm-model").context, 16384);
+        QVERIFY(!lim.contains("gpt-4o-mini"));                                    // rien d'annoncé
+    }
+
+    // « Optimiser pour ce modèle » : règles de calcul des réglages.
+    void autoTuneRules()
+    {
+        using seldon::TuneInput;
+        const uint64_t GiB = 1024ull * 1024ull * 1024ull;
+        // Qwen3.5-4B type : 32 couches, 4 têtes KV de 256 -> 128 Kio par token
+        QCOMPARE(seldon::kvBytesPerToken(32, 2560, 10, 4) , uint64_t(2 * 32 * 4 * 256 * 2));
+        QCOMPARE(seldon::kvBytesPerToken(0, 2560, 10, 4), uint64_t(0));
+
+        TuneInput big; big.trainContext = 262144; big.nLayer = 32; big.nEmbd = 2560; big.nHead = 10; big.nHeadKv = 4;
+        big.modelBytes = 2.7 * GiB; big.memTotal = 21 * GiB; big.onGpu = true;            // Mac 32 Go
+        auto r = seldon::autoTune(big);
+        QCOMPARE(r.nCtx, 32768);
+        QCOMPARE(r.maxTokens, 4096);
+        QCOMPARE(r.skillChars, 20000);
+
+        TuneInput small = big; small.memTotal = 8 * GiB; small.onGpu = false;               // PC 8 Go, CPU
+        r = seldon::autoTune(small);
+        QVERIFY(r.nCtx >= 4096 && r.nCtx <= 16384);
+        QVERIFY(r.maxTokens >= 1024 && r.maxTokens <= r.nCtx / 4 + 1);
+
+        TuneInput slow = big; slow.tokPerSec = 5;                                           // génération lente
+        r = seldon::autoTune(slow);
+        QCOMPARE(r.nCtx, 8192);
+        QCOMPARE(r.maxTokens, 1024);                                                        // ≈ 2 min à 5 tok/s : plancher
+
+        TuneInput shortCtx = big; shortCtx.trainContext = 8192;                             // modèle à 8k
+        QCOMPARE(seldon::autoTune(shortCtx).nCtx, 8192);
+        QCOMPARE(seldon::autoTune(shortCtx).skillChars, 5500);
+
+        TuneInput think = big; think.thinking = true; think.trainContext = 8192;            // réflexion : réserve comprise
+        r = seldon::autoTune(think);
+        QVERIFY(r.maxTokens + seldon::AppSettings::kThinkingReserve <= std::max(r.nCtx / 2, 1024 + seldon::AppSettings::kThinkingReserve));
+
+        TuneInput unknown; unknown.trainContext = 32768;                                    // mémoire inconnue : prudence
+        QCOMPARE(seldon::autoTune(unknown).nCtx, 8192);
+
+        TuneInput rem; rem.remote = true; rem.remoteContext = 131072; rem.remoteMaxOutput = 8192;
+        r = seldon::autoTune(rem);
+        QCOMPARE(r.nCtx, 0);
+        QCOMPARE(r.maxTokens, 4096);
+        QCOMPARE(r.skillChars, 12000);
+        TuneInput remSmall; remSmall.remote = true; remSmall.remoteContext = 8192; remSmall.remoteMaxOutput = 1000;
+        QCOMPARE(seldon::autoTune(remSmall).maxTokens, 1000);
+        TuneInput remUnknown; remUnknown.remote = true;
+        QCOMPARE(seldon::autoTune(remUnknown).maxTokens, 4096);
+
+        seldon::AppSettings s; s.maxTokens = 2000; s.thinking = true;
+        QCOMPARE(s.effectiveMaxTokens(false), 2000 + seldon::AppSettings::kThinkingReserve);
+        QCOMPARE(s.effectiveMaxTokens(true), 2000);
     }
 
     void remoteEngineErrorsAndRetry()
@@ -2685,6 +2881,47 @@ private slots:
         QVERIFY(w.renderSvg(QSize(800, 790)).contains("D9"));
     }
 
+    // Rappel des figures dans le dialogue : vignette cliquable, intégrée en PNG à l'export HTML.
+    void chatFigureRecall()
+    {
+        using namespace seldon;
+        const RunOutcome a = MethodRunner::analyzeQuestion("C14 2500 ± 30 BP");
+        const QImage img = FigurePanel::thumbnailJson(a.plot, 520, 2.0);
+        QVERIFY(!img.isNull());
+        QCOMPARE(img.deviceIndependentSize().toSize().width(), 520);
+        QCOMPARE(img.width(), 1040);                                       // dessinée en double résolution
+        QVERIFY(FigurePanel::thumbnailJson(QJsonObject{ { "series", "x" } }, 520, 1.0).isNull());
+
+        ChatView v;
+        v.addFigure(0, img, "Densité calendaire");
+        QVERIFY(v.toHtml().contains("seldon-fig:0"));
+        QVERIFY(v.toHtml().contains("seldon://figure/0"));
+        const QString exp = v.exportHtml();
+        QVERIFY(exp.contains("data:image/png;base64,"));
+        QVERIFY(!exp.contains("seldon-fig:"));
+        v.setFigure(0, img);
+        QVERIFY(v.toHtml().contains("seldon-fig:0?v=2"));                   // nouvelle version : pas d'image périmée en cache
+    }
+
+    // Fiche d'un événement : période d'étude en tête, paramètres MCMC en tableau, sans mention « non générées ».
+    void eventNoticeLayout()
+    {
+        using namespace seldon;
+        const RunOutcome o = MethodRunner::run({ QJsonObject{
+            { "method", "event" }, { "name", "US 12" },
+            { "dates", QJsonArray{ QJsonObject{ { "method", "gauss" }, { "age", 1000 }, { "error", 20 } },
+                                   QJsonObject{ { "method", "gauss" }, { "age", 1010 }, { "error", 20 } } } },
+            { "mcmc", QJsonObject{ { "num_iter", 2000 }, { "num_chains", 2 } } } } });
+        const QString h = o.noticeHtml;
+        QVERIFY(!h.contains("non générées"));
+        QVERIFY(h.contains("méthodes de ChronoModel"));
+        const int period = h.indexOf("Période d'étude"), theta = h.indexOf("θ a posteriori"), mcmc = h.indexOf("Paramètres du MCMC");
+        QVERIFY2(period > 0 && theta > period && mcmc > theta, qPrintable(h.left(800)));
+        QVERIFY(h.contains("calculée d'après les datations"));
+        QVERIFY(h.contains("Burn-in") && h.contains("Graines") && h.contains("Recuit simulé") && h.contains("Durée du calcul"));
+        QVERIFY(o.promptBlock.contains("Période d'étude (a priori uniforme de θ"));
+    }
+
     void figureSvgExport()
     {
         seldon::CurveSpec sp;
@@ -2707,21 +2944,6 @@ private slots:
         QVERIFY(panel.saveCurrentTo(dir.filePath("courbe.png")));
         QVERIFY(!QImage(dir.filePath("courbe.png")).isNull());
 
-        // Image venant d'un fichier SVG : contenu d'origine conservé à l'identique.
-        const QByteArray src = R"(<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#3060c0"/></svg>)";
-        const QString srcPath = dir.filePath("source.svg");
-        { QFile f(srcPath); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(src); }
-        QVERIFY(panel.addImageFile(srcPath));
-        const QString copy = dir.filePath("copie.svg");
-        QVERIFY(panel.saveCurrentTo(copy));
-        QFile cp(copy); QVERIFY(cp.open(QIODevice::ReadOnly)); QCOMPARE(cp.readAll(), src);
-
-        // Image matricielle : incorporée dans un SVG.
-        QImage img(30, 20, QImage::Format_ARGB32); img.fill(Qt::red);
-        panel.addImage(img, "rouge");
-        const QString raster = dir.filePath("rouge.svg");
-        QVERIFY(panel.saveCurrentTo(raster));
-        QFile rf(raster); QVERIFY(rf.open(QIODevice::ReadOnly)); QVERIFY(rf.readAll().contains("<image"));
     }
 
 };

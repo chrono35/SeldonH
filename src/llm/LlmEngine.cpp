@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #include "LlmEngine.h"
 
 #include <QCoreApplication>
@@ -11,6 +39,7 @@ LlmEngine::LlmEngine(QObject* parent) : QObject(parent)
     qRegisterMetaType<QVector<seldon::ChatMessage>>("QVector<seldon::ChatMessage>");
     qRegisterMetaType<seldon::SamplingParams>("seldon::SamplingParams");
     qRegisterMetaType<seldon::GenStats>("seldon::GenStats");
+    qRegisterMetaType<seldon::ModelInfo>("seldon::ModelInfo");
 }
 
 LlmEngine::~LlmEngine() = default;
@@ -41,6 +70,7 @@ void LlmEngine::loadModel(const QString& path, int nCtx, int nThreads, int nGpuL
         emit modelFailed(QString::fromStdString(err));
         return;
     }
+    emit modelInfoReady(core_.info());
     emit modelLoaded(QString::fromStdString(core_.description()), core_.contextSize());
 }
 

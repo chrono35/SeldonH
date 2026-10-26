@@ -1,7 +1,36 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
 #include <QDateTime>
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QString>
 #include <QStringList>
@@ -96,6 +125,10 @@ private:
         int         view = -1;     // index de la bulle dans ChatView
         bool        synthetic = false;  // tour créé par l'application après un calcul (pas une question de l'utilisateur)
         bool        followUp = false;   // vrai : pas (ou plus) de calcul à relancer pour ce tour (déjà calculé par l'application, ou tour de suite)
+        QString     thinking;           // réflexion affichée (gardée quand la réponse est continuée)
+        int         truncation = 0;     // GenStats::Truncation de la dernière génération (réponse coupée : bouton « Continuer »)
+        int         tokenLimit = 0;
+        QString     truncationDetail;
     };
 
     void buildUi();
@@ -105,6 +138,12 @@ private:
     void updateControls();
     void showWelcome();
     void finishAssistantMessage(bool interrupted);
+    int  recallFigure(const QJsonObject& plot);   // vignette dans le dialogue de la courbe ajoutée en dernier au panneau
+    void showFigure(int id);                      // clic sur une vignette : onglet du panneau (recréé s'il a été fermé)
+    void showFiguresPanel();                      // ouvre le panneau des graphiques (masqué, ou replié avec le séparateur)
+    void continueAnswer(int turn);              // reprend une réponse coupée (limite de tokens, contexte, flux interrompu)
+    QString truncationNotice(const Turn& t) const;
+    QString shownAnswer(const QString& answer) const;   // bloc de modèle remplacé par un résumé (JSON seulement sur demande)
     QVector<seldon::ChatMessage> buildChat() const;
     QStringList recentSkillIds(int turns) const;
     void saveChrFromTurn(int turn);
@@ -165,6 +204,10 @@ private:
     int                  datingPlotTurn_ = -1;     // question dont la figure de datations est datingPlotPage_
     int                  datingPlotItem_ = -1;     // son entrée dans display_
     QPointer<QWidget>    datingPlotPage_;
+    int                  datingPlotFig_ = -1;      // son rappel dans le dialogue (indice de chatFigures_)
+    // Figures rappelées dans le dialogue (vignettes) : JSON de la courbe et onglet du panneau de droite (nul si fermé).
+    struct ChatFigure { QJsonObject plot; QPointer<QWidget> page; };
+    QVector<ChatFigure>  chatFigures_;
 
     QVector<Turn>        turns_;
     QString              raw_;                 // sortie brute du modèle pour le tour en cours
@@ -175,6 +218,9 @@ private:
     QString              attachName_, attachText_;
     bool                 attachChronoResults_ = false;   // pièce jointe = résultats de ChronoModel (résumé extrait)
     QString              modelDesc_;
+    seldon::ModelInfo    modelInfo_;            // modèle local chargé (pour « Optimiser pour ce modèle »)
+    double               lastLocalTps_ = 0;     // vitesse de génération mesurée sur la dernière réponse locale
+    bool                 continuing_ = false;   // génération en cours = suite d'une réponse coupée
 };
 
 #endif // MAINWINDOW_H

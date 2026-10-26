@@ -1,3 +1,31 @@
+/* ---------------------------------------------------------------------
+
+Copyright © CNRS	2026
+
+Authors :
+	Philippe DUFRESNE
+
+This software is a computer program whose purpose is to help
+archaeologists and geologists date samples, compute events, build
+ChronoModel models and interpret their results, with a local or
+remote language model.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+SPDX-License-Identifier: GPL-3.0-or-later
+--------------------------------------------------------------------- */
+
 // ChrBuilder : transforme une SPÉCIFICATION SIMPLIFIÉE (JSON court produit par le LLM) en un
 // projet ChronoModel complet (.chr, JSON).
 //
@@ -50,6 +78,13 @@ public:
     // Extrait le premier bloc de code « chronomodel » (ou « json » contenant "events") d'un texte.
     static bool extractSpec(const QString& markdown, QJsonObject& spec, QString* err = nullptr);
 
+    // Texte d'une réponse tel qu'affiché : le bloc de modèle (```chronomodel, ou ```json avec "events") est remplacé par
+    // un résumé (« Modèle ChronoModel prêt : 2 événements… ») ou, si le modèle est incomplet, par la liste de ce qui
+    // manque ; un bloc encore ouvert (réponse en cours) devient « Préparation du modèle… ». `showJson` : l'utilisateur a
+    // demandé le JSON, le bloc reste visible (avec le résumé).
+    static QString displayMarkdown(const QString& markdown, bool showJson = false);
+    // La question demande explicitement à voir le JSON / le bloc du modèle.
+    static bool asksForJson(const QString& question);
     // Résumé compact d'un .chr existant, injectable dans un prompt (interprétation, relecture).
     static QString summarize(const QJsonObject& chr, int maxEvents = 60);
 
