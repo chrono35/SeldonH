@@ -100,6 +100,9 @@ void RemoteEngine::send()
     if (!key.isEmpty()) rq.setRawHeader("Authorization", "Bearer " + key.toUtf8());
     rq.setTransferTimeout(120000);                    // 2 min sans aucun octet reçu
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // HTTP/1.1 : la pile HTTP/2 de Qt 6 lit le socket TLS après sa fermeture par le serveur (fin du flux SSE,
+    // connexion inactive) et affiche « QIODevice::read (QSslSocket): device not open ». Gain d'HTTP/2 nul ici.
+    rq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
     timer_.start();
     const bool withTools = toolsActive();

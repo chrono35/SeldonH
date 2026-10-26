@@ -85,6 +85,7 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1280, 800);
 
     settings_ = AppSettings::load();
+    dateformat::setDecimals(settings_.decimals);
     skills_.reload(settings_.skillsDir);
     CurveStore::setExtraRoots(settings_.curveRoots());
 
@@ -493,6 +494,7 @@ void MainWindow::openPreferences()
                                                      || n.remoteKey != settings_.remoteKey || n.remoteModel != settings_.remoteModel);
     settings_ = n;
     settings_.save();
+    dateformat::setDecimals(settings_.decimals);
     if (remote_) remote_->setTools(settings_.remoteTools ? tools::schemaForApi() : QJsonArray());
     if (skillsMoved) reloadSkills();
 

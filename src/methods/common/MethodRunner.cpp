@@ -62,9 +62,8 @@ QString intervalsText(const std::vector<Interval>& v, DateFormat fmt)
     QStringList items;
     for (const Interval& iv : v) {
         if (iv.prob < 0.005) continue;          // miettes de bruit numérique
-        const bool point = std::lround(iv.from) == std::lround(iv.to);
-        items << (point ? dateformat::format(iv.from, fmt)
-                        : QStringLiteral("%1 → %2").arg(dateformat::format(iv.from, fmt), dateformat::format(iv.to, fmt)))
+        const QString from = dateformat::format(iv.from, fmt), to = dateformat::format(iv.to, fmt);
+        items << (from == to ? from : QStringLiteral("%1 → %2").arg(from, to))
                      + QStringLiteral(" : %1 %").arg(text::num(iv.prob * 100.0, 1));
     }
     return items.join("\n");
@@ -151,6 +150,7 @@ double readLevel(const QJsonObject& rq, QString& warning)
 void appendSummary(QString& html, QString& prompt, const Density& d, const std::vector<Interval>& h95,
                    const std::vector<Interval>& h68, const DensityStats& st, double level, DateFormat fmt)
 {
+    const dateformat::PrecisionScope precision(st.sd);       // décimales automatiques : selon l'écart-type du résultat
     QString rows, promptHpd;
     for (double l : displayLevels(level)) {
         const std::vector<Interval> iv = std::abs(l - 95.0) < 1e-9 ? h95 : std::abs(l - 68.0) < 1e-9 ? h68 : hpdIntervals(d, l);
@@ -398,6 +398,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
                                "ramenée à l'événement, t_i étant la date de l'échantillon lui-même :\n");
     for (size_t k = 0; k < inputs.size(); ++k) {
         const bool wig = inputs[k].wiggle.type != Wiggle::None;
+        const dateformat::PrecisionScope precision(densityStats(R.ti[k]).sd);
         const QString c95 = intervalsText(calibs[k].hpd95, fmt), p95 = intervalsText(hpdIntervals(R.ti[k], 95.0), fmt);
         const QString y95 = wig ? intervalsText(hpdIntervals(R.yi[k], 95.0), fmt) : QString();
         const QString wt = wiggleText(inputs[k].wiggle);

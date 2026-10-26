@@ -1010,11 +1010,124 @@ RhatEss computeRhatAndEss(const std::vector<std::vector<double>>& chains)
 
 } // namespace mcmcdiag
 
-Density kernelDensity(const std::vector<double>& samples, double lo, double hi)
+// ---------------------------------------------------------------- largeur de bande du noyau gaussien
+//
+// Sheather & Jones (1991), « solve-the-equation » : portage de bw.SJ(method = "ste") de R (stats/bandwidths.c).
+// Les dérivées de la densité (φ4, φ6) sont estimées à partir des distances entre paires d'échantillons, comptées
+// sur nb = 1000 classes (comptage exact des paires si n ≤ nb/2, sinon binné : O(nb²) au lieu de O(n²)).
+// Contrairement à la règle de Silverman (nrd0), qui suppose une loi proche de la normale et sur-lisse les
+// densités multimodales, SJ s'adapte à la forme : les modes séparés ne sont pas fusionnés.
+namespace {
+
+constexpr double kSjPi = 3.14159265358979323846;
+
+struct PairCounts { double d = 0.0; std::vector<double> cnt; };
+
+PairCounts pairCounts(const std::vector<double>& x, int nb)
 {
-    Density d;
+    PairCounts P;
+    const size_t n = x.size();
+    const auto [mn, mx] = std::minmax_element(x.begin(), x.end());
+    P.d = (*mx - *mn) * 1.01 / double(nb);
+    P.cnt.assign(size_t(nb), 0.0);
+    if (!(P.d > 0.0)) return P;
+    if (n > size_t(nb / 2)) {                                   // bw_pair_cnts(binned = TRUE) + bw_den_binned
+        std::vector<long long> xx(n);
+        long long lo = std::numeric_limits<long long>::max();
+        for (size_t i = 0; i < n; ++i) {
+            const double v = std::trunc(std::abs(x[i]) / P.d);
+            xx[i] = (long long)(x[i] < 0.0 ? -v : v);
+            lo = std::min(lo, xx[i]);
+        }
+        std::vector<double> w(size_t(nb), 0.0);
+        for (long long v : xx) { const long long k = v - lo; if (k >= 0 && k < nb) w[size_t(k)] += 1.0; }  // tabulate
+        for (int ii = 0; ii < nb; ++ii) {
+            const double wi = w[size_t(ii)];
+            if (wi == 0.0) continue;
+            P.cnt[0] += wi * (wi - 1.0);                           // pas de distance à soi-même
+            for (int jj = 0; jj < ii; ++jj) P.cnt[size_t(ii - jj)] += wi * w[size_t(jj)];
+        }
+        P.cnt[0] *= 0.5;                                            // paires d'une même classe comptées deux fois
+    } else {                                                        // bw_den : comptage exact des paires
+        for (size_t i = 1; i < n; ++i) {
+            const int ii = int(x[i] / P.d);
+            for (size_t j = 0; j < i; ++j) {
+                const int k = std::abs(ii - int(x[j] / P.d));
+                if (k < nb) P.cnt[size_t(k)] += 1.0;
+            }
+        }
+    }
+    return P;
+}
+
+double sjPhi4(const PairCounts& P, double n, double h)        // bw_phi4
+{
+    constexpr double kDelMax = 1000.0;
+    double sum = 0.0;
+    for (size_t i = 0; i < P.cnt.size(); ++i) {
+        double del = double(i) * P.d / h; del *= del;
+        if (del >= kDelMax) break;
+        sum += std::exp(-del / 2.0) * (del * del - 6.0 * del + 3.0) * P.cnt[i];
+    }
+    sum = 2.0 * sum + n * 3.0;
+    return sum / (n * (n - 1.0) * std::pow(h, 5.0) * std::sqrt(2.0 * kSjPi));
+}
+
+double sjPhi6(const PairCounts& P, double n, double h)        // bw_phi6
+{
+    constexpr double kDelMax = 1000.0;
+    double sum = 0.0;
+    for (size_t i = 0; i < P.cnt.size(); ++i) {
+        double del = double(i) * P.d / h; del *= del;
+        if (del >= kDelMax) break;
+        sum += std::exp(-del / 2.0) * (del * del * del - 15.0 * del * del + 45.0 * del - 15.0) * P.cnt[i];
+    }
+    sum = 2.0 * sum - 15.0 * n;
+    return sum / (n * (n - 1.0) * std::pow(h, 7.0) * std::sqrt(2.0 * kSjPi));
+}
+
+// x trié, n ≥ 2. Renvoie 0 si l'équation n'a pas de solution (échantillon trop épars) : l'appelant se rabat sur nrd0.
+double bandwidthSJ(const std::vector<double>& x, double sd, double iqr)
+{
+    const double n = double(x.size());
+    const double scale = std::min(sd, iqr / 1.349);
+    if (!(scale > 0.0)) return 0.0;
+    const PairCounts P = pairCounts(x, 1000);
+    if (!(P.d > 0.0)) return 0.0;
+    const double a = 1.24 * scale * std::pow(n, -1.0 / 7.0);
+    const double b = 1.23 * scale * std::pow(n, -1.0 / 9.0);
+    const double c1 = 1.0 / (2.0 * std::sqrt(kSjPi) * n);
+    const double TD = -sjPhi6(P, n, b);
+    if (!std::isfinite(TD) || TD <= 0.0) return 0.0;
+    const double alph2 = 1.357 * std::pow(sjPhi4(P, n, a) / TD, 1.0 / 7.0);
+    if (!std::isfinite(alph2)) return 0.0;
+    auto fSD = [&](double h) { return std::pow(c1 / sjPhi4(P, n, alph2 * std::pow(h, 5.0 / 7.0)), 0.2) - h; };
+
+    const double hmax = 1.144 * scale * std::pow(n, -0.2);
+    double lower = 0.1 * hmax, upper = hmax;
+    double fl = fSD(lower), fu = fSD(upper);
+    for (int itry = 1; std::isfinite(fl) && std::isfinite(fu) && fl * fu > 0.0; ++itry) {
+        if (itry > 99) return 0.0;
+        if (itry % 2) { upper *= 1.2; fu = fSD(upper); } else { lower /= 1.2; fl = fSD(lower); }
+    }
+    if (!std::isfinite(fl) || !std::isfinite(fu)) return 0.0;
+    // Bissection (R : uniroot avec tol = 0.1·lower ; ici plus serré, la fonction est peu coûteuse)
+    const double tol = 1e-6 * hmax;
+    for (int it = 0; it < 200 && upper - lower > tol; ++it) {
+        const double m = 0.5 * (lower + upper), fm = fSD(m);
+        if (!std::isfinite(fm)) return 0.0;
+        if ((fm < 0.0) == (fl < 0.0)) { lower = m; fl = fm; } else { upper = m; }
+    }
+    const double h = 0.5 * (lower + upper);
+    return std::isfinite(h) && h > 0.0 ? h : 0.0;
+}
+
+} // namespace
+
+double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule)
+{
     const size_t n = samples.size();
-    if (n < 2) return d;
+    if (n < 2) return 0.0;
     std::vector<double> s = samples;
     std::sort(s.begin(), s.end());
     const double mean = std::accumulate(s.begin(), s.end(), 0.0) / double(n);
@@ -1023,8 +1136,23 @@ Density kernelDensity(const std::vector<double>& samples, double lo, double hi)
     const double sd = std::sqrt(ss / double(n - 1));
     auto quant = [&](double p) { const double i = p * double(n - 1); const size_t a = size_t(i); const size_t b = std::min(n - 1, a + 1); return s[a] + (i - double(a)) * (s[b] - s[a]); };
     const double iqr = quant(0.75) - quant(0.25);
-    double h = 0.9 * std::min(sd, iqr / 1.34) * std::pow(double(n), -0.2);         // bw.nrd0 de R
+    if (rule == Bandwidth::SheatherJones) {
+        const double h = bandwidthSJ(s, sd, iqr);
+        if (h > 0.0) return h;
+    }
+    double h = 0.9 * std::min(sd, iqr / 1.34) * std::pow(double(n), -0.2);          // bw.nrd0 de R (Silverman)
     if (!(h > 0.0)) h = sd > 0.0 ? 0.9 * sd * std::pow(double(n), -0.2) : 1.0;
+    return h;
+}
+
+Density kernelDensity(const std::vector<double>& samples, double lo, double hi, Bandwidth rule)
+{
+    Density d;
+    const size_t n = samples.size();
+    if (n < 2) return d;
+    std::vector<double> s = samples;
+    std::sort(s.begin(), s.end());
+    const double h = kernelBandwidth(s, rule);
     const double a = std::max(lo, s.front() - 4.0 * h), b = std::min(hi, s.back() + 4.0 * h);
     if (!(b > a)) return d;
     const int K = 1024;

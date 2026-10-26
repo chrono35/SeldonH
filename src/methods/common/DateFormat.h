@@ -38,19 +38,27 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //   Age cal. BP     1950 − année          Age cal. B2K   2000 − année
 //   Date cal. BP    année − 1950          Date cal. B2K  année − 2000
 //   Age ka          −année / 1000         Age Ma         −année / 1 000 000
+//   Sans unité      valeur signée brute, sans suffixe (données qui ne sont pas des dates : profondeur, indice…)
+//
+// Décimales : réglage global (Préférences), fixe (0 à 6) ou automatique. En automatique, la précision suit
+// l'incertitude du résultat affiché (PrecisionScope) : 2 chiffres significatifs sur l'écart-type, dans l'unité.
 #pragma once
 
 #include <QRegularExpression>
 #include <QString>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
+#include <limits>
 #include <string>
 
 #include "TextUtil.h"
 
 namespace seldon {
 
-enum class DateFormat { BcAd, BceCe, CalBP, CalB2K, DatBP, DatB2K, Ka, Ma };
+enum class DateFormat { BcAd, BceCe, CalBP, CalB2K, DatBP, DatB2K, Ka, Ma, Numeric };
 
 namespace dateformat {
 
@@ -65,14 +73,23 @@ inline const char* id(DateFormat f)
     case DateFormat::DatB2K: return "datb2k";
     case DateFormat::Ka:     return "ka";
     case DateFormat::Ma:     return "ma";
+    case DateFormat::Numeric: return "numeric";
     }
     return "bcad";
 }
 
+// Tous les formats, dans l'ordre des menus.
+inline const std::array<DateFormat, 9>& all()
+{
+    static const std::array<DateFormat, 9> l = { DateFormat::BcAd, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
+                                                         DateFormat::DatBP, DateFormat::DatB2K, DateFormat::Ka, DateFormat::Ma,
+                                                         DateFormat::Numeric };
+    return l;
+}
+
 inline DateFormat fromId(const QString& s)
 {
-    for (DateFormat f : { DateFormat::BcAd, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
-                          DateFormat::DatBP, DateFormat::DatB2K, DateFormat::Ka, DateFormat::Ma })
+    for (DateFormat f : all())
         if (s == QLatin1String(id(f))) return f;
     return DateFormat::BcAd;
 }
@@ -89,6 +106,7 @@ inline QString title(DateFormat f)
     case DateFormat::DatB2K: return QStringLiteral("Date cal. B2K (année − 2000)");
     case DateFormat::Ka:     return QStringLiteral("Âge ka (milliers d'années)");
     case DateFormat::Ma:     return QStringLiteral("Âge Ma (millions d'années)");
+    case DateFormat::Numeric: return QStringLiteral("Sans unité (valeurs signées, sans suffixe)");
     }
     return {};
 }
@@ -105,6 +123,7 @@ inline QString axisLabel(DateFormat f)
     case DateFormat::DatB2K: return QStringLiteral("Date cal. B2K (année − 2000)");
     case DateFormat::Ka:     return QStringLiteral("Âge (ka)");
     case DateFormat::Ma:     return QStringLiteral("Âge (Ma)");
+    case DateFormat::Numeric: return QStringLiteral("Valeur");
     }
     return {};
 }
@@ -113,6 +132,57 @@ inline QString axisLabel(DateFormat f)
 inline bool isAge(DateFormat f)
 {
     return f == DateFormat::CalBP || f == DateFormat::CalB2K || f == DateFormat::Ka || f == DateFormat::Ma;
+}
+
+// ------------------------------------------------------------------ décimales
+
+constexpr int kAutoDecimals = -1;      // réglage « automatique »
+constexpr int kMaxDecimals  = 6;
+
+// Réglage global (Préférences) : kAutoDecimals ou 0..kMaxDecimals.
+inline std::atomic<int>& decimalsSetting() { static std::atomic<int> d{ kAutoDecimals }; return d; }
+inline void setDecimals(int d) { decimalsSetting() = d < 0 ? kAutoDecimals : std::min(d, kMaxDecimals); }
+
+// Années par unité affichée.
+inline double unitYears(DateFormat f) { return f == DateFormat::Ka ? 1e3 : f == DateFormat::Ma ? 1e6 : 1.0; }
+
+// Écart-type (années) du résultat en cours d'affichage, pour le mode automatique ; NaN = inconnu.
+inline double& precisionContext() { thread_local double sd = std::numeric_limits<double>::quiet_NaN(); return sd; }
+
+// Fixe le contexte de précision le temps d'un bloc (fiche d'une datation, d'un événement…).
+class PrecisionScope {
+public:
+    explicit PrecisionScope(double sdYears) : saved_(precisionContext()) { precisionContext() = sdYears; }
+    ~PrecisionScope() { precisionContext() = saved_; }
+    PrecisionScope(const PrecisionScope&) = delete;
+    PrecisionScope& operator=(const PrecisionScope&) = delete;
+private:
+    double saved_;
+};
+
+// Décimales nécessaires pour 2 chiffres significatifs sur une incertitude (années), dans l'unité du format.
+inline int decimalsForSpread(double sdYears, DateFormat f)
+{
+    const double u = sdYears / unitYears(f);
+    if (!std::isfinite(u) || !(u > 0.0)) return -1;
+    return std::clamp(1 - int(std::floor(std::log10(u))), 0, kMaxDecimals);
+}
+
+// Décimales à utiliser pour une date dans le format f : réglage fixe, sinon automatique.
+inline int decimals(DateFormat f)
+{
+    if (const int d = decimalsSetting(); d >= 0) return d;
+    if (const int d = decimalsForSpread(precisionContext(), f); d >= 0) return d;
+    return f == DateFormat::Ka ? 3 : f == DateFormat::Ma ? 5 : 0;      // sans contexte : à l'année près
+}
+
+// Nombre à d décimales, virgule décimale, sans « -0 ».
+inline QString number(double v, int d)
+{
+    const double p = std::pow(10.0, d);
+    double r = std::round(v * p) / p;
+    if (r == 0.0) r = 0.0;
+    return text::num(r, d);
 }
 
 inline double convert(double year, DateFormat f)
@@ -142,32 +212,41 @@ inline double toCalendar(double v, DateFormat f)
     }
 }
 
-// Valeur affichée avec son unité, ex. « 3848 cal BP », « 1899 av. J.-C. », « 1,898 ka ».
+// Valeur affichée avec son unité, ex. « 3848 cal BP », « 1899 av. J.-C. », « 1,898 ka », « -1898 » (sans unité).
+// Décimales : decimals(f) (Préférences, ou automatique selon le PrecisionScope en cours).
 inline QString format(double year, DateFormat f)
 {
+    const int d = decimals(f);
     const double v = convert(year, f);
     switch (f) {
-    case DateFormat::BcAd:   return text::yearLabel(year);
-    case DateFormat::BceCe: {
-        const long r = std::lround(year);
-        return r >= 1 ? QStringLiteral("%1 CE").arg(r) : QStringLiteral("%1 BCE").arg(1 - r);
+    case DateFormat::BcAd: {                     // année astronomique 0 = 1 av. J.-C.
+        if (d == 0) return text::yearLabel(year);
+        return year >= 0.5 ? QStringLiteral("%1 apr. J.-C.").arg(number(year, d)) : QStringLiteral("%1 av. J.-C.").arg(number(1.0 - year, d));
     }
-    case DateFormat::CalBP:  return QStringLiteral("%1 cal BP").arg(std::lround(v));
-    case DateFormat::CalB2K: return QStringLiteral("%1 cal B2K").arg(std::lround(v));
-    case DateFormat::DatBP:  return QStringLiteral("%1 (date cal. BP)").arg(std::lround(v));
-    case DateFormat::DatB2K: return QStringLiteral("%1 (date cal. B2K)").arg(std::lround(v));
-    case DateFormat::Ka:     return QStringLiteral("%1 ka").arg(text::num(v, 3));
-    case DateFormat::Ma:     return QStringLiteral("%1 Ma").arg(text::num(v, 5));
+    case DateFormat::BceCe:
+        return year >= 0.5 ? QStringLiteral("%1 CE").arg(number(year, d)) : QStringLiteral("%1 BCE").arg(number(1.0 - year, d));
+    case DateFormat::CalBP:   return QStringLiteral("%1 cal BP").arg(number(v, d));
+    case DateFormat::CalB2K:  return QStringLiteral("%1 cal B2K").arg(number(v, d));
+    case DateFormat::DatBP:   return QStringLiteral("%1 (date cal. BP)").arg(number(v, d));
+    case DateFormat::DatB2K:  return QStringLiteral("%1 (date cal. B2K)").arg(number(v, d));
+    case DateFormat::Ka:      return QStringLiteral("%1 ka").arg(number(v, d));
+    case DateFormat::Ma:      return QStringLiteral("%1 Ma").arg(number(v, d));
+    case DateFormat::Numeric: return number(v, d);
     }
     return {};
 }
 
-// Écart-type d'une densité (en années) exprimé dans l'unité du format.
+// Écart-type d'une densité (en années) exprimé dans l'unité du format. En automatique : 2 chiffres significatifs.
 inline QString spread(double sdYears, DateFormat f)
 {
-    if (f == DateFormat::Ka) return QStringLiteral("%1 ka").arg(text::num(sdYears / 1e3, 3));
-    if (f == DateFormat::Ma) return QStringLiteral("%1 Ma").arg(text::num(sdYears / 1e6, 5));
-    return QStringLiteral("%1 ans").arg(text::num(sdYears, 1));
+    int d = decimalsSetting();
+    if (d < 0) d = decimalsForSpread(sdYears, f);
+    if (d < 0) d = f == DateFormat::Ka ? 3 : f == DateFormat::Ma ? 5 : 1;
+    const QString n = number(sdYears / unitYears(f), d);
+    if (f == DateFormat::Ka) return n + QStringLiteral(" ka");
+    if (f == DateFormat::Ma) return n + QStringLiteral(" Ma");
+    if (f == DateFormat::Numeric) return n;
+    return n + QStringLiteral(" ans");
 }
 
 // Format demandé dans une question (« donne le résultat en cal BP », « en B2K », « en ka »…) ; `fallback` sinon.
@@ -187,6 +266,7 @@ inline DateFormat detect(const QString& question, DateFormat fallback)
                                       .arg(QString::fromLatin1(outVerbEn), unit)).match(q).hasMatch();
     };
 
+    if (has(R"(\bsans\s+unites?\b|\bwithout\s+units?\b|\bno\s+units?\b|\bunitless\b)")) return DateFormat::Numeric;
     if (has(R"(\bdate\s+cal\.?\s*b2k\b|\bb2k\s+date\b)")) return DateFormat::DatB2K;
     if (has(R"(\bdate\s+cal\.?\s*bp\b)"))                 return DateFormat::DatBP;
     if (has(R"(\bcal\.?\s*b2k\b|\bb2k\b)"))              return DateFormat::CalB2K;
@@ -202,11 +282,20 @@ inline DateFormat detect(const QString& question, DateFormat fallback)
 // Rappel pour le message système quand l'utilisateur a choisi un format autre que BC/AD.
 inline std::string systemHint(DateFormat f)
 {
-    if (f == DateFormat::BcAd) return {};
-    return std::string("\n\n## Format des dates\nL'utilisateur a choisi le format « ") + title(f).toStdString() +
-           "». Exprime les dates dans ce format, en reprenant les valeurs des blocs de résultat de SeldonH (déjà converties). "
-           "Si tu dois convertir toi-même une année calendaire signée A : "
-           "cal BP = 1950 − A ; cal B2K = 2000 − A ; ka = −A / 1000.";
+    const int d = decimalsSetting();
+    if (f == DateFormat::BcAd && d < 0) return {};
+    std::string h = "\n\n## Format des dates\n";
+    if (f == DateFormat::Numeric)
+        h += "L'utilisateur a choisi le mode « sans unité » : donne les valeurs signées telles quelles, sans unité ni "
+             "mention av./apr. J.-C., BP ou ka, en reprenant les valeurs des blocs de résultat de SeldonH.";
+    else if (f != DateFormat::BcAd)
+        h += std::string("L'utilisateur a choisi le format « ") + title(f).toStdString() +
+             "». Exprime les dates dans ce format, en reprenant les valeurs des blocs de résultat de SeldonH (déjà converties). "
+             "Si tu dois convertir toi-même une année calendaire signée A : "
+             "cal BP = 1950 − A ; cal B2K = 2000 − A ; ka = −A / 1000.";
+    if (d >= 0) h += (f != DateFormat::BcAd ? " " : "") + std::string("Garde ") + std::to_string(d) +
+                     (d > 1 ? " décimales" : " décimale") + " pour les valeurs, comme dans les blocs de résultat.";
+    return h;
 }
 
 } // namespace dateformat

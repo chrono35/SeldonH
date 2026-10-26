@@ -111,6 +111,7 @@ private:
     QLineEdit*      skillsDir_;
     QPlainTextEdit* userPrompt_;
     QComboBox*      dateFormat_;
+    QSpinBox*       decimals_;
 };
 
 } // namespace seldon

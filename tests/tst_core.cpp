@@ -1594,8 +1594,45 @@ private slots:
         QCOMPARE(dateformat::format(-1898.0, DateFormat::CalBP), QString("3848 cal BP"));
         QCOMPARE(dateformat::format(-1898.0, DateFormat::BceCe), QString("1899 BCE"));
         QVERIFY(dateformat::isAge(DateFormat::CalBP) && !dateformat::isAge(DateFormat::DatBP));
-        for (const char* id : { "bcad", "bcece", "calbp", "calb2k", "datbp", "datb2k", "ka", "ma" })
+        for (const char* id : { "bcad", "bcece", "calbp", "calb2k", "datbp", "datb2k", "ka", "ma", "numeric" })
             QCOMPARE(QString::fromLatin1(dateformat::id(dateformat::fromId(id))), QString(id));
+
+        // Sans unité : valeur signée brute, sans suffixe
+        QCOMPARE(dateformat::format(-1898.0, DateFormat::Numeric), QString("-1898"));
+        QCOMPARE(dateformat::spread(21.3, DateFormat::Numeric), QString("21"));
+        QVERIFY(!dateformat::isAge(DateFormat::Numeric));
+        QCOMPARE(dateformat::detect("donne les résultats sans unité", DateFormat::BcAd), DateFormat::Numeric);
+        QCOMPARE(dateformat::detect("results without units please", DateFormat::CalBP), DateFormat::Numeric);
+        QVERIFY(QString::fromStdString(dateformat::systemHint(DateFormat::Numeric)).contains("sans unité"));
+
+        // Décimales automatiques : 2 chiffres significatifs sur l'écart-type du résultat en cours
+        QCOMPARE(dateformat::spread(21.3, DateFormat::CalBP), QString("21 ans"));
+        QCOMPARE(dateformat::spread(8.34, DateFormat::BcAd), QString("8,3 ans"));
+        QCOMPARE(dateformat::spread(2130.0, DateFormat::Ka), QString("2,1 ka"));
+        QCOMPARE(dateformat::format(-1898.4, DateFormat::Ka), QString("1,898 ka"));          // sans contexte
+        {
+            const dateformat::PrecisionScope p(2130.0);                                        // σ = 2,1 ka
+            QCOMPARE(dateformat::format(-41898.4, DateFormat::Ka), QString("41,9 ka"));
+            QCOMPARE(dateformat::format(-41898.4, DateFormat::CalBP), QString("43848 cal BP"));
+        }
+        {
+            const dateformat::PrecisionScope p(0.42);                                          // σ < 1 an
+            QCOMPARE(dateformat::format(1515.37, DateFormat::BcAd), QString("1515,37 apr. J.-C."));
+            QCOMPARE(dateformat::format(-0.25, DateFormat::BcAd), QString("1,25 av. J.-C."));
+        }
+        QCOMPARE(dateformat::format(-1898.4, DateFormat::BcAd), QString("1899 av. J.-C."));    // contexte rétabli
+
+        // Décimales fixes
+        dateformat::setDecimals(2);
+        QCOMPARE(dateformat::format(-1898.0, DateFormat::CalBP), QString("3848,00 cal BP"));
+        QCOMPARE(dateformat::format(-1898.0, DateFormat::BceCe), QString("1899,00 BCE"));
+        QCOMPARE(dateformat::format(-0.001, DateFormat::Numeric), QString("0,00"));            // pas de « -0,00 »
+        QCOMPARE(dateformat::spread(21.3, DateFormat::Ka), QString("0,02 ka"));
+        QVERIFY(QString::fromStdString(dateformat::systemHint(DateFormat::BcAd)).contains("2 décimales"));
+        dateformat::setDecimals(0);
+        QCOMPARE(dateformat::format(-1898.0, DateFormat::Ka), QString("2 ka"));
+        dateformat::setDecimals(dateformat::kAutoDecimals);
+        QVERIFY(dateformat::systemHint(DateFormat::BcAd).empty());
 
         // Détection dans la question : un « BP » d'entrée n'est pas une demande de format.
         const DateFormat d = DateFormat::BcAd;
@@ -2584,6 +2621,29 @@ private slots:
         const EventMcmcResult d = runEventMcmc({ { "A", dens(1000, 30), w }, { "B", dens(1100, 30), {} } }, ms, 0, 2000);
         QVERIFY(d.ok);
         QVERIFY2(std::abs(densityStats(d.theta).mean - 1100) < 5, qPrintable(QString::number(densityStats(d.theta).mean)));
+    }
+
+    // Lissage des densités a posteriori : Sheather-Jones (bw.SJ de R), pas Silverman, pour la multimodalité.
+    void kernelBandwidthSheatherJones()
+    {
+        auto bimodal = [](int na, int nb) {                    // deux modes uniformes de largeur 60, séparés de 150
+            std::vector<double> x;
+            auto u = [](int i) { return std::fmod(double(i) * 0.6180339887498949, 1.0); };
+            for (int i = 0; i < na; ++i) x.push_back(1000.0 + 60.0 * (u(i) - 0.5));
+            for (int i = 0; i < nb; ++i) x.push_back(1150.0 + 60.0 * (u(i) - 0.5));
+            return x;
+        };
+        // Valeurs de référence R 4.x : bw.SJ(x) et bw.nrd0(x) (tolérance : uniroot de R, tol = 0.1·lower)
+        const std::vector<double> small = bimodal(200, 100);   // n ≤ 500 : comptage exact des paires
+        QVERIFY2(std::abs(kernelBandwidth(small) - 7.9873318) < 0.02, qPrintable(QString::number(kernelBandwidth(small))));
+        QVERIFY(std::abs(kernelBandwidth(small, Bandwidth::Silverman) - 20.926738) < 1e-4);
+        const std::vector<double> big = bimodal(400, 200);     // n > 500 : comptage binné
+        QVERIFY2(std::abs(kernelBandwidth(big) - 6.2520425) < 0.02, qPrintable(QString::number(kernelBandwidth(big))));
+        QVERIFY(std::abs(kernelBandwidth(big, Bandwidth::Silverman) - 18.240028) < 1e-4);
+        // Le creux entre les deux modes est conservé (Silverman le comble en partie)
+        const Density sj = kernelDensity(big, 0, 2000), sv = kernelDensity(big, 0, 2000, Bandwidth::Silverman);
+        auto at = [](const Density& d, double t) { return d.v[size_t(std::lround((t - d.t[0]) / d.step))]; };
+        QVERIFY(at(sj, 1075) / at(sj, 1000) < 0.5 * at(sv, 1075) / at(sv, 1000));
     }
 
     void eventFromQuestionAndTool()

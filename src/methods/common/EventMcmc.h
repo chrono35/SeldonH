@@ -140,7 +140,17 @@ RhatEss computeRhatAndEss(const std::vector<std::vector<double>>& chains);
 
 } // namespace mcmcdiag
 
-// Densité par noyau gaussien (largeur de Silverman « nrd0 »), sur ~1024 points, restreinte à [lo, hi].
-Density kernelDensity(const std::vector<double>& samples, double lo, double hi);
+// Règle de largeur de bande du noyau gaussien.
+//   SheatherJones : Sheather & Jones (1991) « solve-the-equation » (bw.SJ de R) — défaut ; respecte la multimodalité
+//                   (résultats comparables à ChronoModel). Repli sur Silverman si l'équation n'a pas de solution.
+//   Silverman     : règle « nrd0 » de R, 0.9·min(sd, IQR/1.34)·n^(−1/5) ; sur-lisse les densités multimodales.
+enum class Bandwidth { SheatherJones, Silverman };
+
+// Largeur de bande h pour ces échantillons (n ≥ 2 ; 0 sinon).
+double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule = Bandwidth::SheatherJones);
+
+// Densité par noyau gaussien, sur ~1024 points, restreinte à [lo, hi].
+Density kernelDensity(const std::vector<double>& samples, double lo, double hi,
+                      Bandwidth rule = Bandwidth::SheatherJones);
 
 } // namespace seldon

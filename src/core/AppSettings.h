@@ -28,6 +28,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #pragma once
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QDir>
 #include <QSettings>
@@ -57,7 +59,8 @@ struct AppSettings {
     QString skillsDir;               // dossier des compétences utilisateur
     QString curvesDir;               // dossier des courbes de référence de l'utilisateur (sous-dossiers 14C, F14C, AM)
     bool    useChronoModelCurves = true;   // lit aussi les courbes installées par ChronoModel (dossier Calib)
-    QString dateFormat  = "bcad";    // format d'affichage des dates (comme ChronoModel) : bcad, bcece, calbp, calb2k, datbp, datb2k, ka, ma
+    QString dateFormat  = "bcad";    // format d'affichage des dates (comme ChronoModel) : bcad, bcece, calbp, calb2k, datbp, datb2k, ka, ma, numeric (sans unité)
+    int     decimals    = -1;        // décimales des dates affichées : -1 = automatique (selon l'incertitude), sinon 0..6
     // Modèle distant (API compatible OpenAI). Quand useRemote est vrai, les questions sont envoyées au serveur indiqué.
     bool    useRemote   = false;
     QString remoteUrl   = defaultRemoteUrl();    // Base URL, ex. https://api.openai.com/v1
@@ -166,6 +169,7 @@ struct AppSettings {
         if (a.remoteModel.isEmpty()) a.remoteModel = defaultRemoteModel();
         a.remoteTools = s.value("remote/tools", true).toBool();
         a.dateFormat  = s.value("display/dateFormat", a.dateFormat).toString();
+        a.decimals    = std::clamp(s.value("display/decimals", a.decimals).toInt(), -1, 6);
         a.keepHistory = s.value("history/keep", true).toBool();
         return a;
     }
@@ -191,6 +195,7 @@ struct AppSettings {
         s.setValue("remote/model", remoteModel);
         s.setValue("remote/tools", remoteTools);
         s.setValue("display/dateFormat", dateFormat);
+        s.setValue("display/decimals", decimals);
         s.setValue("history/keep", keepHistory);
     }
 };

@@ -255,14 +255,23 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     form->addRow(tr("Dossier des compétences"), row(skillsDir_, s.skillsDir, &SettingsDialog::browseSkills));
 
     dateFormat_ = new QComboBox;
-    for (DateFormat f : { DateFormat::BcAd, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
-                          DateFormat::DatBP, DateFormat::DatB2K, DateFormat::Ka, DateFormat::Ma })
+    for (DateFormat f : dateformat::all())
         dateFormat_->addItem(dateformat::title(f), QString::fromLatin1(dateformat::id(f)));
     dateFormat_->setCurrentIndex(std::max(0, dateFormat_->findData(s.dateFormat)));
     dateFormat_->setToolTip(tr("Format d'affichage des dates dans les fiches de résultat et les graphiques, comme dans ChronoModel. "
                                "Une demande explicite dans la question (« donne le résultat en cal BP ») le remplace pour cette question."));
     expanding(dateFormat_);
     form->addRow(tr("Format des dates"), dateFormat_);
+
+    decimals_ = new QSpinBox;
+    decimals_->setRange(dateformat::kAutoDecimals, dateformat::kMaxDecimals);
+    decimals_->setSpecialValueText(tr("Automatique"));          // valeur -1
+    decimals_->setValue(s.decimals);
+    decimals_->setToolTip(tr("Nombre de décimales des dates, intervalles et écarts-types dans les fiches de résultat. "
+                             "« Automatique » adapte la précision à l'incertitude de chaque résultat (2 chiffres significatifs "
+                             "sur l'écart-type, dans l'unité choisie) : à l'année près pour une datation à ± 30 ans, "
+                             "0,001 ka pour une incertitude de 0,02 ka."));
+    form->addRow(tr("Décimales"), decimals_);
 
     userPrompt_ = new QPlainTextEdit(s.userPrompt);
     userPrompt_->setPlaceholderText(tr("Consignes ajoutées à chaque question, par exemple :\n"
@@ -339,6 +348,9 @@ void SettingsDialog::listRemoteModels()
     if (!key.isEmpty()) rq.setRawHeader("Authorization", "Bearer " + key.toUtf8());
     rq.setTransferTimeout(15000);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // HTTP/1.1 : la pile HTTP/2 de Qt 6 lit le socket TLS après sa fermeture par le serveur (fin du flux SSE,
+    // connexion inactive) et affiche « QIODevice::read (QSslSocket): device not open ». Gain d'HTTP/2 nul ici.
+    rq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     listBtn_->setEnabled(false);
     remoteStatus_->setText(tr("Connexion à %1…").arg(remote::hostOf(base).toHtmlEscaped()));
     updateBackendRows();
@@ -439,6 +451,7 @@ AppSettings SettingsDialog::settings() const
     a.skillChars  = skillChars_->value();
     a.skillsDir   = skillsDir_->text().trimmed();
     a.dateFormat  = dateFormat_->currentData().toString();
+    a.decimals    = decimals_->value();
     a.useRemote   = remoteRadio_->isChecked();
     a.remoteUrl   = remoteUrl_->text().trimmed();
     a.remoteKey   = remoteKey_->text().trimmed();
