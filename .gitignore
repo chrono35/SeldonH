@@ -87,12 +87,16 @@ CMakeLists.txt.user*
 /third_party/llama.cpp/
 /third_party/llama-build/
 /third_party/llama-install/
+/third_party/qtkeychain/
+/third_party/qtkeychain-build*/
+/third_party/qtkeychain-install/
 *.gguf
 
 # Déploiement (QtInstaller_SeldonH) : fichiers rassemblés par les scripts et installeurs produits
 /third_party/llama-build*/
 /QtInstaller_SeldonH/installer-packages-*/*/data/
 /QtInstaller_SeldonH/installer-packages-*/seldonh.app/meta/llama.cpp-LICENSE.txt
+/QtInstaller_SeldonH/installer-packages-*/seldonh.app/meta/qtkeychain-LICENSE.txt
 /QtInstaller_SeldonH/SeldonH_v*_Installer*
 /QtInstaller_SeldonH/staging/
 /QtInstaller_SeldonH/dmg_content/

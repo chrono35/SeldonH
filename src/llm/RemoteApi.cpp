@@ -1,5 +1,6 @@
 #include "RemoteApi.h"
 
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 
@@ -24,6 +25,17 @@ QString normalizeBase(const QString& baseUrl)
 QUrl chatUrl(const QString& baseUrl) { return QUrl(normalizeBase(baseUrl) + "/chat/completions"); }
 QUrl modelsUrl(const QString& baseUrl) { return QUrl(normalizeBase(baseUrl) + "/models"); }
 QString hostOf(const QString& baseUrl) { return QUrl(normalizeBase(baseUrl)).host(); }
+
+bool sendsKeyInClear(const QString& baseUrl, const QString& apiKey)
+{
+    if (apiKey.trimmed().isEmpty()) return false;
+    const QUrl u(normalizeBase(baseUrl));
+    if (u.scheme().compare(QLatin1String("http"), Qt::CaseInsensitive) != 0) return false;
+    const QString host = u.host().toLower();
+    if (host.isEmpty() || host == QLatin1String("localhost") || host.endsWith(QLatin1String(".localhost"))) return false;
+    const QHostAddress a(host);
+    return a.isNull() || !a.isLoopback();
+}
 
 QByteArray buildChatBody(const RemoteConfig& cfg, const QVector<ChatMessage>& chat, const SamplingParams& sp,
                          bool useMaxCompletionTokens, bool omitTemperature,

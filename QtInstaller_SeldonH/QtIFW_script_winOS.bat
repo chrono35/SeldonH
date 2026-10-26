@@ -6,7 +6,7 @@ rem  embarque le modele .gguf et construit l'installeur Qt Installer Framework.
 rem
 rem  Usage (depuis n'importe quel dossier) :
 rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat               installeur complet
-rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat rebuild       force la recompilation de llama.cpp
+rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat rebuild       force la recompilation de llama.cpp et de QtKeychain
 rem     QtInstaller_SeldonH\QtIFW_script_winOS.bat nomodel       installeur sans modele (~80 Mo)
 rem     set MODEL=Qwen3.5-4B-Q3_K_M.gguf  (avant l'appel) pour embarquer un autre modele
 rem
@@ -14,6 +14,8 @@ rem  Un seul installeur pour tous les PC : llama.cpp est livre avec ses backends
 rem  charges au demarrage (CPU : meilleure variante du processeur ; GPU : Vulkan si
 rem  le pilote graphique le permet). Rien a compiler pour l'utilisateur.
 rem  llama.cpp est recompile automatiquement (scripts\build_llama_win.bat) s'il est absent.
+rem  Cle API : QtKeychain (libqt6keychain.dll, scripts\build_qtkeychain_win.bat) la range dans le
+rem  Gestionnaire d'identifiants de Windows.
 rem
 rem  Project ChronoModel Team - https://chronomodel.com/
 rem  author email: philippe.dufresne@univ-rennes.fr
@@ -47,6 +49,7 @@ set APPDATA_DIR=%PKGS%\seldonh.app\data
 set MODEL_DIR=%PKGS%\seldonh.model\data\models
 set BUILD_DIR=%ROOT%\build\win64-Release
 set LLAMA=%ROOT%\third_party\llama-install
+set KEYCHAIN=%ROOT%\third_party\qtkeychain-install
 set PATH=%QTDIR%\bin;%MINGW%\bin;%PATH%
 
 for %%A in ("%QTDIR%\..") do set QT_NUM=%%~nxA
@@ -78,6 +81,19 @@ if "%NEED_LLAMA%"=="1" (
     type "%LLAMA%\BUILD_INFO.txt"
 )
 
+echo  2b - QtKeychain (cle API dans le Gestionnaire d'identifiants)
+set NEED_KEYCHAIN=0
+if "%REBUILD%"=="1" set NEED_KEYCHAIN=1
+if not exist "%KEYCHAIN%\bin\libqt6keychain.dll" set NEED_KEYCHAIN=1
+if not exist "%KEYCHAIN%\lib\libqt6keychain.dll.a" set NEED_KEYCHAIN=1
+if "%NEED_KEYCHAIN%"=="1" (
+    echo     compilation de QtKeychain
+    call "%ROOT%\scripts\build_qtkeychain_win.bat"
+    if errorlevel 1 ( echo ERREUR : compilation de QtKeychain & goto :fail )
+) else (
+    type "%KEYCHAIN%\BUILD_INFO.txt"
+)
+
 echo  3 - Compilation de SeldonH (Release) dans %BUILD_DIR%
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 pushd "%BUILD_DIR%"
@@ -100,11 +116,15 @@ mkdir "%APPDATA_DIR%"
 copy /y "%EXE%" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\resources\icons\SeldonH.ico" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\third_party\llama.cpp\LICENSE" "%PKGS%\seldonh.app\meta\llama.cpp-LICENSE.txt" >nul
+copy /y "%ROOT%\third_party\qtkeychain\COPYING" "%PKGS%\seldonh.app\meta\qtkeychain-LICENSE.txt" >nul
 rem llama.cpp : libllama.dll, ggml.dll, ggml-base.dll et backends ggml-cpu-*.dll, ggml-vulkan.dll
 rem (vulkan-1.dll n'est PAS livree : elle vient du pilote graphique ; sans elle, ggml-vulkan.dll est ignoree)
 copy /y "%LLAMA%\bin\*.dll" "%APPDATA_DIR%\" >nul
 if errorlevel 1 ( echo ERREUR : DLL llama.cpp introuvables dans %LLAMA%\bin & goto :fail )
 dir /b "%APPDATA_DIR%\ggml*.dll"
+rem QtKeychain : libqt6keychain.dll (ses DLL Qt sont ajoutees par windeployqt, crypt32 fait partie de Windows)
+copy /y "%KEYCHAIN%\bin\*.dll" "%APPDATA_DIR%\" >nul
+if errorlevel 1 ( echo ERREUR : DLL QtKeychain introuvable dans %KEYCHAIN%\bin & goto :fail )
 
 echo  5 - windeployqt (DLL Qt, plugins platforms / styles / imageformats / tls ...)
 "%QTDIR%\bin\windeployqt.exe" --release --compiler-runtime --no-translations --no-system-d3d-compiler --no-opengl-sw "%APPDATA_DIR%\SeldonH.exe"

@@ -6,16 +6,18 @@
 #
 #  Usage :
 #     bash QtInstaller_SeldonH/QtIFW_script_deb.sh                  installeur complet
-#     bash QtInstaller_SeldonH/QtIFW_script_deb.sh rebuild          force la recompilation de llama.cpp
+#     bash QtInstaller_SeldonH/QtIFW_script_deb.sh rebuild          force la recompilation de llama.cpp et de QtKeychain
 #     bash QtInstaller_SeldonH/QtIFW_script_deb.sh nomodel          installeur sans modèle (~100 Mo)
 #     MODEL=Qwen3.5-4B-Q3_K_M.gguf bash QtInstaller_SeldonH/QtIFW_script_deb.sh   autre modèle
 #
 #  Un seul installeur pour tous les PC : llama.cpp est livré avec ses backends chargés au démarrage
 #  (CPU : meilleure variante du processeur ; GPU : Vulkan si le pilote le permet, sinon ignoré).
 #  Rien à compiler pour l'utilisateur.
+#  Clé API : QtKeychain (libqt6keychain.so, livrée dans lib/) la range dans le trousseau du bureau
+#  (Secret Service : GNOME Keyring, KWallet…). libsecret n'est pas livrée : c'est celle du système, chargée si présente.
 #
 #  Paquets pour compiler :  sudo apt install build-essential cmake git patchelf libgl1-mesa-dev libxkbcommon-dev \
-#                                            libvulkan-dev glslc spirv-headers
+#                                            libvulkan-dev glslc spirv-headers pkg-config libsecret-1-dev
 #  Sur le poste cible (Qt 6 / xcb) : sudo apt install libxcb-cursor0   (souvent déjà présent)
 #  L'installeur fonctionne sur la version de Debian où il a été compilé et les suivantes (glibc) :
 #  compiler sur la plus ancienne version visée.
@@ -51,6 +53,7 @@ DATA="$PKGS/seldonh.app/data"
 MODEL_DIR="$PKGS/seldonh.model/data/models"
 BUILD_DIR="$ROOT/build/linux64-Release"
 LLAMA="$ROOT/third_party/llama-install"
+KEYCHAIN="$ROOT/third_party/qtkeychain-install"
 NPROC=$(nproc)
 
 echo "➡️  1 - Vérification des chemins"
@@ -74,9 +77,18 @@ else
     cat "$LLAMA/BUILD_INFO.txt"
 fi
 
+echo "➡️  2b - QtKeychain (clé API dans le trousseau du système)"
+if [ "$REBUILD" = 1 ] || [ ! -e "$KEYCHAIN/lib/libqt6keychain.so" ]; then
+    echo "   compilation de QtKeychain"
+    QTDIR="$QTDIR" bash "$ROOT/scripts/build_qtkeychain.sh"
+else
+    cat "$KEYCHAIN/BUILD_INFO.txt"
+fi
+
 echo "➡️  3 - Compilation de SeldonH (Release) dans $BUILD_DIR"
 mkdir -p "$BUILD_DIR"
-# qmake relancé à chaque fois : llama.pri choisit le mode de liaison de llama.cpp à cette étape ;
+# qmake relancé à chaque fois : llama.pri choisit le mode de liaison de llama.cpp à cette étape (et qtkeychain.pri
+# active le trousseau) ;
 # l'exécutable est supprimé pour forcer l'édition de liens avec les bibliothèques llama.cpp actuelles.
 rm -f "$BUILD_DIR/SeldonH"
 ( cd "$BUILD_DIR" && "$QTDIR/bin/qmake" "$ROOT/SeldonH.pro" "CONFIG+=release" && make -j"$NPROC" )
@@ -89,9 +101,12 @@ mkdir -p "$DATA/lib" "$DATA/plugins"
 cp "$EXE" "$DATA/"
 cp "$ROOT/resources/icons/seldonh_256.png" "$DATA/seldonh.png"
 cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh.app/meta/llama.cpp-LICENSE.txt"
+cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh.app/meta/qtkeychain-LICENSE.txt"
 # llama.cpp : libllama, libggml, libggml-base (+ liens symboliques) et backends libggml-cpu-*.so, libggml-vulkan.so
 cp -a "$LLAMA"/lib/*.so* "$DATA/lib/"
 ls "$DATA/lib" | grep -E '^libggml-(cpu|vulkan)' | sed 's/^/   backend : /'
+# QtKeychain : libqt6keychain.so* (+ liens symboliques) ; sa dépendance Qt6DBus est ajoutée à l'étape 6
+cp -a "$KEYCHAIN"/lib/libqt6keychain.so* "$DATA/lib/"
 
 echo "➡️  5 - Plugins Qt"
 # xcb seulement (fonctionne aussi sous Wayland via XWayland) ; compose = touches mortes (accents ^ ¨ …)
@@ -109,7 +124,7 @@ find "$DATA/plugins" -name '*.debug' -delete
 echo "➡️  6 - Bibliothèques (Qt, ICU, OpenMP)"
 # ldd sur l'exécutable, les plugins et les bibliothèques llama.cpp : on garde ce qui vient du kit Qt (dont ICU)
 # et libgomp (pas toujours installé). libvulkan.so.1 reste celle du système (pilote) : si elle manque,
-# le backend Vulkan est simplement ignoré.
+# le backend Vulkan est simplement ignoré. libsecret-1.so.0 (trousseau) reste aussi celle du système.
 collect() {
     LD_LIBRARY_PATH="$DATA/lib:$QTDIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$1" | awk '/=> \//{print $3}' | while read -r lib; do
         keep=0

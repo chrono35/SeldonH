@@ -66,6 +66,9 @@ QString normalizeBase(const QString& baseUrl);
 QUrl    chatUrl(const QString& baseUrl);
 QUrl    modelsUrl(const QString& baseUrl);
 QString hostOf(const QString& baseUrl);              // « api.openai.com » (pour l'affichage et l'avertissement)
+// Vrai si une clé non vide partirait en clair : adresse en http:// vers une autre machine que celle-ci
+// (localhost, 127.x.x.x et ::1 ne quittent pas l'ordinateur ; un serveur du réseau local, si).
+bool    sendsKeyInClear(const QString& baseUrl, const QString& apiKey);
 
 // Corps JSON d'une requête de génération en flux. Certains modèles refusent `max_tokens` (→ `max_completion_tokens`)
 // ou `temperature` : le moteur réessaie une fois avec ces variantes.

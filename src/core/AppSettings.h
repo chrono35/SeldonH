@@ -6,6 +6,8 @@
 #include <QStandardPaths>
 #include <QString>
 
+#include "SecretStore.h"
+
 namespace seldon {
 
 struct AppSettings {
@@ -31,7 +33,7 @@ struct AppSettings {
     // Modèle distant (API compatible OpenAI). Quand useRemote est vrai, les questions sont envoyées au serveur indiqué.
     bool    useRemote   = false;
     QString remoteUrl   = defaultRemoteUrl();    // Base URL, ex. https://api.openai.com/v1
-    QString remoteKey;               // clé API (stockée en clair dans les réglages de l'utilisateur) ; vide = sans clé
+    QString remoteKey;               // clé API, rangée dans le trousseau du système (SecretStore) ; vide = sans clé
     QString remoteModel = defaultRemoteModel();  // nom du modèle chez le fournisseur
     bool    remoteTools = true;      // appel d'outils natif (les calculs de SeldonH sont appelés par le modèle)
     QString userPrompt;              // consignes personnelles ajoutées à chaque question (ex. « réponses courtes »)
@@ -126,7 +128,7 @@ struct AppSettings {
         a.useRemote   = s.value("remote/enabled", false).toBool();
         a.remoteUrl   = s.value("remote/url").toString().trimmed();
         if (a.remoteUrl.isEmpty()) a.remoteUrl = defaultRemoteUrl();          // champ vide = serveur par défaut
-        a.remoteKey   = s.value("remote/key").toString();
+        a.remoteKey   = secrets::read(QStringLiteral("remote/key"));        // trousseau (repli : réglages, en clair)
         a.remoteModel = s.value("remote/model").toString().trimmed();
         if (a.remoteModel.isEmpty()) a.remoteModel = defaultRemoteModel();
         a.remoteTools = s.value("remote/tools", true).toBool();
@@ -152,7 +154,7 @@ struct AppSettings {
         s.setValue("gen/userPrompt", userPrompt);
         s.setValue("remote/enabled", useRemote);
         s.setValue("remote/url", remoteUrl);
-        s.setValue("remote/key", remoteKey);
+        secrets::write(QStringLiteral("remote/key"), remoteKey);           // sans effet si la clé n'a pas changé
         s.setValue("remote/model", remoteModel);
         s.setValue("remote/tools", remoteTools);
         s.setValue("display/dateFormat", dateFormat);

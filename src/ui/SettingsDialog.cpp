@@ -1,6 +1,7 @@
 #include "SettingsDialog.h"
 
 #include "../core/ChatText.h"
+#include "../core/SecretStore.h"
 #include "../llm/RemoteApi.h"
 #include "../methods/common/DateFormat.h"
 
@@ -19,6 +20,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
@@ -103,6 +105,11 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
                               "https://api.mistral.ai/v1, https://openrouter.ai/api/v1, http://localhost:11434/v1 (Ollama), "
                               "http://localhost:1234/v1 (LM Studio)."));
     form->addRow(tr("Base URL"), remoteUrl_);
+    httpWarning_ = new QLabel(tr("<span style='color:#b35c00'>⚠ Connexion non chiffrée (http://) : la clé API transiterait en clair "
+                                 "sur le réseau. Utilisez une adresse en https://.</span>"));
+    httpWarning_->setObjectName(QStringLiteral("httpWarning"));
+    httpWarning_->setWordWrap(true);
+    form->addRow(QString(), httpWarning_);
 
     remoteKeyRow_ = new QWidget;
     auto* keyLay = new QHBoxLayout(remoteKeyRow_);
@@ -110,15 +117,27 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     remoteKey_ = new QLineEdit(s.remoteKey);
     remoteKey_->setEchoMode(QLineEdit::Password);
     remoteKey_->setPlaceholderText(tr("Clé API (laisser vide pour un serveur local sans clé)"));
-    remoteKey_->setToolTip(tr("La clé est enregistrée en clair dans les réglages de SeldonH sur cet ordinateur. "
-                              "Vous pouvez aussi la fournir par la variable d'environnement SELDONH_API_KEY (champ laissé vide)."));
+    remoteKey_->setToolTip(tr("La clé est conservée dans le trousseau du système (voir ci-dessous). Vous pouvez aussi la fournir "
+                              "par la variable d'environnement SELDONH_API_KEY (champ laissé vide)."));
     showKey_ = new QCheckBox(tr("Afficher"));
+    clearKey_ = new QPushButton(tr("Effacer"));
+    clearKey_->setToolTip(tr("Vide le champ ; la clé est retirée du trousseau en validant par OK."));
     keyLay->addWidget(remoteKey_, 1);
     keyLay->addWidget(showKey_);
+    keyLay->addWidget(clearKey_);
     connect(showKey_, &QCheckBox::toggled, this, [this](bool on) {
         remoteKey_->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
     });
+    connect(clearKey_, &QPushButton::clicked, remoteKey_, &QLineEdit::clear);
     form->addRow(tr("Clé API"), remoteKeyRow_);
+    keyStore_ = new QLabel(secrets::isSecure()
+                               ? tr("<span style='color:#1b7f3b'>🔒 %1</span>").arg(secrets::storageDescription().toHtmlEscaped())
+                               : tr("<span style='color:#b35c00'>⚠ %1</span>").arg(secrets::storageDescription().toHtmlEscaped()));
+    keyStore_->setObjectName(QStringLiteral("keyStore"));
+    keyStore_->setWordWrap(true);
+    form->addRow(QString(), keyStore_);
+    connect(remoteUrl_, &QLineEdit::textChanged, this, &SettingsDialog::updateHttpWarning);
+    connect(remoteKey_, &QLineEdit::textChanged, this, &SettingsDialog::updateHttpWarning);
 
     remoteModelRow_ = new QWidget;
     auto* rmLay = new QHBoxLayout(remoteModelRow_);
@@ -226,11 +245,35 @@ void SettingsDialog::updateBackendRows()
     const bool remote = remoteRadio_->isChecked();
     for (QWidget* w : { static_cast<QWidget*>(modelRow_), static_cast<QWidget*>(ctx_), static_cast<QWidget*>(threads_), static_cast<QWidget*>(gpu_) })
         form_->setRowVisible(w, !remote);
-    for (QWidget* w : { static_cast<QWidget*>(remoteUrl_), static_cast<QWidget*>(remoteKeyRow_), static_cast<QWidget*>(remoteModelRow_),
-                        static_cast<QWidget*>(remoteTools_), static_cast<QWidget*>(remoteWarning_) })
+    for (QWidget* w : { static_cast<QWidget*>(remoteUrl_), static_cast<QWidget*>(remoteKeyRow_), static_cast<QWidget*>(keyStore_),
+                        static_cast<QWidget*>(remoteModelRow_), static_cast<QWidget*>(remoteTools_), static_cast<QWidget*>(remoteWarning_) })
         form_->setRowVisible(w, remote);
+    form_->setRowVisible(httpWarning_, remote && remote::sendsKeyInClear(remoteUrl_->text(), remoteKey_->text()));
     form_->setRowVisible(remoteStatus_, remote && !remoteStatus_->text().isEmpty());
     thinking_->setEnabled(!remote);
+}
+
+void SettingsDialog::updateHttpWarning()
+{
+    form_->setRowVisible(httpWarning_, remoteRadio_->isChecked()
+                                           && remote::sendsKeyInClear(remoteUrl_->text(), remoteKey_->text()));
+}
+
+// OK : si la clé API partirait en clair, on demande confirmation (un serveur du réseau du laboratoire en http://
+// peut être un choix volontaire) ; « Non » laisse la boîte ouverte pour corriger l'adresse.
+void SettingsDialog::done(int r)
+{
+    if (r == QDialog::Accepted && remoteRadio_->isChecked()
+        && remote::sendsKeyInClear(remoteUrl_->text(), remoteKey_->text())) {
+        const QString host = remote::hostOf(remoteUrl_->text());
+        const auto ans = QMessageBox::warning(
+            this, tr("Connexion non chiffrée"),
+            tr("L'adresse « %1 » utilise http:// : la clé API et vos questions circuleraient en clair sur le réseau "
+               "et pourraient être lues par un tiers.\n\nEnregistrer quand même ?").arg(host),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (ans != QMessageBox::Yes) { remoteUrl_->setFocus(); return; }
+    }
+    QDialog::done(r);
 }
 
 // GET {Base URL}/models : vérifie l'adresse et la clé, et propose les noms de modèles disponibles.

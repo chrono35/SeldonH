@@ -26,6 +26,7 @@ SOURCES += \
     src/ui/HelpView.cpp \
     src/ui/HistoryPanel.cpp \
     src/core/MathText.cpp \
+    src/core/SecretStore.cpp \
     src/ui/SettingsDialog.cpp
 
 HEADERS += \
@@ -45,6 +46,7 @@ HEADERS += \
     src/ui/HelpView.h \
     src/ui/HistoryPanel.h \
     src/core/MathText.h \
+    src/core/SecretStore.h \
     src/ui/InputEdit.h \
     src/ui/SettingsDialog.h
 
@@ -64,6 +66,9 @@ CONFIG += embed_translations
 
 # Moteur d'inférence llama.cpp (voir scripts/build_llama.sh)
 include(llama.pri)
+
+# Trousseau du système pour la clé API (voir scripts/build_qtkeychain.sh)
+include(qtkeychain.pri)
 
 # Default rules for deployment.
 qnx: target.path = /tmp/$${TARGET}/bin

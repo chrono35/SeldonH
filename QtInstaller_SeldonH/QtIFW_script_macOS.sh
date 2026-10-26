@@ -8,7 +8,7 @@
 #
 #  A lancer avec bash (pas sh) :
 #     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh             installeur complet + .dmg
-#     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh rebuild     force la recompilation de llama.cpp
+#     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh rebuild     force la recompilation de llama.cpp et de QtKeychain
 #     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh nomodel     installeur sans modèle
 #     bash QtInstaller_SeldonH/QtIFW_script_macOS.sh nodmg       pas de .dmg (installeur .app seul)
 #     MODEL=Qwen3.5-4B-Q3_K_M.gguf bash QtInstaller_SeldonH/QtIFW_script_macOS.sh   autre modèle
@@ -16,6 +16,7 @@
 #  Un seul installeur pour tous les Mac : binaire universel avec Metal (GPU) et CPU. Sur Apple Silicon,
 #  SeldonH utilise le GPU ; sur un Mac Intel il reste par défaut sur le processeur (AppSettings :
 #  nGpuLayers = 0), Metal n'y étant pas fiable. Rien à compiler pour l'utilisateur.
+#  Clé API : QtKeychain, lié en statique (Trousseau macOS) : rien à ajouter au bundle.
 #
 #  Ordre (une modification du bundle après la signature invalide celle-ci) :
 #     copie du bundle -> macdeployqt -> Info.plist -> signature de l'intérieur vers l'extérieur -> vérifications
@@ -61,6 +62,7 @@ DATA="$PKGS/seldonh.app/data"
 MODEL_DIR="$PKGS/seldonh.model/data/models"
 BUILD_DIR="$ROOT/build/macOS-Release"
 LLAMA="$ROOT/third_party/llama-install"
+KEYCHAIN="$ROOT/third_party/qtkeychain-install"
 STAGING="$INST/staging"
 BUNDLE="$STAGING/SeldonH.app"
 EXE="$BUNDLE/Contents/MacOS/SeldonH"
@@ -92,6 +94,14 @@ if [ "$REBUILD" = 1 ] || [ ! -f "$LLAMA/lib/libllama.a" ] || [ "$LLAMA_VARIANT" 
     METAL=$METAL ARCHS="arm64;x86_64" bash "$ROOT/scripts/build_llama.sh"
 else
     echo "   déjà compilé (metal-$METAL, universel)"
+fi
+
+echo "➡️  2b - QtKeychain (Trousseau macOS, statique, universel)"
+if [ "$REBUILD" = 1 ] || [ ! -f "$KEYCHAIN/lib/libqt6keychain.a" ] || ! is_universal "$KEYCHAIN/lib/libqt6keychain.a"; then
+    echo "   compilation de QtKeychain"
+    QTDIR="$QT_ROOT" ARCHS="arm64;x86_64" bash "$ROOT/scripts/build_qtkeychain.sh"
+else
+    echo "   déjà compilé (universel)"
 fi
 
 echo "➡️  3 - Compilation de SeldonH (Release universel) dans $BUILD_DIR"
@@ -156,6 +166,7 @@ rm -rf "$DATA"
 mkdir -p "$DATA"
 ditto "$BUNDLE" "$DATA/SeldonH.app"
 cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh.app/meta/llama.cpp-LICENSE.txt"
+cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh.app/meta/qtkeychain-LICENSE.txt"
 
 echo "➡️  10 - Composant seldonh.model"
 EXCLUDE=()
@@ -219,6 +230,11 @@ Sur macOS 14 et antérieur, clic droit sur l'installeur > Ouvrir suffit généra
 
 SeldonH est installé dans /Applications/SeldonH (avec le modèle de langage dans le
 sous-dossier models). Si macOS refuse aussi d'ouvrir SeldonH, utilisez la même procédure.
+
+Clé API d'un modèle distant : SeldonH la range dans le trousseau de macOS. À la première
+utilisation, et après chaque mise à jour de SeldonH, macOS peut demander si SeldonH peut
+utiliser votre trousseau : saisissez votre mot de passe de session et cliquez sur
+« Toujours autoriser ».
 LISEZMOI
     hdiutil create -volname "$INSTALLER" -srcfolder "$DMG_DIR" -ov -format UDZO "$DMG"
     rm -rf "$DMG_DIR"

@@ -18,6 +18,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QComboBox>
+#include <QLabel>
 #include <QLineEdit>
 #include <QRadioButton>
 #include "../src/ui/ChatView.h"
@@ -1620,6 +1621,18 @@ private slots:
         QCOMPARE(modelsUrl("https://api.mistral.ai/v1/").toString(), QString("https://api.mistral.ai/v1/models"));
         QCOMPARE(hostOf("https://api.openai.com/v1"), QString("api.openai.com"));
 
+        // clé API envoyée en clair : http:// vers une autre machine, avec une clé
+        QVERIFY(sendsKeyInClear("http://192.168.1.20:8080/v1", "k"));
+        QVERIFY(sendsKeyInClear("http://serveur-labo.example.org/v1", "k"));
+        QVERIFY(!sendsKeyInClear("http://serveur-labo.example.org/v1", ""));     // sans clé : rien à protéger
+        QVERIFY(!sendsKeyInClear("http://serveur-labo.example.org/v1", "  "));
+        QVERIFY(!sendsKeyInClear("https://api.openai.com/v1", "k"));
+        QVERIFY(!sendsKeyInClear("api.openai.com/v1", "k"));                     // sans schéma : https:// ajouté
+        QVERIFY(!sendsKeyInClear("http://localhost:11434/v1", "k"));            // reste sur cet ordinateur
+        QVERIFY(!sendsKeyInClear("HTTP://LocalHost:1234", "k"));
+        QVERIFY(!sendsKeyInClear("http://127.0.0.1:1234/v1", "k"));
+        QVERIFY(!sendsKeyInClear("http://[::1]:8080/v1", "k"));
+
         seldon::RemoteConfig cfg{ "https://x/v1", "k", "gpt-4o-mini" };
         QVERIFY(cfg.isValid());
         const seldon::RemoteConfig noUrl{ "", "k", "m" }, noModel{ "u", "k", "" };
@@ -2053,6 +2066,37 @@ private slots:
             if (le->text() == s.modelPath) QVERIFY(le->minimumWidth() >= 380);
         dlg.findChildren<QRadioButton*>().first()->setChecked(true);         // « Modèle local »
         QVERIFY(!dlg.settings().useRemote);
+    }
+
+    // Préférences : avertissement « clé en clair » sous la Base URL, mis à jour pendant la saisie.
+    void settingsDialogHttpWarning()
+    {
+        seldon::AppSettings s;
+        s.useRemote = true; s.remoteUrl = "https://api.example.org/v1"; s.remoteKey = "k"; s.remoteModel = "m1";
+        seldon::SettingsDialog dlg(s);
+        dlg.show();
+        auto* warn = dlg.findChild<QLabel*>("httpWarning");
+        auto* store = dlg.findChild<QLabel*>("keyStore");
+        QVERIFY(warn && store);
+        QVERIFY(!warn->isVisible());
+        QVERIFY(store->isVisible() && !store->text().isEmpty());
+        QLineEdit* url = nullptr;
+        QLineEdit* key = nullptr;
+        for (auto* le : dlg.findChildren<QLineEdit*>()) {
+            if (le->text() == s.remoteUrl) url = le;
+            if (le->echoMode() == QLineEdit::Password) key = le;
+        }
+        QVERIFY(url && key);
+        url->setText("http://192.168.1.20:8080/v1");
+        QVERIFY(warn->isVisible());
+        key->clear();                                                       // sans clé : plus d'avertissement
+        QVERIFY(!warn->isVisible());
+        key->setText("k");
+        url->setText("http://localhost:11434/v1");
+        QVERIFY(!warn->isVisible());
+        url->setText("http://192.168.1.20:8080/v1");
+        dlg.findChildren<QRadioButton*>().first()->setChecked(true);         // « Modèle local » : lignes distantes masquées
+        QVERIFY(!warn->isVisible() && !store->isVisible());
     }
 
     void parseDetails()

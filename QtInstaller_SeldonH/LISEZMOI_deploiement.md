@@ -2,7 +2,7 @@
 
 **Un installeur par système**, valable pour toutes les machines (avec ou sans GPU) : l'utilisateur n'a rien à compiler.
 Même organisation que `ChronoModel/QtInstaller_ChronoModel`, mais chaque script fait tout :
-llama.cpp (si besoin) → compilation Release de SeldonH → bibliothèques Qt → modèle `.gguf` → `binarycreator`.
+llama.cpp et QtKeychain (si besoin) → compilation Release de SeldonH → bibliothèques Qt → modèle `.gguf` → `binarycreator`.
 
 | Système | Script | Résultat |
 |---|---|---|
@@ -24,9 +24,32 @@ Les chemins (Qt, MinGW, QtIFW), la version et le modèle sont en tête de chaque
 * **macOS** : binaire universel avec Metal ; GPU sur Apple Silicon, processeur sur Mac Intel (réglage par défaut).
 * Dans SeldonH : Préférences > « Utiliser le GPU » (activé par défaut, sauf Mac Intel).
 
+## Clé API : trousseau du système (QtKeychain)
+
+La clé API d'un modèle distant n'est pas enregistrée dans les réglages : `SecretStore` la range dans le trousseau
+du système grâce à [QtKeychain](https://github.com/frankosterfeld/qtkeychain) (licence BSD 2 clauses, version 0.17.0),
+compilé par `scripts/build_qtkeychain.sh` (macOS, Linux) ou `scripts\build_qtkeychain_win.bat` (Windows) dans
+`third_party/qtkeychain-install`, puis lié par `qtkeychain.pri`. Les scripts QtIFW le compilent s'il est absent
+(argument `rebuild` : recompilé avec llama.cpp).
+
+| Système | Trousseau | Livré dans l'installeur |
+|---|---|---|
+| macOS | Trousseau macOS | rien (bibliothèque statique, universelle) |
+| Windows | Gestionnaire d'identifiants | `libqt6keychain.dll` à côté de `SeldonH.exe` |
+| Linux | Secret Service (GNOME Keyring, KWallet, KeePassXC…) | `lib/libqt6keychain.so*` (+ `libQt6DBus`) ; libsecret reste celle du système |
+
+* Sans trousseau joignable (Linux en session minimale ou par SSH), la clé est enregistrée en clair dans les réglages
+  et les Préférences l'indiquent sous le champ « Clé API ».
+* Si `third_party/qtkeychain-install` manque à la compilation, `qmake` affiche un avertissement et SeldonH est
+  construit sans trousseau (clé en clair, signalée de la même façon).
+* macOS : la signature étant ad hoc, macOS redemande l'accès au trousseau après chaque mise à jour de SeldonH
+  (« Toujours autoriser ») ; le LISEZMOI du `.dmg` le mentionne. Une signature Developer ID supprimerait cette demande.
+* Préférences : une Base URL en `http://` vers une autre machine que celle-ci, avec une clé, affiche un avertissement
+  et demande confirmation à l'enregistrement (la clé circulerait en clair).
+
 ## Contenu de l'installeur
 
-* `seldonh.app` (obligatoire) : exécutable, Qt, llama.cpp, raccourcis (menu Démarrer + Bureau sous Windows,
+* `seldonh.app` (obligatoire) : exécutable, Qt, llama.cpp, QtKeychain, raccourcis (menu Démarrer + Bureau sous Windows,
   entrée de menu `~/.local/share/applications` sous Linux).
 * `seldonh.model` (coché par défaut, décochable) : `Qwen3.5-4B-Q4_K_M.gguf` dans `models/`.
   Autre modèle : `MODEL=Qwen3.5-4B-Q3_K_M.gguf`.
@@ -48,7 +71,7 @@ compilation universelle (`QMAKE_APPLE_DEVICE_ARCHS="x86_64 arm64"`, llama.cpp un
 * Windows : Qt 6.11.x MinGW 64, `C:\Qt\Tools\mingw1310_64`, CMake du kit Qt, git, QtIFW 4.10+,
   **Vulkan SDK** (https://vulkan.lunarg.com, définit `VULKAN_SDK`).
 * Debian : Qt 6.11.x `gcc_64`, QtIFW,
-  `sudo apt install build-essential cmake git patchelf libgl1-mesa-dev libxkbcommon-dev libvulkan-dev glslc spirv-headers`.
+  `sudo apt install build-essential cmake git patchelf libgl1-mesa-dev libxkbcommon-dev libvulkan-dev glslc spirv-headers pkg-config libsecret-1-dev`.
   Compiler sur la **plus ancienne** Debian visée (glibc). Poste cible : `libxcb-cursor0`.
 * macOS : Qt 6.11.x universel, Xcode, CMake, QtIFW 4.11.
 * Sans Vulkan SDK : `VULKAN=OFF` avant le script (installeur CPU seulement).

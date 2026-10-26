@@ -24,11 +24,15 @@ public:
     explicit SettingsDialog(const AppSettings& s, QWidget* parent = nullptr);
     AppSettings settings() const;
 
+public slots:
+    void done(int r) override;     // OK : confirmation si la clé API partirait en clair (http://)
+
 private slots:
     void browseModel();
     void browseSkills();
     void updateBackendRows();
     void listRemoteModels();
+    void updateHttpWarning();
 
 private:
     AppSettings     base_;
@@ -45,6 +49,9 @@ private:
     QLineEdit*      remoteUrl_;
     QLineEdit*      remoteKey_;
     QCheckBox*      showKey_;
+    QPushButton*    clearKey_;
+    QLabel*         keyStore_;     // où la clé est conservée (trousseau, ou en clair)
+    QLabel*         httpWarning_;  // clé envoyée en clair (http:// vers une autre machine)
     QComboBox*      remoteModel_;
     QPushButton*    listBtn_;
     QCheckBox*      remoteTools_;
