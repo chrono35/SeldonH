@@ -98,7 +98,24 @@ static int selftest(const std::string& model, int ctx)
     std::string a2 = runTurn(core, chat, "Et celle de l'abandon ?", sp, s2, false);
     CHECK(s2.generated > 0, "tour 2 : des tokens générés");
     CHECK(s2.reusedTokens > 5, "tour 2 : le préfixe du cache KV est réutilisé");
-    std::printf("  tour 2 : prompt=%d, réutilisés=%d\n", s2.promptTokens, s2.reusedTokens);
+    std::printf("  tour 2 : prompt=%d, réutilisés=%d%s\n", s2.promptTokens, s2.reusedTokens,
+                s2.fromCheckpoint ? " (point de reprise)" : "");
+
+    // 2 bis. Modèle récurrent / hybride (Qwen3.5…) : le cache ne peut pas être raccourci, on repart d'un point de
+    // reprise. On modifie le message utilisateur précédent, comme SeldonH qui retire le rappel du prompt utilisateur.
+    if (core.usesCheckpoints()) {
+        std::printf("  modèle récurrent/hybride : %zu point(s) de reprise, %.1f Mo\n",
+                    core.checkpointCount(), double(core.checkpointBytes()) / 1048576.0);
+        CHECK(s2.fromCheckpoint, "tour 2 : reprise depuis un point de reprise");
+        chat[chat.size() - 2].content += " [rappel retiré]";
+        GenStats s2b;
+        runTurn(core, chat, "Et celle de la reconstruction ?", sp, s2b, false);
+        std::printf("  tour 3 : prompt=%d, réutilisés=%d%s\n", s2b.promptTokens, s2b.reusedTokens,
+                    s2b.fromCheckpoint ? " (point de reprise)" : "");
+        CHECK(s2b.generated > 0 && s2b.fromCheckpoint && s2b.reusedTokens > s2.reusedTokens,
+              "tour 3 : message précédent modifié, reprise au début de ce message");
+        chat.resize(chat.size() - 2);
+    }
 
     // 3. Arrêt demandé par le consommateur
     GenStats s3; int n = 0; std::string e3;

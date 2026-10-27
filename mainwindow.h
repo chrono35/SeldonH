@@ -30,6 +30,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #define MAINWINDOW_H
 
 #include <QDateTime>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QString>
@@ -39,6 +40,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QPointer>
 
 #include "src/core/AppSettings.h"
+#include "src/core/Calculator.h"
 #include "src/core/ConversationStore.h"
 #include "src/llm/LlmEngine.h"
 #include "src/llm/RemoteApi.h"
@@ -57,6 +59,7 @@ namespace seldon {
 class RemoteEngine;
 class ChatView;
 class FigurePanel;
+class ChrSceneWidget;
 class HelpView;
 class HistoryPanel;
 class CollapseStrip;
@@ -129,6 +132,8 @@ private:
         int         truncation = 0;     // GenStats::Truncation de la dernière génération (réponse coupée : bouton « Continuer »)
         int         tokenLimit = 0;
         QString     truncationDetail;
+        bool        drewModel = false;  // SeldonH a dessiné le modèle pour ce tour (bloc plot du modèle de langage ignoré)
+        QJsonObject prompt;             // dernier prompt envoyé pour ce tour (voir promptSnapshot)
     };
 
     void buildUi();
@@ -144,9 +149,26 @@ private:
     void continueAnswer(int turn);              // reprend une réponse coupée (limite de tokens, contexte, flux interrompu)
     QString truncationNotice(const Turn& t) const;
     QString shownAnswer(const QString& answer) const;   // bloc de modèle remplacé par un résumé (JSON seulement sur demande)
-    QVector<seldon::ChatMessage> buildChat() const;
+    // Messages envoyés au modèle. `refs` (facultatif) : les mêmes messages sous forme compacte, pour l'instantané du prompt.
+    QVector<seldon::ChatMessage> buildChat(QJsonArray* refs = nullptr) const;
+    // Instantané de ce qui est envoyé au modèle : date, version, moteur, paramètres d'échantillonnage, messages (renvois).
+    QJsonObject promptSnapshot(const QJsonArray& messages, const seldon::SamplingParams& sp) const;
+    // Messages complets d'un instantané (renvois remplacés par le texte des tours).
+    QJsonArray expandPromptMessages(const QJsonArray& messages) const;
+    void relaunchTurn(int turn);          // « ↻ Relancer » : redemande la question de ce tour, avec le même prompt
+    void exportPrompt(int turn);          // « Exporter le prompt » : JSON (reproductibilité) ou Markdown (lecture)
+    // Ce qu'a donné l'utilisateur dans la conversation : ses questions et le texte de ses fichiers joints (vérification
+    // croisée d'un modèle écrit par le modèle de langage).
+    QString userSourceText() const;
     QStringList recentSkillIds(int turns) const;
     void saveChrFromTurn(int turn);
+    // Dessine un .chr dans le panneau : scène des Events et, s'il a des phases, scène des phases. `inChat` : avis et
+    // vignettes cliquables ajoutés à la discussion (et à l'historique).
+    void showChrScenes(const QJsonObject& chr, const QString& name, bool inChat);
+    // Ouvre (ou met à jour) l'onglet d'une scène ; `kind` : « events » ou « phases ».
+    void showChrScene(const QJsonObject& chr, const QString& kind, const QString& title);
+    // Vignette cliquable d'une scène dans la discussion (`fig` : {"chr_scene", "chr", "title"}).
+    void addSceneFigure(const QJsonObject& fig);
     void applyPlotBlocks(const QString& answer);
     void activateRemote();                     // configure et active le modèle distant (Préférences)
     bool remoteActive() const { return settings_.useRemote; }
@@ -195,7 +217,10 @@ private:
     QLabel*              statsLabel_ = nullptr;
     QProgressBar*        loadBar_ = nullptr;
     QSplitter*           splitter_ = nullptr;
-
+    QSplitter*           inputSplitter_ = nullptr;      // [conversation | saisie], saisie redimensionnable
+    QToolButton*         newConvBtn_ = nullptr;         // barre de titre : nouvelle conversation
+    QLabel*              convTitle_ = nullptr;          // barre de titre : titre de la conversation en cours
+    void updateConvTitle();
     seldon::ConversationStore store_{ seldon::ConversationStore::defaultDir() };
     QVector<seldon::ConversationInfo> historyItems_;
     QString              convId_;              // vide tant que rien n'a été demandé
@@ -217,6 +242,12 @@ private:
     bool                 generating_ = false;
     QString              attachName_, attachText_;
     bool                 attachChronoResults_ = false;   // pièce jointe = résultats de ChronoModel (résumé extrait)
+    seldon::Calculator   calc_;                           // calculatrice locale (variables de la conversation)
+    QString calcHtml(const QVector<seldon::Calculator::Line>& lines) const;
+    QJsonObject          attachChr_;                      // pièce jointe = projet .chr (dessinable)
+    QJsonObject          lastChr_;                        // dernier .chr de la conversation (joint ou créé)
+    QString              lastChrTitle_;
+    QPointer<seldon::ChrSceneWidget> eventScene_, phaseScene_;   // onglets des scènes (nuls si fermés)
     QString              modelDesc_;
     seldon::ModelInfo    modelInfo_;            // modèle local chargé (pour « Optimiser pour ce modèle »)
     double               lastLocalTps_ = 0;     // vitesse de génération mesurée sur la dernière réponse locale

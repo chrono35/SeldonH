@@ -1,5 +1,10 @@
 QT += widgets network svg
 
+# Version de l'application (aussi celle des paquets de l'installateur, QtInstaller_SeldonH/*/meta/package.xml).
+# Lue par QCoreApplication::applicationVersion() : export du prompt, à propos.
+VERSION = 1.0.0
+DEFINES += APP_VERSION=\\\"$$VERSION\\\"
+
 CONFIG += c++17
 
 # You can make your code fail to compile if it uses deprecated APIs.
@@ -14,6 +19,7 @@ SOURCES += \
     main.cpp \
     mainwindow.cpp \
     src/core/ChrBuilder.cpp \
+    src/core/Calculator.cpp \
     src/core/AutoTune.cpp \
     src/core/ChronoResults.cpp \
     src/core/ConversationStore.cpp \
@@ -24,6 +30,7 @@ SOURCES += \
     src/skills/SkillManager.cpp \
     src/ui/ChatView.cpp \
     src/ui/FigurePanel.cpp \
+    src/ui/ChrScene.cpp \
     src/ui/HelpView.cpp \
     src/ui/HistoryPanel.cpp \
     src/core/MathText.cpp \
@@ -36,6 +43,7 @@ HEADERS += \
     src/core/AutoTune.h \
     src/core/ChatText.h \
     src/core/ChrBuilder.h \
+    src/core/Calculator.h \
     src/core/ChronoResults.h \
     src/core/ConversationStore.h \
     src/llm/LlmCore.h \
@@ -45,6 +53,7 @@ HEADERS += \
     src/skills/SkillManager.h \
     src/ui/ChatView.h \
     src/ui/FigurePanel.h \
+    src/ui/ChrScene.h \
     src/ui/HelpView.h \
     src/ui/HistoryPanel.h \
     src/core/MathText.h \

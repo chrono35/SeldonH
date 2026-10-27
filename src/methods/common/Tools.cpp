@@ -73,8 +73,8 @@ QVector<ToolDef> build()
                         { "error", num(QStringLiteral("Erreur (écart-type) de la mesure, en années, strictement positive (ex. 30).")) },
                         { "curve", str(QStringLiteral("Courbe de calibration. Défaut : intcal20 (atmosphère, hémisphère nord) ; shcal20 pour le sud ; "
                                                       "marine20 pour un échantillon marin. Disponibles : %1.").arg(names("c14"))) },
-                        { "deltaR", num(QStringLiteral("Effet réservoir régional ΔR, en années (échantillon marin seulement).")) },
-                        { "deltaRerr", num(QStringLiteral("Erreur sur ΔR, en années (avec deltaR).")) } },
+                        { "delta_r", num(QStringLiteral("Effet réservoir régional ΔR, en années (échantillon marin seulement).")) },
+                        { "delta_r_error", num(QStringLiteral("Erreur sur ΔR, en années (avec delta_r).")) } },
                       { "age", "error" }),
                "c14" });
 
@@ -94,8 +94,8 @@ QVector<ToolDef> build()
                               "avant l'année de mesure, avec son erreur. L'année de mesure est obligatoire : demande-la à l'utilisateur si elle manque."),
                schema({ { "age", num(QStringLiteral("Âge de luminescence, en années avant l'année de mesure.")) },
                         { "error", num(QStringLiteral("Erreur (écart-type) de l'âge, en années, strictement positive.")) },
-                        { "refYear", num(QStringLiteral("Année de la mesure (ex. 2015).")) } },
-                      { "age", "error", "refYear" }),
+                        { "ref_year", num(QStringLiteral("Année de la mesure (ex. 2015).")) } },
+                      { "age", "error", "ref_year" }),
                "tl" });
 
     v.append({ "densite_gauss",
@@ -125,10 +125,10 @@ QVector<ToolDef> build()
                         { "dec", num(QStringLiteral("Déclinaison, en degrés (si process contient D).")) },
                         { "alpha95", num(QStringLiteral("Cône de confiance α95, en degrés, strictement positif (si I ou D).")) },
                         { "field", num(QStringLiteral("Intensité du champ, en µT (si process contient F).")) },
-                        { "errorF", num(QStringLiteral("Erreur sur l'intensité, en µT, strictement positive (si F).")) },
-                        { "curveI", str(QStringLiteral("Courbe d'inclinaison (défaut gal2002sph2014_i ; bulgaria_i pour la Bulgarie). Disponibles : %1.").arg(names("am"))) },
-                        { "curveD", str(QStringLiteral("Courbe de déclinaison (défaut gal2002sph2014_d ; bulgaria_d).")) },
-                        { "curveF", str(QStringLiteral("Courbe d'intensité (défaut gwh2013uni_f ; bulgaria_f).")) } },
+                        { "error_f", num(QStringLiteral("Erreur sur l'intensité, en µT, strictement positive (si F).")) },
+                        { "curve_i", str(QStringLiteral("Courbe d'inclinaison (défaut gal2002sph2014_i ; bulgaria_i pour la Bulgarie). Disponibles : %1.").arg(names("am"))) },
+                        { "curve_d", str(QStringLiteral("Courbe de déclinaison (défaut gal2002sph2014_d ; bulgaria_d).")) },
+                        { "curve_f", str(QStringLiteral("Courbe d'intensité (défaut gwh2013uni_f ; bulgaria_f).")) } },
                       { "process" }),
                "am" });
 
@@ -275,7 +275,7 @@ QStringList missing(const ToolDef& def, const QJsonObject& a)
         if (p.contains('D') && !a.contains("dec")) m << "dec";
         if (p.contains('F')) {
             if (!a.contains("field")) m << "field";
-            if (!a.contains("errorF")) m << "errorF";
+            if (!a.contains("error_f")) m << "error_f";
         }
     }
     return m;
@@ -382,8 +382,8 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
 
     QJsonObject req = args;
     req["method"] = def->methodId;
-    if (def->methodId == "c14" && req.contains("deltaR")) req["hasDeltaR"] = true;
-    if (def->methodId == "am") req["steps"] = 500;
+    if (def->methodId == "c14" && req.contains("delta_r")) req["has_delta_r"] = true;
+    if (def->methodId == "am") req["integration_steps"] = 500;
 
     r.run = MethodRunner::run({ req }, format);
     r.executed = r.run.found;

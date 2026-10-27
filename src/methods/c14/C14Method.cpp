@@ -105,9 +105,9 @@ QVector<QJsonObject> C14Method::parse(const QString& question) const
         o["error"] = ve.error;
         o["curve"] = curve;
         if (dm.hasMatch()) {
-            o["deltaR"] = text::toNumber(dm.captured(1));
-            o["deltaRerr"] = dm.captured(2).isEmpty() ? 0.0 : text::toNumber(dm.captured(2));
-            o["hasDeltaR"] = true;
+            o["delta_r"] = text::toNumber(dm.captured(1));
+            o["delta_r_error"] = dm.captured(2).isEmpty() ? 0.0 : text::toNumber(dm.captured(2));
+            o["has_delta_r"] = true;
         }
         out << o;
     }
@@ -118,8 +118,8 @@ MethodResult C14Method::compute(const QJsonObject& p) const
 {
     const double age = p.value("age").toDouble();
     const double error = p.value("error").toDouble();
-    const double dR = p.value("deltaR").toDouble();
-    const double dRerr = p.value("deltaRerr").toDouble();
+    const double dR = p.value("delta_r").toDouble();
+    const double dRerr = p.value("delta_r_error").toDouble();
     const QString name = p.value("curve").toString("intcal20").toLower();
 
     if (!(error > 0.0)) return MethodResult::failure("l'erreur doit être strictement positive");
@@ -140,7 +140,7 @@ MethodResult C14Method::compute(const QJsonObject& p) const
 
     const Density d = buildDensity(c->tmin(), c->tmax(), c->minStep / 3.0, L, true);
     QStringList warn;
-    if (name.startsWith("marine") && !p.value("hasDeltaR").toBool())
+    if (name.startsWith("marine") && !p.value("has_delta_r").toBool())
         warn << "courbe marine sans ΔR : la correction réservoir régionale n'est pas précisée (ΔR = 0 par défaut)";
     if (age < 0) warn << "âge conventionnel négatif : échantillon post-bombe, utiliser plutôt la méthode F14C";
     return MethodResult::fromDensity(d, warn, true);
@@ -157,8 +157,8 @@ QString C14Method::describe(const QJsonObject& p) const
     QString s = QStringLiteral("14C : %1 ± %2 BP — %3")
                     .arg(n(p.value("age").toDouble()), n(p.value("error").toDouble()),
                          curveTitle(p.value("curve").toString("intcal20")));
-    if (p.value("hasDeltaR").toBool())
-        s += QStringLiteral(", ΔR = %1 ± %2").arg(n(p.value("deltaR").toDouble()), n(p.value("deltaRerr").toDouble()));
+    if (p.value("has_delta_r").toBool())
+        s += QStringLiteral(", ΔR = %1 ± %2").arg(n(p.value("delta_r").toDouble()), n(p.value("delta_r_error").toDouble()));
     return s;
 }
 

@@ -38,6 +38,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QJsonObject>
 #include "../src/ui/FigurePanel.h"
 #include "../src/ui/HelpView.h"
+#include "../src/ui/ChrScene.h"
 #include "../src/ui/SettingsDialog.h"
 #include "../src/llm/RemoteEngine.h"
 #include <QHash>
@@ -54,6 +55,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "../src/core/AutoTune.h"
 #include "../src/core/ChatText.h"
 #include "../src/core/ChrBuilder.h"
+#include "../src/core/Calculator.h"
 #include "../src/core/ChronoResults.h"
 #include "../src/core/ConversationStore.h"
 #include "../src/ui/HistoryPanel.h"
@@ -302,6 +304,508 @@ private slots:
 
     // Les clés écrites doivent être celles des projets ChronoModel 4.0 réels (relevées dans trois fichiers :
     // un modèle TL/OSL + archéomagnétisme, un modèle à un événement gaussien, un modèle multi-événements avec contraintes).
+    // Demande réelle (test_strati_corrige.chr, corrigé à la main dans ChronoModel) : couleurs, diagramme stratigraphique,
+    // référence AM prise pour une courbe.
+    void chrStratigraphieCouleurs()
+    {
+        const QString spec = R"({"name":"test strati","events":[
+          {"name":"US10","dates":[{"type":"c14","age":6589,"error":30},{"type":"c14","age":5879,"error":35}]},
+          {"name":"US6","color":"bleu","dates":[{"type":"c14","name":"Ly-12345","age":6458,"error":30}]},
+          {"name":"US5","dates":[{"type":"c14","age":6455,"error":40}]},
+          {"name":"US3","dates":[{"type":"am","process":"I","inc":65,"alpha95":1.2,"curve_i":"Rennes2025"}]},
+          {"name":"US7","type":"bound","known_fixed":-40,"color":"rouge"},
+          {"name":"US1","color":"orange","dates":[{"type":"tl","name":"Bdx-478","age":3500,"error":45,"ref_year":2010}]}],
+          "event_constraints":[["US10","au-dessus de","US6"],["US3","au dessus de","US5"],["US6","en dessous de","US10"],
+            ["US6","en dessous de","US7"],["US7","au-dessus de","US3"],["US1","en dessous de","US6"],["US1","en dessous de","US5"]]})";
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        QHash<QString, QJsonObject> ev;
+        for (const QJsonValue& v : r.chr["events"].toArray()) ev[v.toObject()["name"].toString()] = v.toObject();
+        auto rgb = [&](const QString& n) { const QJsonObject& o = ev[n];
+            return QString("%1,%2,%3").arg(o["red"].toInt()).arg(o["green"].toInt()).arg(o["blue"].toInt()); };
+        QCOMPARE(rgb("US6"), QString("0,0,255"));
+        QCOMPARE(rgb("US7"), QString("255,19,12"));
+        QCOMPARE(rgb("US1"), QString("255,178,97"));
+        QCOMPARE(rgb("US10"), QString("71,112,76"));
+        QCOMPARE(ev["US6"]["dates"].toArray()[0].toObject()["red"].toInt(), 71);     // la date garde sa couleur
+        // 6 contraintes (le doublon US10/US6 est ignoré)
+        QCOMPARE(r.chr["events_constraints"].toArray().size(), 6);
+        // diagramme : plus récent en haut (y plus petit)
+        auto y = [&](const QString& n) { return ev[n]["item_y"].toDouble(); };
+        auto x = [&](const QString& n) { return ev[n]["item_x"].toDouble(); };
+        QVERIFY(y("US7") < y("US10"));
+        QCOMPARE(y("US10"), y("US3"));
+        QVERIFY(y("US10") < y("US6"));
+        QCOMPARE(y("US6"), y("US5"));
+        QVERIFY(y("US6") < y("US1"));
+        QVERIFY(x("US6") < x("US5"));
+        QVERIFY(x("US10") < x("US3"));
+        // « Rennes2025 » est la référence de l'échantillon, pas une courbe
+        const QJsonObject am = ev["US3"]["dates"].toArray()[0].toObject();
+        QCOMPARE(am["name"].toString(), QString("Rennes2025"));
+        QCOMPARE(am["data"].toObject()["refI_curve"].toString(), QString("gal2002sph2014_i.ref"));
+        // couleurs : formes acceptées
+        int cr = 0, cg = 0, cb = 0;
+        const ChrResult c = ChrBuilder::build(QJsonDocument::fromJson(R"({"events":[
+          {"name":"A","color":"en vert clair","dates":[{"type":"gauss","age":0,"error":10}]},
+          {"name":"B","color":[10,20,30],"dates":[{"type":"gauss","age":0,"error":10}]},
+          {"name":"C","color":"teal","dates":[{"type":"gauss","age":0,"error":10}]},
+          {"name":"D","color":"chartreuse fluo","dates":[{"type":"gauss","age":0,"error":10}]}]})").object());
+        QVERIFY(c.ok);
+        const QJsonArray ce = c.chr["events"].toArray();
+        cr = ce[1].toObject()["red"].toInt(); cg = ce[1].toObject()["green"].toInt(); cb = ce[1].toObject()["blue"].toInt();
+        QCOMPARE(QString("%1,%2,%3").arg(cr).arg(cg).arg(cb), QString("10,20,30"));
+        QVERIFY(ce[0].toObject()["green"].toInt() > 170);
+        QCOMPARE(ce[2].toObject()["blue"].toInt(), 128);
+        QCOMPARE(ce[3].toObject()["red"].toInt(), 71);
+        QVERIFY(!c.warnings.filter("chartreuse fluo").isEmpty());
+        // événements sans contrainte : grille à droite du diagramme, pas de chevauchement
+        QSet<QPair<int,int>> pos;
+        for (const QJsonValue& v : ce) pos.insert({ v.toObject()["item_x"].toInt(), v.toObject()["item_y"].toInt() });
+        QCOMPARE(pos.size(), 4);
+    }
+
+    // Courbe âge-profondeur : demande réelle (carotte Teilleul 2) ; format de référence teilleulc2.chr (ChronoModel 4.0).
+    void chrAgeProfondeur()
+    {
+        const QString ask = QStringLiteral("Je voudrais faire une courbe âge-profondeur pour la carotte Teilleul 2.\n"
+            "J'ai 9 niveaux, du haut vers le bas, chacun plus ancien que celui du dessus.\n"
+            "à 13 cm, Ly-8812 310 +- 50 BP\nà 21 cm, Ly-8813 590 +- 30 BP en bleu");
+        QVERIFY(MethodRunner::isModelRequest(ask));
+        QVERIFY(!MethodRunner::analyzeQuestion(ask).found);           // pas de calcul isolé des 14C
+        QVERIFY(MethodRunner::isModelRequest("Build an age-depth model for this core"));
+        QVERIFY(!MethodRunner::isModelRequest("Quelle est la profondeur de la fosse ?"));
+        {
+            SkillManager m; m.reload(QString());
+            QVERIFY(MethodRunner::isAgeDepthRequest(ask));
+            const auto sel = m.select(ask, AppSettings().skillChars, QStringList(),
+                                      { "03_chronomodel_creer_modele", "13_chronomodel_courbe_age_profondeur" });
+            QCOMPARE(sel.first().skill->id, QString("03_chronomodel_creer_modele"));
+            QCOMPARE(sel[1].skill->id, QString("13_chronomodel_courbe_age_profondeur"));
+            QVERIFY(sel[1].skill->body.contains("age_depth") && sel[1].skill->body.contains("dating name/code"));
+        }
+        const QString spec = R"({"name":"Teilleul 2","curve":"age_depth","events":[
+          {"name":"surface","depth":4,"depth_error":1,"node":true,"color":"vert","dates":[{"type":"unif","name":"surface","min":-1500,"max":2000}]},
+          {"name":"13 cm","depth":13,"depth_error":2,"dates":[{"type":"c14","name":"Ly-8812","age":310,"error":50,"curve":"intcal20"}]},
+          {"name":"21 cm","depth":21,"depth_error":2,"color":"bleu","dates":[{"type":"c14","name":"Ly-8813","age":590,"error":30}]},
+          {"name":"106 cm","depth":106,"depth_error":2,"color":"rouge","dates":[{"type":"c14","name":"Ly-8830","age":2930,"error":40}]}],
+          "event_constraints":[["106 cm","21 cm","13 cm","surface"]],
+          "settings":{"tmin":-1500,"tmax":2000,"step":1},"mcmc":{"anneal_recurrence":0}})";
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(spec.toUtf8()).object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        const QJsonObject cv = r.chr["curve"].toObject();
+        QCOMPARE(cv["process_type"].toInt(), 80);
+        QCOMPARE(cv["variance_type"].toInt(), 71);
+        QCOMPARE(cv["use_err_mesure"].toBool(), true);
+        QCOMPARE(cv["alpha"].toDouble(), 0.0);
+        const QJsonArray ev = r.chr["events"].toArray();
+        QCOMPARE(ev[0].toObject()["X_Inc_Depth"].toDouble(), -4.0);
+        QCOMPARE(ev[0].toObject()["sX_Alpha95_sDepth"].toDouble(), 1.0);
+        QCOMPARE(ev[0].toObject()["point_type"].toInt(), 1);
+        QCOMPARE(ev[1].toObject()["X_Inc_Depth"].toDouble(), -13.0);
+        QCOMPARE(ev[1].toObject()["point_type"].toInt(), 0);
+        QCOMPARE(ev[3].toObject()["sX_Alpha95_sDepth"].toDouble(), 2.0);
+        QCOMPARE(ev[3].toObject()["sampler"].toInt(), 1);
+        QCOMPARE(ev[2].toObject()["blue"].toInt(), 255);
+        QCOMPARE(r.chr["events_constraints"].toArray().size(), 3);
+        QCOMPARE(r.chr["mcmc"].toObject()["anneal_recurrence"].toInt(), 0);
+        // le plus profond (le plus ancien) en bas du diagramme
+        QVERIFY(ev[3].toObject()["item_y"].toDouble() > ev[0].toObject()["item_y"].toDouble());
+        // profondeurs sans « curve » : courbe âge-profondeur déduite ; profondeur manquante : erreur
+        const ChrResult d = ChrBuilder::build(QJsonDocument::fromJson(R"({"events":[
+          {"name":"A","depth":10,"depth_error":1,"dates":[{"type":"gauss","age":0,"error":10}]},
+          {"name":"B","dates":[{"type":"gauss","age":-100,"error":10}]}]})").object());
+        QCOMPARE(d.chr["curve"].toObject()["process_type"].toInt(), 80);
+        QVERIFY(!d.ok && d.errors.join(" ").contains("« B » n'a pas de profondeur"));
+        // formes approximatives d'un petit modèle : date à plat sur l'événement, « date » objet, « method » au lieu de « type »
+        const ChrResult f = ChrBuilder::build(QJsonDocument::fromJson(R"({"curve":"age_depth","events":[
+          {"name":"13 cm","depth":13,"depth_error":2,"type":"c14","ref":"Ly-8812","age":310,"error":50},
+          {"name":"21 cm","depth":21,"depth_error":2,"date":{"method":"c14","name":"Ly-8813","age":590,"error":30}},
+          {"name":"29 cm","depth":29,"depth_error":2,"dates":{"type":"c14","reference":"Ly-8814","age":1080,"error":70}}],
+          "event_constraints":[["29 cm","21 cm","13 cm"]]})").object());
+        QVERIFY2(f.ok, qPrintable(f.errors.join("; ")));
+        const QJsonArray fe = f.chr["events"].toArray();
+        QCOMPARE(fe[0].toObject()["type"].toInt(), 0);
+        QCOMPARE(fe[0].toObject()["dates"].toArray()[0].toObject()["name"].toString(), QString("Ly-8812"));
+        QCOMPARE(fe[0].toObject()["dates"].toArray()[0].toObject()["plugin_id"].toString(), QString("14c"));
+        QCOMPARE(fe[1].toObject()["dates"].toArray()[0].toObject()["name"].toString(), QString("Ly-8813"));
+        QCOMPARE(fe[2].toObject()["dates"].toArray()[0].toObject()["name"].toString(), QString("Ly-8814"));
+
+        // Tableau CSV de ChronoModel (exemple de l'aide) : demande de modèle, lignes conservées au clic
+        QString csvEx;
+        for (const auto& e : seldon::HelpView::examples(seldon::HelpView::sourceHtml()))
+            if (e.text.contains("teilleulc2.chr")) csvEx = e.text;
+        QVERIFY(!csvEx.isEmpty());
+        QCOMPARE(csvEx.count('\n'), 11);
+        QVERIFY(csvEx.contains("\nUnif;surface;1980;2000;;-4;1;\n"));
+        QVERIFY(MethodRunner::isModelRequest(csvEx) && MethodRunner::isAgeDepthRequest(csvEx));
+        QVERIFY(MethodRunner::isAgeDepthRequest("method;dating name/code;param a;param b\n14C;LY;310;50"));
+        QVERIFY(!MethodRunner::isAgeDepthRequest("C14 de 3560 +- 20 BP"));
+        QVERIFY(!MethodRunner::analyzeQuestion(csvEx).found);
+        QVERIFY(seldon::HelpView::toQtHtml(seldon::HelpView::sourceHtml()).contains("teilleulc2.chr%0Amethod"));
+        // spécification attendue du LLM pour ce tableau, sans contrainte : ordre des profondeurs ajouté
+        const ChrResult t = ChrBuilder::build(QJsonDocument::fromJson(R"({"name":"teilleulc2","curve":"age_depth","events":[
+          {"name":"teilleulc2-1","depth":4,"depth_error":1,"dates":[{"type":"unif","name":"surface","min":1980,"max":2000}]},
+          {"name":"teilleulc2-3","depth":21,"depth_error":2,"dates":[{"type":"c14","name":"LY","age":590,"error":30,"curve":"intcal20"}]},
+          {"name":"teilleulc2-2","depth":13,"depth_error":2,"dates":[{"type":"c14","name":"LY","age":310,"error":50,"curve":"intcal20"}]}]})").object());
+        QVERIFY2(t.ok, qPrintable(t.errors.join("; ")));
+        const QJsonArray tc = t.chr["events_constraints"].toArray();
+        QCOMPARE(tc.size(), 2);
+        // 21 cm (id 2) plus ancien que 13 cm (id 3), lui-même plus ancien que la surface (id 1)
+        QCOMPARE(tc[0].toObject()["bwd_id"].toInt(), 2); QCOMPARE(tc[0].toObject()["fwd_id"].toInt(), 3);
+        QCOMPARE(tc[1].toObject()["bwd_id"].toInt(), 3); QCOMPARE(tc[1].toObject()["fwd_id"].toInt(), 1);
+        // espacement : 450 entre deux niveaux successifs
+        const QJsonArray te = t.chr["events"].toArray();
+        QCOMPARE(te[1].toObject()["item_y"].toDouble() - te[2].toObject()["item_y"].toDouble(), 450.0);
+    }
+
+    // Calculatrice locale (niveaux 1 à 3 et conversions de dates)
+    void calculator()
+    {
+        using seldon::Calculator;
+        Calculator c;
+        auto one = [&](const QString& t) { const auto l = c.evaluate(t); return l.isEmpty() || !l.last().ok ? std::nan("") : l.last().value; };
+        QCOMPARE(one("2+3"), 5.0);
+        QCOMPARE(one("2+3*4"), 14.0);
+        QCOMPARE(one("(2+3)*4"), 20.0);
+        QCOMPARE(one("-2^2"), -4.0);
+        QCOMPARE(one("2^3^2"), 512.0);
+        QCOMPARE(one("2**10"), 1024.0);
+        QCOMPARE(one("3²"), 9.0);
+        QCOMPARE(one("1,5 * 2"), 3.0);
+        QCOMPARE(one("7 ÷ 2"), 3.5);
+        QCOMPARE(one("2e3 + 1"), 2001.0);
+        QCOMPARE(one("(1950 - 3560) * 1,03"), -1658.3);
+        QCOMPARE(one("sqrt(30^2 + 40^2)"), 50.0);
+        QCOMPARE(one("max(1, 7; 3)"), 7.0);                // « 1, 7 » (espace) : séparateur
+        // virgule décimale quand les arguments sont séparés par « ; » (demande réelle : moyenne(15,6;12) donnait 11)
+        QCOMPARE(one("moyenne(15,6;12)"), 13.8);
+        QCOMPARE(one("moyenne(15,6; 12,4)"), 14.0);
+        QCOMPARE(one("max(1,5)"), 5.0);                    // sans « ; » : la virgule sépare
+        QCOMPARE(one("min(2,5; sqrt(4))"), 2.0);
+        QCOMPARE(one("round(15,678; 1)"), 15.7);
+        QCOMPARE(one("moyenne(max(1,5); 3)"), 4.0);        // chaque appel a sa propre règle
+        QCOMPARE(one("(1,5 + 1) * 2"), 5.0);
+        QCOMPARE(one("min(2.5; -1)"), -1.0);
+        QCOMPARE(one("round(1950/7; 2)"), 278.57);
+        QVERIFY(std::abs(one("sin(30)") - 0.5) < 1e-12);           // degrés
+        QVERIFY(std::abs(one("asin(sin(65))") - 65) < 1e-9);
+        QVERIFY(std::abs(one("sinr(pi/6)") - 0.5) < 1e-12);
+        QVERIFY(std::abs(one("atan2(1; 1)") - 45) < 1e-12);
+        QVERIFY(std::abs(one("ln(e)") - 1) < 1e-15);
+        QCOMPARE(one("log(1000)"), 3.0);
+        // conversions de dates (formules des formats d'affichage)
+        QCOMPARE(one("ADtoBP(-550)"), 2500.0);
+        QCOMPARE(one("BPtoAD(2500)"), -550.0);
+        QCOMPARE(one("adtob2k(-550)"), 2550.0);
+        QCOMPARE(one("B2KtoAD(2550)"), -550.0);
+        QCOMPARE(one("BPtoB2K(2500)"), 2550.0);
+        QCOMPARE(one("B2KtoBP(2550)"), 2500.0);
+        QCOMPARE(one("ADtoKa(-50000)"), 50.0);
+        QCOMPARE(one("KatoAD(50)"), -50000.0);
+        QCOMPARE(one("MatoAD(1.2)"), -1200000.0);
+        QCOMPARE(one("ADtoMa(-1200000)"), 1.2);
+        QCOMPARE(one("BCtoAD(551)"), -550.0);
+        QCOMPARE(one("ADtoBC(-549)"), 550.0);
+        // variables, ans, plusieurs instructions
+        const auto lines = c.evaluate("a = 3560\nb = 20; sqrt(a^2 + b^2)");
+        QCOMPARE(lines.size(), 3);
+        QCOMPARE(lines[0].variable, QString("a"));
+        QVERIFY(std::abs(lines[2].value - std::sqrt(3560.0 * 3560 + 400)) < 1e-9);
+        QCOMPARE(one("ADtoBP(-A)"), 5510.0);                       // casse ignorée
+        QCOMPARE(one("ans + 1"), 5511.0);
+        // erreurs mathématiques : calcul quand même, avec un message
+        auto err = [&](const QString& t) { const auto l = c.evaluate(t); return l.isEmpty() ? QString() : l.last().error; };
+        QVERIFY(err("1/0").contains("division par zéro"));
+        QVERIFY(err("sqrt(-4)").contains("négatif"));
+        QVERIFY(err("ADtoBC(10)").contains("après J.-C."));
+        QVERIFY(err("pi = 3").contains("réservé"));
+        QVERIFY(c.isCalculation("1/0"));
+        // reconnaissance : seulement un calcul
+        QVERIFY(c.isCalculation("2+3"));
+        QVERIFY(c.isCalculation("Calcule 2+3"));
+        QVERIFY(c.isCalculation("combien font 12 * 7 ?"));
+        QVERIFY(c.isCalculation("2+3 ="));
+        QVERIFY(c.isCalculation("x = 4"));
+        QVERIFY(c.isCalculation("ADtoBP(-550)"));
+        QVERIFY(!c.isCalculation("2023"));
+        QVERIFY(!c.isCalculation("-500"));
+        QVERIFY(!c.isCalculation("C14 de 3560 +- 20 BP"));
+        QVERIFY(!c.isCalculation("3560 +- 20"));
+        QVERIFY(!c.isCalculation("3560 ± 20"));
+        QVERIFY(!c.isCalculation("1950-3560 BP"));
+        QVERIFY(!c.isCalculation("que vaut 2+3 en BP ?"));
+        QVERIFY(!c.isCalculation("Trace une gaussienne de moyenne -500 et d'écart-type 40"));
+        QVERIFY(!c.isCalculation("US10 au-dessus de US6"));
+        QVERIFY(!c.isCalculation("date uniforme entre -500 et -400"));
+        QVERIFY(!c.isCalculation("Dessine le modèle"));
+        // radiocarbone : âge <-> F14C, erreur comme ChronoModel (aller-retour exact)
+        {
+            const auto l = c.evaluate("C14toF14C(2500; 30)");
+            QVERIFY(l[0].ok);
+            QVERIFY(std::abs(l[0].value - std::exp(-2500 / 8033.0)) < 1e-15);
+            QCOMPARE(l[0].parts.size(), 2);
+            QVERIFY(std::abs(l[0].parts[1].second - (std::exp(-2500 / 8033.0) - std::exp(-2530 / 8033.0))) < 1e-15);
+            QVERIFY(l[0].details.startsWith("F14C = 0,73"));
+            const auto r = c.evaluate(QStringLiteral("F14CtoC14(%1; %2)").arg(l[0].value, 0, 'g', 17).arg(l[0].parts[1].second, 0, 'g', 17));
+            QVERIFY(std::abs(r[0].value - 2500) < 1e-6 && std::abs(r[0].parts[1].second - 30) < 1e-6);
+            QVERIFY(err("F14CtoC14(-1)").contains("> 0"));
+        }
+        // archéomagnétisme
+        QVERIFY(std::abs(one("IGAD(45)") - std::atan(2.0) * 180 / M_PI) < 1e-12);
+        QVERIFY(std::abs(one("IGAD(0)")) < 1e-12);
+        QVERIFY(std::abs(one("ReducGAD(65; 43.6; 48.85)") - (65 + one("IGAD(48.85)") - one("IGAD(43.6)"))) < 1e-12);
+        {
+            const auto l = c.evaluate("p = VGP(43.6; 1.4; 10; 62; 2)");
+            QVERIFY(l[0].ok);
+            QCOMPARE(l[0].parts.size(), 4);
+            QVERIFY(c.variables().contains("p_lon") && c.variables().contains("p_dp") && c.variables().contains("p_dm"));
+            const auto back = c.evaluate("VGPtoDI(p; p_lon; 43.6; 1.4)");               // aller-retour au même site
+            QVERIFY(std::abs(back[0].value - 62) < 1e-9);
+            QVERIFY(std::abs(back[0].parts[1].second - 10) < 1e-9);
+            QVERIFY(std::abs(one("VGP(0; 0; 0; 0)") - 90) < 1e-9);                    // champ dipolaire à l'équateur
+            const auto same = c.evaluate("ReducVGP(43.6; 1.4; 10; 62; 43.6; 1.4)");
+            QVERIFY(std::abs(same[0].value - 62) < 1e-9 && std::abs(same[0].parts[1].second - 10) < 1e-9);
+            // réduction d'une direction purement dipolaire : on retrouve l'inclinaison GAD du site de référence
+            const auto gad = c.evaluate(QStringLiteral("ReducVGP(40; 5; 0; %1; 48.85; 2.35)").arg(one("IGAD(40)"), 0, 'g', 17));
+            QVERIFY(std::abs(gad[0].value - one("IGAD(48.85)")) < 1e-9 && std::abs(gad[0].parts[1].second) < 1e-9);
+        }
+        {
+            const double R = 6.3712e6, m = R * R * R * 50 * 10 / std::sqrt(2.5) / 1e22;   // 4π R³ F/(µ0 √(1+3 sin² 45°))
+            QVERIFY(std::abs(one("VADM(50; 45)") - m) < 1e-9);
+            const auto l = c.evaluate("VADM(50; 2; 45)");
+            QVERIFY(std::abs(l[0].parts[1].second - m * 2 / 50) < 1e-9);
+            QVERIFY(std::abs(one("VDM(50; IGAD(45))") - m) < 1e-9);                  // champ GAD : VDM = VADM
+            QVERIFY(std::abs(one("VADMtoF(VADM(50; 45); 45)") - 50) < 1e-9);
+            QVERIFY(std::abs(one("ReducVADM(50; 45; 45)") - 50) < 1e-12);
+            QVERIFY(std::abs(one("ReducVADM(50; 43.6; 48.85)") - one("VADMtoF(VADM(50; 43.6); 48.85)")) < 1e-9);
+            QVERIFY(err("VADM(50; 95)").contains("hors de"));
+        }
+        // incertitudes : premier ordre, erreurs indépendantes
+        auto ve = [&](const QString& t) { const auto l = c.evaluate(t); return l.isEmpty() || !l.last().ok ? qMakePair(std::nan(""), std::nan(""))
+                                                                                                     : qMakePair(l.last().value, l.last().uncertainty); };
+        auto near = [](QPair<double, double> r, double v, double e, double tol = 1e-6) {
+            return std::abs(r.first - v) < tol * std::max(1.0, std::abs(v)) && std::abs(r.second - e) < tol * std::max(1.0, e); };
+        QVERIFY(near(ve("(2500 ± 30) - (2400 ± 40)"), 100, 50));
+        QVERIFY(near(ve("2 * (310 +- 50)"), 620, 100));
+        QVERIFY(near(ve("2*310 ± 50"), 620, 50));                        // « ± » a la priorité de + et −
+        QVERIFY(near(ve("(2500 +/- 30) + 0"), 2500, 30));
+        QVERIFY(near(ve("(100 ± 10) / (4 ± 0)"), 25, 2.5));
+        QVERIFY(near(ve("sqrt(100 ± 10)"), 10, 0.5, 1e-5));
+        QVERIFY(near(ve("ln(100 ± 10)"), std::log(100.0), 0.1, 1e-5));
+        QVERIFY(near(ve("(3 ± 0.1)^2"), 9, 0.6));
+        QVERIFY(near(ve("ADtoBP(-550 ± 20)"), 2500, 20, 1e-5));
+        QVERIFY(near(ve("a = 2500 ± 30\na - a"), 0, 30 * std::sqrt(2.0)));      // indépendance : pas de corrélation
+        QVERIFY(near(ve("val(a)"), 2500, 0) && near(ve("err(a)"), 30, 0));
+        QVERIFY(near(ve("C14toF14C(2500 ± 30)"), std::exp(-2500 / 8033.0), std::exp(-2500 / 8033.0) - std::exp(-2530 / 8033.0), 1e-9));
+        QVERIFY(near(ve("round(2500.4 ± 30)"), 2500, 30));
+        // statistiques
+        QVERIFY(near(ve("moyenne(2500, 2470, 2530)"), 2500, 0));
+        QVERIFY(near(ve("mean(2500 ± 30; 2470 ± 30; 2530 ± 30)"), 2500, 30 / std::sqrt(3.0)));
+        QVERIFY(near(ve("ecart_type(2500, 2470, 2530)"), 30, 0));
+        QVERIFY(near(ve("mediane(3; 1; 2; 10)"), 2.5, 0));
+        QVERIFY(near(ve("somme(1 ± 3; 2 ± 4)"), 3, 5));
+        {
+            const auto l = c.evaluate("moy_ponderee(2500 ± 30; 2470 ± 35; 2530 ± 25)");
+            QVERIFY(l[0].ok);
+            const double w[3] = { 1 / 900.0, 1 / 1225.0, 1 / 625.0 }, x[3] = { 2500, 2470, 2530 };
+            double sw = 0, swx = 0;
+            for (int i = 0; i < 3; ++i) { sw += w[i]; swx += w[i] * x[i]; }
+            const double m = swx / sw;
+            double T = 0;
+            for (int i = 0; i < 3; ++i) T += (x[i] - m) * (x[i] - m) * w[i];
+            QVERIFY(std::abs(l[0].value - m) < 1e-9 && std::abs(l[0].uncertainty - 1 / std::sqrt(sw)) < 1e-9);
+            QHash<QString, double> pr;
+            for (const auto& p : l[0].parts) pr[p.first] = p.second;
+            QVERIFY(std::abs(pr["t"] - T) < 1e-9);
+            QCOMPARE(pr["ddl"], 2.0);
+            QVERIFY(std::abs(pr["seuil"] - 5.991465) < 1e-5);                  // χ² 95 % à 2 ddl
+            QVERIFY(std::abs(pr["p"] - std::exp(-T / 2)) < 1e-9);               // à 2 ddl, P(χ² > T) = exp(−T/2)
+            QVERIFY(l[0].details.contains("compatibles") && !l[0].details.contains("NON"));
+            const auto bad = c.evaluate("wmean(2500 ± 10; 2600 ± 10)");
+            QVERIFY(bad[0].details.contains("NON compatibles"));
+            QVERIFY(err("moy_ponderee(2500; 2600)").contains("erreur > 0"));
+        }
+        // reconnaissance avec « ± »
+        QVERIFY(c.isCalculation("(2500 ± 30) - (2400 ± 40)"));
+        QVERIFY(c.isCalculation("2 * (310 +- 50)"));
+        QVERIFY(c.isCalculation("moy_ponderee(2500±30, 2470±35, 2530±25)"));
+        QVERIFY(!c.isCalculation("-500 +- 40"));
+        QVERIFY(!c.isCalculation("C14 2500 +- 30"));
+        QVERIFY(!c.isCalculation("2500 +- 30, 2470 +- 35"));
+        QCOMPARE(Calculator::formatValue(620, 100), QString("620 ± 100"));
+        QCOMPARE(Calculator::formatValue(0.73255545, 0.0027307), QString("0,7326 ± 0,0027"));
+        QCOMPARE(Calculator::formatValue(-0.001, 42.43), QString("0 ± 42"));
+        QCOMPARE(Calculator::format(1658.3), QString("1658,3"));
+        QCOMPARE(Calculator::format(-0.0), QString("0"));
+        c.reset();
+        QVERIFY(!c.isCalculation("a + 1"));                        // variable oubliée : nom inconnu
+    }
+
+    // Dessin d'un .chr : scène des Events (boîtes, noms des dates, flèches) et scène des phases.
+    void chrScenes()
+    {
+        using seldon::ChrSceneWidget;
+        QVERIFY(ChrSceneWidget::asksForDrawing("Dessine le modèle"));
+        QVERIFY(ChrSceneWidget::asksForDrawing("montre-moi la scène des phases"));
+        QVERIFY(ChrSceneWidget::asksForDrawing("Draw the model"));
+        QVERIFY(!ChrSceneWidget::asksForDrawing("Trace une gaussienne de moyenne -500"));
+        QVERIFY(!ChrSceneWidget::asksForDrawing("C14 de 3560 +- 20 BP"));
+        // seulement le dessin : pas de modèle de langage ; autre demande : le modèle de langage répond au reste
+        QVERIFY(ChrSceneWidget::isOnlyDrawing("dessine le modèle"));
+        QVERIFY(ChrSceneWidget::isOnlyDrawing("Affiche les scènes des Events et des phases"));
+        QVERIFY(ChrSceneWidget::isOnlyDrawing("Draw the model"));
+        QVERIFY(!ChrSceneWidget::isOnlyDrawing("Dessine le modèle et explique les contraintes"));
+        QVERIFY(!ChrSceneWidget::isOnlyDrawing("Peux-tu dessiner le modèle ?"));
+        QVERIFY(!ChrSceneWidget::isOnlyDrawing("Dessine le modèle et commente la phase 2"));
+        // bloc plot inventé par le modèle de langage (réponse réelle) : retiré
+        const QString bad = "Voici le bloc de code pour tracer le modèle :\n\n```plot\n{\n  \"type\": \"events\",\n  \"scenes\": [\"Events\", \"Phases\"]\n}\n```\n";
+        QCOMPARE(ChrSceneWidget::stripPlotBlocks(bad), QString("Voici le bloc de code pour tracer le modèle :"));
+        QCOMPARE(ChrSceneWidget::stripPlotBlocks("Texte\n```json\n{}\n```"), QString("Texte\n```json\n{}\n```"));
+
+        const ChrResult r = ChrBuilder::build(QJsonDocument::fromJson(R"({"name":"Site","phases":[{"name":"Ancienne","color":"orange"},{"name":"Récente"}],
+          "events":[
+            {"name":"US 12","phases":["Ancienne"],"color":"bleu","dates":[{"type":"c14","name":"Ly-1","age":2500,"error":30},{"type":"gauss","name":"G-2","age":-500,"error":40}]},
+            {"name":"US 11","phases":["Ancienne"],"dates":[{"type":"gauss","name":"G-3","age":-480,"error":40}]},
+            {"name":"US 10","phases":["Récente"],"dates":[{"type":"gauss","name":"G-4","age":-400,"error":30}]},
+            {"name":"Fin","type":"bound","known_fixed":-300}],
+          "event_constraints":[["US 12","US 11","US 10","Fin"]],
+          "phase_constraints":[["Ancienne","avant","Récente"]]})").object());
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        QVERIFY(ChrSceneWidget::hasPhases(r.chr));
+
+        ChrSceneWidget ev(r.chr, ChrSceneWidget::Events);
+        QCOMPARE(ev.boxes().size(), 4);
+        QCOMPARE(ev.links().size(), 3);
+        const auto& b0 = ev.boxes()[0];
+        QCOMPARE(b0.title, QString("US 12"));
+        QCOMPARE(b0.lines.size(), 2);
+        QCOMPARE(b0.lines[0].text, QString("Ly-1"));
+        QVERIFY(b0.lines[0].detail.startsWith("14C 2500"));
+        QCOMPARE(b0.color, QColor(0, 0, 255));
+        QVERIFY(ev.boxes()[3].bound);
+        // la boîte est centrée sur la position du .chr ; flèche du plus ancien (US 12) vers le plus récent (US 11)
+        const QJsonObject e0 = r.chr["events"].toArray()[0].toObject();
+        QCOMPARE(b0.rect.center(), QPointF(e0["item_x"].toDouble(), e0["item_y"].toDouble()));
+        QCOMPARE(ev.links()[0].from, 0); QCOMPARE(ev.links()[0].to, 1);
+        // les boîtes ne se chevauchent pas avec l'espacement du diagramme
+        for (int i = 0; i < ev.boxes().size(); ++i)
+            for (int j = i + 1; j < ev.boxes().size(); ++j)
+                QVERIFY(!ev.boxes()[i].rect.intersects(ev.boxes()[j].rect));
+
+        ChrSceneWidget ph(r.chr, ChrSceneWidget::Phases);
+        QCOMPARE(ph.boxes().size(), 2);
+        QCOMPARE(ph.links().size(), 1);
+        QCOMPARE(ph.boxes()[0].title, QString("Ancienne"));
+        QCOMPARE(ph.boxes()[0].lines.size(), 2);
+        QCOMPARE(ph.boxes()[0].lines[1].text, QString("US 11"));
+        QCOMPARE(ph.boxes()[0].color, QColor(255, 178, 97));
+        QVERIFY(ph.boxes()[0].rect.center().y() > ph.boxes()[1].rect.center().y());     // la plus ancienne en bas
+
+        const QImage img = ev.render(ev.exportSize());
+        QVERIFY(!img.isNull());
+        const QByteArray svg = ev.renderSvg(ev.exportSize(), "Scène");
+        QVERIFY(svg.contains("<svg") && svg.contains("Ly-1") && svg.contains("US 12"));
+
+        // export depuis le panneau
+        seldon::FigurePanel panel;
+        panel.showPage(new ChrSceneWidget(r.chr, ChrSceneWidget::Phases), "Scène des phases");
+        QTemporaryDir dir;
+        QVERIFY(panel.saveCurrentTo(dir.filePath("phases.svg")));
+        QVERIFY(panel.saveCurrentTo(dir.filePath("phases.png")));
+        QVERIFY(!QImage(dir.filePath("phases.png")).isNull());
+
+        // pas de pastille de couleur ni de paramètres hors courbe ; vignette pour la discussion
+        QVERIFY(ev.boxes()[0].params.isEmpty());
+        const QImage th = ChrSceneWidget::thumbnail(r.chr, ChrSceneWidget::Events, 520, 2.0);
+        QCOMPARE(th.width(), 1040);
+        QVERIFY(th.height() >= 320 && th.height() <= 720);
+
+        // modèle avec courbe : paramètres dans un cadre sous le nom de l'Event
+        const ChrResult c = ChrBuilder::build(QJsonDocument::fromJson(R"({"curve":"age_depth","events":[
+          {"name":"surface","depth":4,"depth_error":1,"node":true,"dates":[{"type":"unif","min":1980,"max":2000}]},
+          {"name":"13 cm","depth":13,"depth_error":2,"dates":[{"type":"c14","name":"Ly-8812","age":310,"error":50}]}]})").object());
+        QVERIFY2(c.ok, qPrintable(c.errors.join("; ")));
+        ChrSceneWidget cs(c.chr, ChrSceneWidget::Events);
+        QCOMPARE(cs.boxes()[0].params, QStringList({ "Profondeur : -4 ± 1", "Nœud (la courbe passe par ce point)" }));
+        QCOMPARE(cs.boxes()[1].params, QStringList({ "Profondeur : -13 ± 2" }));
+        QCOMPARE(cs.boxes()[1].lines.size(), 1);                              // seulement la date
+        QJsonObject inc{ { "X_Inc_Depth", 65 }, { "sX_Alpha95_sDepth", 1.5 } };
+        QCOMPARE(ChrSceneWidget::curveParams(inc, 73), QStringList({ "Inclinaison : 65", "α95 : 1.5" }));
+        QVERIFY(ChrSceneWidget::curveParams(inc, 78).isEmpty());
+
+        // projet sans phase, scène vide
+        ChrSceneWidget none(QJsonObject(), ChrSceneWidget::Events);
+        QVERIFY(none.boxes().isEmpty());
+        QVERIFY(!none.render(QSize(300, 200)).isNull());
+    }
+
+    // Fiches injectées pour une création de modèle, et vérification croisée du modèle avec la question (réponses réelles
+    // de Qwen3.5-2B et de ministral-3-8b à la même question, 27/10/2026).
+    void modelSkillsAndCrossCheck()
+    {
+        const QString q = QStringLiteral(
+            "crée un modèle avec un Event US10 au dessus de l'Event US6\nEvent US 3 est au dessus de US5\n"
+            "US6 est en dessous de l'US10 et de l'US7\nUS7 est aussi au dessus de US3\nUS1 est en dessous de US6 et US5\n"
+            "dans US10: 14c 6589 +- 30 et 14c 5879+- 35\nUS6: 14c référence Ly-12345 6458 +- 30 en bleu\nUS5: 14C 6455 +- 40\n\n"
+            "US3: am Rennes2025 inclinaison 65 alpha95 1.2\nUS7: une borne à 40 BC couleur rouge\n"
+            "US1: TL réf Bdx-478 age 3500 +- 45 fait en 2010 en orange");
+        QCOMPARE(MethodRunner::datingMethodsIn(q), QStringList({ "c14", "tl", "am" }));
+        QCOMPARE(MethodRunner::datingMethodsIn("C14 de 3560 +- 20 BP"), QStringList({ "c14" }));
+        QCOMPARE(MethodRunner::datingMethodsIn("date uniforme entre -500 et -400"), QStringList({ "gauss" }));
+        QCOMPARE(MethodRunner::datingMethodsIn("échantillon F14C = 1,1023 +- 0,0030"), QStringList({ "f14c" }));
+        QVERIFY(MethodRunner::datingMethodsIn("Bonjour").isEmpty());
+        // création de modèle : la fiche commune et les fiches de ces trois méthodes, rien d'autre
+        SkillManager m; m.reload(QString());
+        const QStringList pin{ "03_chronomodel_creer_modele", "14_date_c14", "16_date_tl", "17_date_am" };
+        const auto sel = m.select(q, 0, QStringList(), pin);
+        QStringList ids; int chars = 0;
+        for (const auto& x : sel) { ids << x.skill->id; chars += x.skill->body.size(); }
+        QCOMPARE(ids, pin);
+        QVERIFY2(chars < 9000, qPrintable(QString::number(chars)));          // contre ~20 000 caractères auparavant
+        for (const auto& x : sel) {                                           // un seul nom par champ : ceux du .chr
+            QVERIFY(!x.skill->body.contains("refYear") && !x.skill->body.contains("errorF") && !x.skill->body.contains("deltaR"));
+        }
+        // Qwen3.5-2B : valeurs recopiées de l'exemple (54.2, 0.8), références oubliées
+        const QJsonObject qwen = QJsonDocument::fromJson(R"({"name":"Site test","events":[
+          {"name":"US 10","dates":[{"type":"c14","name":"Ly-12345","age":6589,"error":30},{"type":"c14","name":"Ly-12345","age":5879,"error":35}]},
+          {"name":"US 6","dates":[{"type":"c14","name":"Ly-12345","age":6458,"error":30}]},
+          {"name":"US 5","dates":[{"type":"c14","name":"Ly-12345","age":6455,"error":40}]},
+          {"name":"US 3","dates":[{"type":"am","process":"IF","inc":65,"alpha95":1.2,"field":54.2,"error_f":0.8}]},
+          {"name":"US 7","dates":[{"type":"unif","min":-40,"max":-40}]},
+          {"name":"US 1","dates":[{"type":"tl","age":3500,"error":45,"ref_year":2010}]}]})").object();
+        const QString g1 = ChrBuilder::crossCheck(qwen, q).join("\n");
+        QVERIFY2(g1.contains("54.2") && g1.contains("0.8"), qPrintable(g1));
+        QVERIFY(g1.contains("« bdx-478 » de votre texte absente du modèle"));
+        // ministral-3-8b (Albert) : références inventées
+        const QJsonObject albert = QJsonDocument::fromJson(R"({"name":"Site_test","events":[
+          {"name":"US10","dates":[{"type":"c14","name":"Ref-1","age":6589,"error":30},{"type":"c14","name":"Ref-2","age":5879,"error":35}]},
+          {"name":"US6","dates":[{"type":"c14","name":"Ly-12345","age":6458,"error":30}]},
+          {"name":"US5","dates":[{"type":"c14","name":"Ref-3","age":6455,"error":40}]},
+          {"name":"US3","dates":[{"type":"am","name":"Rennes2025","process":"I","inc":65,"alpha95":1.2}]},
+          {"name":"US7","type":"bound","known_fixed":-40},
+          {"name":"US1","dates":[{"type":"tl","name":"Bdx-478","age":3500,"error":45,"ref_year":2010}]}]})").object();
+        const QStringList g2 = ChrBuilder::crossCheck(albert, q);
+        QCOMPARE(g2.filter("inventée par le modèle").size(), 3);
+        QVERIFY(g2.filter("Valeur(s) absente(s)").isEmpty());
+        // modèle correct : aucune remarque
+        QJsonObject good = albert;
+        QJsonArray evs = good["events"].toArray();
+        for (int i = 0; i < evs.size(); ++i) {
+            QJsonObject e = evs[i].toObject();
+            QJsonArray ds = e["dates"].toArray();
+            for (int k = 0; k < ds.size(); ++k) {
+                QJsonObject d = ds[k].toObject();
+                if (d["name"].toString().startsWith("Ref-")) d.remove("name");
+                ds[k] = d;
+            }
+            e["dates"] = ds;
+            evs[i] = e;
+        }
+        good["events"] = evs;
+        QVERIFY2(ChrBuilder::crossCheck(good, q).isEmpty(), qPrintable(ChrBuilder::crossCheck(good, q).join("\n")));
+    }
+
     void chrMatchesRealProjects()
     {
         const QString spec = R"({
@@ -324,8 +828,9 @@ private slots:
         auto keys = [](const QJsonObject& o) { QStringList k = o.keys(); k.sort(); return k; };
         auto L = [](std::initializer_list<const char*> l) { QStringList k; for (const char* x : l) k << x; k.sort(); return k; };
 
-        QCOMPARE(keys(r.chr), L({ "app_version", "curve", "dates_trash", "events", "events_constraints", "events_trash",
-                                  "mcmc", "phases", "phases_constraints", "settings" }));
+        QCOMPARE(keys(r.chr), L({ "app_version", "curve", "dates_trash", "event_model", "events", "events_constraints",
+                                  "events_trash", "format_date", "format_date_custom", "mcmc", "phases", "phases_constraints",
+                                  "settings" }));
         QCOMPARE(keys(r.chr["curve"].toObject()), L({ "alpha", "coeff_lissage_type", "process_type", "speed_threshold",
                                                       "time_type", "use_err_mesure", "variance_fixed", "variance_type" }));
         QCOMPARE(keys(r.chr["mcmc"].toObject()), L({ "anneal_dwell", "anneal_recurrence", "anneal_temp", "iter_per_batch",
@@ -567,7 +1072,7 @@ private slots:
         auto parse = [](const QString& q) { return MethodRegistry::instance().parse(q); };
         const auto tl = parse("TL 488 ± 19 years, measured in 2015");
         QVERIFY(!tl.isEmpty());
-        QCOMPARE(tl[0]["refYear"].toInt(), 2015);
+        QCOMPARE(tl[0]["ref_year"].toInt(), 2015);
         const auto sh = parse("radiocarbon 2500 ± 30 BP, southern hemisphere");
         QVERIFY(!sh.isEmpty());
         QCOMPARE(sh[0]["curve"].toString(), QString("shcal20"));
@@ -624,7 +1129,7 @@ private slots:
         const MethodResult c = MethodRegistry::instance().compute(QJsonObject{ { "method", "c14" }, { "age", 2500 }, { "error", 30 }, { "curve", "macourbe" } });
         QVERIFY2(c.ok, qPrintable(c.error));
         const MethodResult a = MethodRegistry::instance().compute(QJsonObject{ { "method", "am" }, { "process", "I" }, { "inc", 65 },
-                                                                               { "alpha95", 1 }, { "curveI", "test_i" }, { "steps", 500 } });
+                                                                               { "alpha95", 1 }, { "curve_i", "test_i" }, { "steps", 500 } });
         QVERIFY2(a.ok, qPrintable(a.error));
         // retour aux seules courbes intégrées
         CurveStore::setExtraRoots(saved);
@@ -717,12 +1222,12 @@ private slots:
         QCOMPARE(v[0]["inc"].toDouble(), 63.95);
         QCOMPARE(v[0]["alpha95"].toDouble(), 1.83);
         QCOMPARE(v[0]["field"].toDouble(), 56.89);
-        QCOMPARE(v[0]["errorF"].toDouble(), 0.74);
+        QCOMPARE(v[0]["error_f"].toDouble(), 0.74);
         QVERIFY2(MethodRegistry::instance().compute(v[0]).ok, qPrintable(MethodRegistry::instance().compute(v[0]).error));
         // une erreur écrite avant l'intensité n'est pas prise pour celle de F ; les formes déjà reconnues restent
-        QCOMPARE(MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 ± 2")[0]["errorF"].toDouble(), 2.0);
-        QCOMPARE(MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50, erreur sur F 1,5")[0]["errorF"].toDouble(), 1.5);
-        QCOMPARE(MethodRegistry::instance().parse("archaeomagnetic: inclination 65, alpha95 1, intensity 50, error 0.8")[0]["errorF"].toDouble(), 0.8);
+        QCOMPARE(MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 ± 2")[0]["error_f"].toDouble(), 2.0);
+        QCOMPARE(MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50, erreur sur F 1,5")[0]["error_f"].toDouble(), 1.5);
+        QCOMPARE(MethodRegistry::instance().parse("archaeomagnetic: inclination 65, alpha95 1, intensity 50, error 0.8")[0]["error_f"].toDouble(), 0.8);
     }
 
     // Chaque datation rappelle ses courbes de référence (nom et origine) ; le modèle doit les rappeler aussi.
@@ -753,15 +1258,15 @@ private slots:
                                                         "intensité=56,89 erreur sur l'intensité=0,74\n"
                                                         "avec la courbe pour l'inclinaison gal2002sph2014_i\npour l'intensité eurw_2017_f");
         QCOMPARE(v.size(), 1);
-        QCOMPARE(v[0]["curveI"].toString(), QString("gal2002sph2014_i"));
-        QCOMPARE(v[0]["curveF"].toString(), QString("eurw_2017_f"));
-        QCOMPARE(v[0]["errorF"].toDouble(), 0.74);
+        QCOMPARE(v[0]["curve_i"].toString(), QString("gal2002sph2014_i"));
+        QCOMPARE(v[0]["curve_f"].toString(), QString("eurw_2017_f"));
+        QCOMPARE(v[0]["error_f"].toDouble(), 0.74);
         const MethodResult miss = MethodRegistry::instance().compute(v[0]);
         QVERIFY(!miss.ok && miss.error.contains("eurw_2017_f"));
         // courbe intégrée nommée
         const auto b = MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 erreur 1, courbe pour l'intensité bulgaria_f");
-        QCOMPARE(b[0]["curveF"].toString(), QString("bulgaria_f"));
-        QCOMPARE(b[0]["curveI"].toString(), QString("gal2002sph2014_i"));                 // non nommée : défaut
+        QCOMPARE(b[0]["curve_f"].toString(), QString("bulgaria_f"));
+        QCOMPARE(b[0]["curve_i"].toString(), QString("gal2002sph2014_i"));                 // non nommée : défaut
         QVERIFY(MethodRegistry::instance().compute(b[0]).ok);
         // courbes ajoutées par l'utilisateur : nom sans suffixe (composante d'après le mot qui précède), et 14C
         QTemporaryDir root;
@@ -771,7 +1276,7 @@ private slots:
         const QStringList saved = CurveStore::extraRoots();
         CurveStore::setExtraRoots({ root.path() });
         const auto e = MethodRegistry::instance().parse("inclinaison 65 alpha95 1, intensité 50 erreur 1 avec la courbe europe");
-        QCOMPARE(e[0]["curveF"].toString(), QString("europe"));
+        QCOMPARE(e[0]["curve_f"].toString(), QString("europe"));
         QVERIFY(MethodRegistry::instance().compute(e[0]).ok);
         const auto c = MethodRegistry::instance().parse("C14 3000 ± 30 BP avec la courbe intcal98_fix");
         QCOMPARE(c[0]["curve"].toString(), QString("intcal98_fix"));
@@ -799,7 +1304,7 @@ private slots:
         QCOMPARE(again.size(), 1);
         QCOMPARE(again[0]["tmin"].toDouble(), 0.0);
         QCOMPARE(again[0]["tmax"].toDouble(), 2000.0);
-        QCOMPARE(again[0]["curveF"].toString(), QString("bulgaria_f"));             // les courbes choisies sont gardées
+        QCOMPARE(again[0]["curve_f"].toString(), QString("bulgaria_f"));             // les courbes choisies sont gardées
         QVERIFY(!again[0].contains("level"));
         const RunOutcome r = MethodRunner::run(again);
         QVERIFY2(r.noticeHtml.contains("période d'étude 0 → 1950 apr. J.-C.") || r.noticeHtml.contains("période d'étude"), qPrintable(r.noticeHtml.left(400)));
@@ -892,7 +1397,7 @@ private slots:
         QVERIFY(MethodRunner::followUpRequests("que signifie la courbe ?", prev).isEmpty());
         QVERIFY(MethodRunner::followUpRequests("quel est l'intervalle à 50%", {}).isEmpty());
         // une datation demandée par l'assistant (bloc calcul) se reprend aussi ; un événement non (MCMC)
-        const auto blocks = MethodRunner::extractCalcBlocks("```calcul\n{\"method\":\"tl\",\"age\":800,\"error\":60,\"refYear\":2015}\n```\n");
+        const auto blocks = MethodRunner::extractCalcBlocks("```calcul\n{\"method\":\"tl\",\"age\":800,\"error\":60,\"ref_year\":2015}\n```\n");
         QCOMPARE(MethodRunner::followUpRequests("à 90 % ?", blocks).size(), 1);
         QVERIFY(MethodRunner::followUpRequests("à 90 % ?", { QJsonObject{ { "method", "event" } } }).isEmpty());
         // la fiche d'identité interdit de déduire une HPD des quartiles
@@ -909,11 +1414,20 @@ private slots:
         QCOMPARE(r.chr["settings"].toObject()["tmin"].toInt(), -1000);
         QCOMPARE(r.chr["settings"].toObject()["tmax"].toInt(), 2000);
         QVERIFY(!r.warnings.filter("courbes de référence par défaut").isEmpty());
-        // TL sans année de référence : avertissement
+        // TL sans année de mesure : erreur (pas d'année en cours par défaut) ; anciens noms et borne en date : erreurs
         const ChrResult t = ChrBuilder::build(QJsonDocument::fromJson(
             R"({"events":[{"name":"E","dates":[{"type":"tl","age":500,"error":20}]}]})", nullptr).object());
-        QVERIFY2(t.ok, qPrintable(t.errors.join("; ")));
-        QVERIFY(!t.warnings.filter("ref_year").isEmpty());
+        QVERIFY(!t.ok && !t.errors.filter("ref_year").isEmpty());
+        // réponse réelle d'Albert (ministral-3-8b) : borne écrite comme une date, « refYear » au lieu de « ref_year »
+        const ChrResult al = ChrBuilder::build(QJsonDocument::fromJson(
+            R"({"events":[{"name":"US7","color":"rouge","dates":[{"type":"bound","known_fixed":-40}]},
+                          {"name":"US1","dates":[{"type":"tl","name":"Bdx-478","age":3500,"error":45,"refYear":2010}]}]})", nullptr).object());
+        QVERIFY(!al.ok);
+        QVERIFY(!al.errors.filter("une borne se déclare sur l'événement").isEmpty());
+        QVERIFY(!al.errors.filter("« refYear » inconnu : écrire « ref_year »").isEmpty());
+        QVERIFY(MethodRunner::obsoleteFieldError(QJsonObject{ { "method", "am" }, { "errorF", 1 } }).contains("error_f"));
+        QVERIFY(MethodRunner::run({ QJsonObject{ { "method", "tl" }, { "age", 800 }, { "error", 60 }, { "refYear", 2015 } } })
+                    .promptBlock.contains("écrire « ref_year »"));
         // les six codes de processus sont vérifiés : plus d'avertissement
         const ChrResult p = ChrBuilder::build(QJsonDocument::fromJson(
             R"({"events":[{"name":"E","dates":[{"type":"am","process":"ID","inc":65,"dec":3,"alpha95":1}]}]})", nullptr).object());
@@ -1094,6 +1608,19 @@ private slots:
         Conversation back;
         QVERIFY(ConversationStore::fromJson(o, back));
         QCOMPARE(back.display.size(), 5);
+
+        // instantané du prompt (export, reproductibilité) gardé dans l'historique
+        Conversation withPrompt = sampleConversation("x2", "q", QDateTime::currentDateTime());
+        const QJsonObject snap{ { "date", "2026-10-27T14:00:00" }, { "engine", QJsonObject{ { "type", "distant" }, { "model", "m" } } },
+                                { "sampling", QJsonObject{ { "temperature", 0.3 } } },
+                                { "messages", QJsonArray{ QJsonObject{ { "role", "system" }, { "content", "S" } },
+                                                          QJsonObject{ { "role", "user" }, { "turn", 0 } } } } };
+        withPrompt.turns[0].prompt = snap;
+        Conversation back2;
+        QVERIFY(ConversationStore::fromJson(ConversationStore::toJson(withPrompt), back2));
+        QCOMPARE(back2.turns[0].prompt, snap);
+        QVERIFY(ConversationStore::fromJson(ConversationStore::toJson(c), back2));
+        QVERIFY(back2.turns[0].prompt.isEmpty());                        // ancienne conversation : pas d'instantané
     }
 
     void historyPanelListsFiltersAndSignals()
@@ -1117,21 +1644,19 @@ private slots:
         QSignalSpy opened(&panel, &HistoryPanel::openRequested);
         QSignalSpy deleted(&panel, &HistoryPanel::deleteRequested);
         QSignalSpy all(&panel, &HistoryPanel::deleteAllRequested);
-        QSignalSpy created(&panel, &HistoryPanel::newRequested);
 
         list->setCurrentRow(2);
         QCOMPARE(panel.selectedId(), QString("c"));
         const auto buttons = panel.findChildren<QPushButton*>();
         auto button = [&](const QString& text) { for (QPushButton* b : buttons) if (b->text().contains(text)) return b; return static_cast<QPushButton*>(nullptr); };
-        QVERIFY(button("Ouvrir") && button("Supprimer") && button("Tout effacer") && button("Nouvelle"));
+        QVERIFY(button("Ouvrir") && button("Supprimer") && button("Tout effacer"));
+        QVERIFY(!button("Nouvelle"));                // déplacé au-dessus de la discussion (barre de titre)
         button("Ouvrir")->click();
         QCOMPARE(opened.size(), 1); QCOMPARE(opened[0][0].toString(), QString("c"));
         button("Supprimer")->click();
         QCOMPARE(deleted.size(), 1); QCOMPARE(deleted[0][0].toString(), QString("c"));
         button("Tout effacer")->click();
         QCOMPARE(all.size(), 1);
-        button("Nouvelle")->click();
-        QCOMPARE(created.size(), 1);
 
         // pendant une génération, on ne peut pas ouvrir une autre conversation, mais on peut toujours supprimer
         panel.setBusy(true);
@@ -1294,7 +1819,33 @@ private slots:
         QJsonParseError pe;
         const QJsonDocument d = QJsonDocument::fromJson(json.toUtf8(), &pe);
         QVERIFY2(pe.error == QJsonParseError::NoError, qPrintable(pe.errorString()));
-        QCOMPARE(d.object()["series"].toArray()[0].toObject()["y"].toArray().size(), d.object()["x"].toArray().size());
+        // l'exemple de la fiche donne une loi : SeldonH calcule les points, et le tracé est valide
+        QString err;
+        const QJsonObject ex = MethodRunner::expandPlotLaws(d.object(), &err);
+        QVERIFY2(!ex.isEmpty(), qPrintable(err));
+        CurveSpec cs;
+        QVERIFY(CurveSpec::fromJson(ex, cs, &err));
+
+        // « Trace une gaussienne de moyenne -500 et d'écart-type 40 » : courbe entière, symétrique, mode à -500
+        const QJsonObject g = MethodRunner::expandPlotLaws(QJsonObject{ { "law", "normal" }, { "mean", -500 }, { "sd", 40 } }, &err);
+        QVERIFY2(!g.isEmpty(), qPrintable(err));
+        const QJsonObject gs = g["series"].toArray()[0].toObject();
+        const QJsonArray gx = gs["x"].toArray(), gy = gs["y"].toArray();
+        QCOMPARE(gx.size(), gy.size());
+        QVERIFY(gx.first().toDouble() <= -500 - 4 * 40 && gx.last().toDouble() >= -500 + 4 * 40);   // pas tronquée à ±100
+        int imax = 0;
+        for (int i = 1; i < gy.size(); ++i) if (gy[i].toDouble() > gy[imax].toDouble()) imax = i;
+        QVERIFY(std::abs(gx[imax].toDouble() + 500) <= 1.0);
+        QVERIFY(std::abs(gy[imax].toDouble() - 1.0 / (40 * std::sqrt(2 * M_PI))) < 1e-4);
+        QVERIFY(g["fill"].toBool());
+        // série sans loi gardée telle quelle ; loi inconnue refusée
+        const QJsonObject mixed = MethodRunner::expandPlotLaws(QJsonDocument::fromJson(
+            R"({"x":[1,2,3],"series":[{"name":"mesures","y":[1,2,1]},{"law":"gaussienne","mean":2,"sd":1}]})").object(), &err);
+        QCOMPARE(mixed["series"].toArray()[0].toObject()["x"].toArray().size(), 3);
+        QVERIFY(mixed["series"].toArray()[1].toObject()["x"].toArray().size() > 100);
+        QVERIFY(MethodRunner::expandPlotLaws(QJsonObject{ { "law", "cauchy" }, { "mean", 0 } }, &err).isEmpty());
+        const QJsonObject plain{ { "x", QJsonArray{ 1, 2 } }, { "series", QJsonArray{ QJsonObject{ { "y", QJsonArray{ 0, 1 } } } } } };
+        QCOMPARE(MethodRunner::expandPlotLaws(plain), plain);
     }
     // ---- méthodes de datation (portées de ChronoModel) ----
     void methodCurvesLoad()
@@ -1393,13 +1944,13 @@ private slots:
     void c14MarineDeltaR()
     {
         QJsonObject p{ { "method", "c14" }, { "age", 3000.0 }, { "error", 30.0 }, { "curve", "marine20" },
-                       { "deltaR", 100.0 }, { "deltaRerr", 50.0 }, { "hasDeltaR", true } };
+                       { "delta_r", 100.0 }, { "delta_r_error", 50.0 }, { "has_delta_r", true } };
         const MethodResult r = MethodRegistry::instance().compute(p);
         QVERIFY2(r.ok, qPrintable(r.error));
         QVERIFY(std::abs(r.hpd95.front().from - (-740)) <= 12 && std::abs(r.hpd95.back().to - (-370)) <= 12);
         QVERIFY(std::abs(r.stats.median - (-540)) <= 12);
         QVERIFY(r.warnings.isEmpty());
-        p.remove("hasDeltaR"); p.remove("deltaR"); p.remove("deltaRerr");
+        p.remove("has_delta_r"); p.remove("delta_r"); p.remove("delta_r_error");
         QVERIFY(!MethodRegistry::instance().compute(p).warnings.isEmpty());     // ΔR manquant signalé
     }
 
@@ -1455,7 +2006,7 @@ private slots:
         QVERIFY(!reg.compute({ { "method", "unif" }, { "min", 5.0 }, { "max", 5.0 } }).ok);
 
         // TL : 800 ± 60 ans avant 2015 -> N(1215, 60)
-        const MethodResult t = reg.compute({ { "method", "tl" }, { "age", 800.0 }, { "error", 60.0 }, { "refYear", 2015 } });
+        const MethodResult t = reg.compute({ { "method", "tl" }, { "age", 800.0 }, { "error", 60.0 }, { "ref_year", 2015 } });
         QVERIFY(t.ok);
         QVERIFY(std::abs(t.stats.median - 1215) < 0.7);
         QVERIFY(std::abs(t.hpd95[0].from - (1215 - 117.6)) < 2 && std::abs(t.hpd95[0].to - (1215 + 117.6)) < 2);
@@ -1465,26 +2016,26 @@ private slots:
     {
         const MethodRegistry& reg = MethodRegistry::instance();
         QJsonObject p{ { "method", "am" }, { "process", "I" }, { "inc", 62.0 }, { "alpha95", 2.0 },
-                       { "curveI", "gal2002sph2014_i" } };
+                       { "curve_i", "gal2002sph2014_i" } };
         MethodResult r = reg.compute(p);
         QVERIFY2(r.ok, qPrintable(r.error));
         QVERIFY(std::abs(r.stats.median - 368) <= 4);
 
-        p["process"] = "ID"; p["dec"] = -3.0; p["curveD"] = "gal2002sph2014_d";
+        p["process"] = "ID"; p["dec"] = -3.0; p["curve_d"] = "gal2002sph2014_d";
         r = reg.compute(p);
         QVERIFY2(r.ok, qPrintable(r.error));
         QVERIFY2(std::abs(r.stats.median - 275) <= 4, qPrintable(QString::number(r.stats.median)));
         QVERIFY(std::abs(r.hpd95.front().from - 57) <= 6 && std::abs(r.hpd95.back().to - 453) <= 6);
 
-        QJsonObject f{ { "method", "am" }, { "process", "F" }, { "field", 60.0 }, { "errorF", 3.0 }, { "curveF", "gwh2013uni_f" } };
+        QJsonObject f{ { "method", "am" }, { "process", "F" }, { "field", 60.0 }, { "error_f", 3.0 }, { "curve_f", "gwh2013uni_f" } };
         r = reg.compute(f);
         QVERIFY2(r.ok, qPrintable(r.error));
         QVERIFY(std::abs(r.stats.median - 1040) <= 6);
 
         // IDF : calculable et normalisé
         QJsonObject all{ { "method", "am" }, { "process", "IDF" }, { "inc", 62.0 }, { "dec", -3.0 }, { "alpha95", 2.0 },
-                         { "field", 60.0 }, { "errorF", 3.0 }, { "curveI", "gal2002sph2014_i" }, { "curveD", "gal2002sph2014_d" },
-                         { "curveF", "gwh2013uni_f" } };
+                         { "field", 60.0 }, { "error_f", 3.0 }, { "curve_i", "gal2002sph2014_i" }, { "curve_d", "gal2002sph2014_d" },
+                         { "curve_f", "gwh2013uni_f" } };
         r = reg.compute(all);
         QVERIFY2(r.ok, qPrintable(r.error));
         QVERIFY(std::abs(densityArea(r.density) - 1.0) < 1e-9);
@@ -1507,7 +2058,7 @@ private slots:
         QTest::newRow("sans contexte") << "la salle mesure 12 ± 1 mètres" << "" << 0 << "" << 0.0;
         QTest::newRow("sans erreur")   << "C14 de 1954 BP" << "" << 0 << "" << 0.0;
         QTest::newRow("f14c")          << "échantillon F14C = 1,1023 ± 0,0030" << "f14c" << 1 << "f14c" << 1.1023;
-        QTest::newRow("tl")            << "TL 800 ± 60 ans, mesuré en 2015" << "tl" << 1 << "refYear" << 2015.0;
+        QTest::newRow("tl")            << "TL 800 ± 60 ans, mesuré en 2015" << "tl" << 1 << "ref_year" << 2015.0;
         QTest::newRow("osl ka")        << "OSL 12,5 ± 1,2 ka" << "tl" << 1 << "age" << 12500.0;
         QTest::newRow("gauss N()")     << "date gaussienne N(1200, 50)" << "gauss" << 1 << "age" << 1200.0;
         QTest::newRow("unif entre")    << "date uniforme entre -500 et -400" << "unif" << 1 << "max" << -400.0;
@@ -1539,9 +2090,17 @@ private slots:
         QVERIFY2(ex.size() >= 12, "exemples attendus dans l'aide");
         QSet<QString> methods;
         int checked = 0;
+        int calcExamples = 0;
         for (const auto& e : ex) {
             QVERIFY2(!e.text.isEmpty(), "exemple vide");
             if (e.method.isEmpty()) continue;
+            if (e.method == "calc") {                      // calculatrice : reconnu comme calcul, sans erreur
+                seldon::Calculator c;
+                QVERIFY2(c.isCalculation(e.text), qPrintable("calcul non reconnu : " + e.text));
+                for (const auto& l : c.evaluate(e.text)) QVERIFY2(l.ok, qPrintable(e.text + " : " + l.error));
+                ++calcExamples;
+                continue;
+            }
             if (e.method == "event") {                     // événement : au moins deux datations calculables, combinées en MCMC
                 QVERIFY2(MethodRunner::asksEvent(e.text), qPrintable("événement non reconnu : " + e.text));
                 auto d = MethodRegistry::instance().parse(e.text);
@@ -1572,6 +2131,7 @@ private slots:
             ++checked;
         }
         QVERIFY(checked >= 10);
+        QVERIFY(calcExamples >= 8);
         for (const QString& m : { "c14", "f14c", "tl", "am", "gauss", "unif", "event" })
             QVERIFY2(methods.contains(m), qPrintable("pas d'exemple pour " + m));
 
@@ -2039,13 +2599,13 @@ private slots:
         QCOMPARE(c.request.value("curve").toString(), QString("intcal20"));
 
         // ΔR : indiqué dans la fiche
-        const auto m = execute("calibrer_radiocarbone", R"({"age":3000,"error":40,"curve":"marine20","deltaR":-50,"deltaRerr":30})", fmt);
-        QVERIFY(m.executed && m.request.value("hasDeltaR").toBool());
+        const auto m = execute("calibrer_radiocarbone", R"({"age":3000,"error":40,"curve":"marine20","delta_r":-50,"delta_r_error":30})", fmt);
+        QVERIFY(m.executed && m.request.value("has_delta_r").toBool());
 
         // valeur manquante : rien n'est calculé, le modèle reçoit une consigne claire
         const auto tl = execute("dater_luminescence", R"({"age":800,"error":50})", fmt);
         QVERIFY(tl.known && !tl.executed);
-        QVERIFY(tl.content.contains("refYear") && tl.content.contains("Demande"));
+        QVERIFY(tl.content.contains("ref_year") && tl.content.contains("Demande"));
         const auto am = execute("dater_archeomagnetisme", R"({"process":"id","inc":65,"dec":3})", fmt);
         QVERIFY(!am.executed && am.content.contains("alpha95"));
         const auto am2 = execute("dater_archeomagnetisme", R"({"process":"i","inc":65,"alpha95":2.5})", fmt);
@@ -2337,9 +2897,9 @@ private slots:
         auto v = MethodRegistry::instance().parse("coquille marine, 14C 3000 ± 30 BP, ΔR 100 ± 50");
         QCOMPARE(v.size(), 1);
         QCOMPARE(v[0].value("curve").toString(), QString("marine20"));
-        QVERIFY(v[0].value("hasDeltaR").toBool());
-        QCOMPARE(v[0].value("deltaR").toDouble(), 100.0);
-        QCOMPARE(v[0].value("deltaRerr").toDouble(), 50.0);
+        QVERIFY(v[0].value("has_delta_r").toBool());
+        QCOMPARE(v[0].value("delta_r").toDouble(), 100.0);
+        QCOMPARE(v[0].value("delta_r_error").toDouble(), 50.0);
         QCOMPARE(v[0].value("age").toDouble(), 3000.0);
         v = MethodRegistry::instance().parse("âge 14C 1200 ± 30 BP, hémisphère sud");
         QCOMPARE(v[0].value("curve").toString(), QString("shcal20"));
@@ -2391,7 +2951,7 @@ private slots:
 
     void calcBlocks()
     {
-        const QString ans = "Je lance le calcul.\n\n```calcul\n{\"method\":\"tl\",\"age\":800,\"error\":60,\"refYear\":2015}\n```\n"
+        const QString ans = "Je lance le calcul.\n\n```calcul\n{\"method\":\"tl\",\"age\":800,\"error\":60,\"ref_year\":2015}\n```\n"
                             "puis\n```calcul\n[{\"method\":\"unif\",\"min\":1,\"max\":9},{\"age\":3}]\n```\n";
         const auto v = MethodRunner::extractCalcBlocks(ans);
         QCOMPARE(v.size(), 2);                                   // le 2e objet sans "method" est ignoré
@@ -2542,7 +3102,7 @@ private slots:
         QVector<QJsonObject> v = reg.parse("TL 488 ± 19 ans mesuré en 2015 et C14 2500 ± 30 BP");
         QCOMPARE(methods(v), QStringList({ "tl", "c14" }));
         QCOMPARE(v[0]["age"].toDouble(), 488.0);
-        QCOMPARE(v[0]["refYear"].toInt(), 2015);
+        QCOMPARE(v[0]["ref_year"].toInt(), 2015);
         QCOMPARE(v[1]["age"].toDouble(), 2500.0);
         v = reg.parse("C14 : 2500 ± 30, 3000 ± 40 ; TL : 488 ± 19 (mesure en 2015)");
         QCOMPARE(methods(v), QStringList({ "c14", "c14", "tl" }));
@@ -2607,6 +3167,17 @@ private slots:
         QVERIFY(r.status != Convergence::Unknown);
         QCOMPARE(int(r.thetaTraces.size()), 4);
         QCOMPARE(int(r.thetaTraces[0].size()), 3000);                   // 30000 / thinning 10
+        // largeur de bande du lissage de θ : celle de kernelBandwidth sur tous les tirages, et une par t_i
+        {
+            std::vector<double> all;
+            for (const auto& tr : r.thetaTraces) all.insert(all.end(), tr.begin(), tr.end());
+            Bandwidth usedRule = Bandwidth::Silverman;
+            QCOMPARE(r.thetaBandwidth, kernelBandwidth(all, Bandwidth::SheatherJones, &usedRule));
+            QCOMPARE(r.thetaBandwidthSJ, usedRule == Bandwidth::SheatherJones);
+            QVERIFY(r.thetaBandwidth > 0 && r.thetaBandwidth < 21.2);    // bien plus fin que l'écart-type de θ
+            QCOMPARE(int(r.tiBandwidth.size()), 2);
+            QVERIFY(r.tiBandwidth[0] > 0);
+        }
         // Reproductible avec les mêmes graines
         const EventMcmcResult r2 = runEventMcmc({ { "A", dens(1000, 30), {} }, { "B", dens(1020, 30), {} } }, ms, 0, 2000);
         QCOMPARE(r2.thetaTraces[2], r.thetaTraces[2]);
@@ -2678,6 +3249,9 @@ private slots:
         QVERIFY(seldon::CurveSpec::fromJson(o.extraPlots[0], sp));
         QVERIFY(!sp.yFromZero);
         QVERIFY(o.promptBlock.contains("Convergence"));
+        QVERIFY(o.noticeHtml.contains("largeur de bande <b>h = "));
+        QVERIFY(o.noticeHtml.contains("Lissage des densités"));
+        QVERIFY(o.promptBlock.contains("lissée par noyau gaussien : h = "));
 
         // Outil du modèle distant
         const auto t = tools::execute("calculer_evenement",
@@ -2802,7 +3376,7 @@ private slots:
         const QJsonObject am = MethodRunner::normalizeRequest(ds[0].toObject());
         QCOMPARE(am["method"].toString(), QString("am"));
         QCOMPARE(am["process"].toString(), QString("I"));
-        QCOMPARE(am["curveI"].toString(), QString("gal2002sph2014_i"));
+        QCOMPARE(am["curve_i"].toString(), QString("gal2002sph2014_i"));
         QVERIFY(!am.contains("wiggle"));
         QCOMPARE(MethodRunner::normalizeRequest(ds[1].toObject())["wiggle"].toObject()["type"].toString(), QString("gaussian"));
         QCOMPARE(MethodRunner::normalizeRequest(ds[2].toObject())["wiggle"].toObject()["max"].toDouble(), 10.0);

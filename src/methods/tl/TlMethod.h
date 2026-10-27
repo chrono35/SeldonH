@@ -32,7 +32,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 --------------------------------------------------------------------- */
 
 // Méthode « TL/OSL » : luminescence (plugin_tl de ChronoModel).  Âge en années avant l'année de mesure :
-//   L(t) = exp( -½ ((age - (refYear - t)) / σ)² ) / σ ,   domaine : refYear - age ± 5σ
+//   L(t) = exp( -½ ((age - (ref_year - t)) / σ)² ) / σ ,   domaine : ref_year - age ± 5σ
 #pragma once
 
 #include <QRegularExpression>

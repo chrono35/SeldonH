@@ -166,7 +166,9 @@ bool LlmCore::load(const LlmParams& p, std::string& err, const std::function<boo
     chatTemplate_ = tmpl ? tmpl : "";
     chatML_ = chatTemplate_.find("<|im_start|>") != std::string::npos;
     templateHasThinkSwitch_ = chatTemplate_.find("enable_thinking") != std::string::npos;
+    needCheckpoints_ = llama_model_is_recurrent(model_) || llama_model_is_hybrid(model_);
     cached_.clear();
+    checkpoints_.clear();
     return true;
 }
 
@@ -176,13 +178,112 @@ void LlmCore::unload()
     if (model_) { llama_model_free(model_);  model_ = nullptr; }
     vocab_ = nullptr;
     cached_.clear();
+    checkpoints_.clear();
+    needCheckpoints_ = false;
     chatTemplate_.clear();
 }
 
 void LlmCore::resetCache()
 {
+    forgetCache();
+}
+
+void LlmCore::forgetCache()
+{
     cached_.clear();
+    checkpoints_.clear();
     if (ctx_) llama_memory_clear(llama_get_memory(ctx_), true);
+}
+
+size_t LlmCore::checkpointBytes() const
+{
+    size_t n = 0;
+    for (const Checkpoint& cp : checkpoints_) n += cp.state.size();
+    return n;
+}
+
+void LlmCore::saveCheckpoint(size_t nTokens)
+{
+    if (!ctx_ || nTokens == 0 || nTokens != cached_.size()) return;      // l'état doit correspondre à cached_
+    for (const Checkpoint& cp : checkpoints_) if (cp.nTokens == nTokens) return;
+    const size_t size = llama_state_seq_get_size_ext(ctx_, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+    if (size == 0) return;
+    Checkpoint cp;
+    cp.nTokens = nTokens;
+    cp.state.resize(size);
+    if (llama_state_seq_get_data_ext(ctx_, cp.state.data(), size, 0, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) != size) return;
+    // Place limitée : on retire le plus ancien, sauf le plus court (fin du message système, utile après une troncature).
+    while (checkpoints_.size() >= kMaxCheckpoints) {
+        size_t shortest = 0;
+        for (size_t i = 1; i < checkpoints_.size(); ++i)
+            if (checkpoints_[i].nTokens < checkpoints_[shortest].nTokens) shortest = i;
+        checkpoints_.erase(checkpoints_.begin() + (shortest == 0 ? 1 : 0));
+    }
+    checkpoints_.push_back(std::move(cp));
+}
+
+bool LlmCore::restoreCheckpoint(size_t maxTokens, size_t& restored)
+{
+    const Checkpoint* best = nullptr;
+    for (const Checkpoint& cp : checkpoints_)
+        if (cp.nTokens <= maxTokens && cp.nTokens <= cached_.size() && (!best || cp.nTokens > best->nTokens)) best = &cp;
+    if (!best) return false;
+    // L'état récurrent revient à la position nTokens - 1 ; l'attention garde ses tokens, qu'on raccourcit ensuite.
+    if (llama_state_seq_set_data_ext(ctx_, best->state.data(), best->state.size(), 0,
+                                     LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0)
+        return false;
+    if (!llama_memory_seq_rm(llama_get_memory(ctx_), 0, static_cast<llama_pos>(best->nTokens), -1)) return false;
+    restored = best->nTokens;
+    return true;
+}
+
+std::string LlmCore::formatPrefix(const std::vector<ChatMessage>& chat, size_t n) const
+{
+    n = std::min(n, chat.size());
+    if (chatML_ || chatTemplate_.empty()) {
+        std::string s;
+        for (size_t i = 0; i < n; ++i) s += "<|im_start|>" + chat[i].role + "\n" + chat[i].content + "<|im_end|>\n";
+        return s;
+    }
+    std::vector<llama_chat_message> msgs;
+    size_t total = 0;
+    for (size_t i = 0; i < n; ++i) {
+        msgs.push_back({ chat[i].role.c_str(), chat[i].content.c_str() });
+        total += chat[i].content.size() + chat[i].role.size() + 16;
+    }
+    std::vector<char> buf(std::max<size_t>(total * 2, 1024));
+    int r = llama_chat_apply_template(chatTemplate_.c_str(), msgs.data(), msgs.size(), false,
+                                      buf.data(), static_cast<int32_t>(buf.size()));
+    if (r > static_cast<int>(buf.size())) {
+        buf.resize(static_cast<size_t>(r));
+        r = llama_chat_apply_template(chatTemplate_.c_str(), msgs.data(), msgs.size(), false,
+                                      buf.data(), static_cast<int32_t>(buf.size()));
+    }
+    return r > 0 ? std::string(buf.data(), static_cast<size_t>(r)) : std::string();
+}
+
+std::vector<size_t> LlmCore::checkpointPositions(const std::vector<ChatMessage>& msgs,
+                                                 const std::vector<llama_token>& prompt) const
+{
+    // Positions qui resteront communes au tour suivant :
+    //   - fin du message système (seule partie conservée quand l'historique est tronqué) ;
+    //   - début du dernier message utilisateur (son texte peut changer au tour suivant : rappel retiré…) ;
+    //   - fin du dernier message utilisateur (la réponse, elle, revient sans son bloc <think>).
+    std::vector<size_t> counts;
+    if (!msgs.empty() && msgs[0].role == "system") counts.push_back(1);
+    if (msgs.size() >= 2) counts.push_back(msgs.size() - 1);
+    counts.push_back(msgs.size());
+
+    std::vector<size_t> pos;
+    for (size_t n : counts) {
+        const std::string s = formatPrefix(msgs, n);
+        if (s.empty()) continue;
+        const std::vector<llama_token> t = tokenize(s);
+        size_t k = 0;                                         // préfixe réellement commun avec le prompt
+        while (k < t.size() && k < prompt.size() && t[k] == prompt[k]) ++k;
+        if (k > 0 && k < prompt.size() && (pos.empty() || k > pos.back())) pos.push_back(k);
+    }
+    return pos;
 }
 
 std::string LlmCore::description() const
@@ -343,8 +444,7 @@ bool LlmCore::decodeTokens(const llama_token* tok, int n, std::string& err)
         if (rc != 0) {
             err = rc == 1 ? "Contexte saturé pendant l'évaluation du prompt."
                           : "Erreur d'évaluation llama_decode (code " + std::to_string(rc) + ").";
-            llama_memory_clear(llama_get_memory(ctx_), true);
-            cached_.clear();
+            forgetCache();
             return false;
         }
         cached_.insert(cached_.end(), tok + done, tok + done + chunk);
@@ -396,17 +496,39 @@ bool LlmCore::generate(const std::vector<ChatMessage>& chat, const SamplingParam
     while (common < lim && cached_[common] == prompt[common]) ++common;
     llama_memory_t mem = llama_get_memory(ctx_);
     if (common < cached_.size()) {
-        if (!llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1)) {
-            llama_memory_clear(mem, true);                    // modèles récurrents : retrait partiel impossible
-            common = 0;
+        if (llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1)) {
+            cached_.resize(common);
+        } else {
+            // Modèle récurrent / hybride : retrait partiel impossible, on repart du meilleur point de reprise.
+            size_t from = 0;
+            if (restoreCheckpoint(common, from)) {
+                cached_.resize(from);
+                common = from;
+                st.fromCheckpoint = true;
+            } else {
+                forgetCache();
+                common = 0;
+            }
         }
-        cached_.resize(common);
     }
+    checkpoints_.erase(std::remove_if(checkpoints_.begin(), checkpoints_.end(),
+                                      [&](const Checkpoint& cp) { return cp.nTokens > common; }),
+                       checkpoints_.end());
     st.reusedTokens = static_cast<int>(common);
 
     // --- 3. Évaluation du prompt ---
     auto t0 = Clock::now();
-    if (!decodeTokens(prompt.data() + common, static_cast<int>(prompt.size() - common), err)) return false;
+    size_t pos = common;
+    if (needCheckpoints_) {
+        for (size_t mark : checkpointPositions(msgs, prompt)) {
+            if (mark <= pos) continue;
+            if (!decodeTokens(prompt.data() + pos, static_cast<int>(mark - pos), err)) return false;
+            if (stop_.load()) break;
+            pos = mark;
+            saveCheckpoint(mark);
+        }
+    }
+    if (!stop_.load() && !decodeTokens(prompt.data() + pos, static_cast<int>(prompt.size() - pos), err)) return false;
     st.promptMs = msSince(t0);
     if (stop_.load()) {
         st.stoppedByUser = true;
@@ -441,8 +563,7 @@ bool LlmCore::generate(const std::vector<ChatMessage>& chat, const SamplingParam
         const int rc = llama_decode(ctx_, b);
         if (rc != 0) {
             err = rc == 1 ? "Contexte saturé." : "Erreur llama_decode (code " + std::to_string(rc) + ").";
-            llama_memory_clear(mem, true);
-            cached_.clear();
+            forgetCache();
             ok = false;
             break;
         }

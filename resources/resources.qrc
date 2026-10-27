@@ -4,6 +4,12 @@
         <file alias="01_conventions_datation.md">skills/01_conventions_datation.md</file>
         <file alias="02_chronomodel_concepts.md">skills/02_chronomodel_concepts.md</file>
         <file alias="03_chronomodel_creer_modele.md">skills/03_chronomodel_creer_modele.md</file>
+        <file alias="13_chronomodel_courbe_age_profondeur.md">skills/13_chronomodel_courbe_age_profondeur.md</file>
+        <file alias="14_date_c14.md">skills/14_date_c14.md</file>
+        <file alias="15_date_f14c.md">skills/15_date_f14c.md</file>
+        <file alias="16_date_tl.md">skills/16_date_tl.md</file>
+        <file alias="17_date_am.md">skills/17_date_am.md</file>
+        <file alias="18_date_densite.md">skills/18_date_densite.md</file>
         <file alias="04_chronomodel_interpreter.md">skills/04_chronomodel_interpreter.md</file>
         <file alias="05_radiocarbone.md">skills/05_radiocarbone.md</file>
         <file alias="06_archeomagnetisme.md">skills/06_archeomagnetisme.md</file>
@@ -19,6 +25,7 @@
     </qresource>
     <qresource prefix="/icons">
         <file alias="seldonh_16.png">icons/seldonh_16.png</file>
+        <file alias="nouvelle_conversation.svg">icons/nouvelle_conversation.svg</file>
         <file alias="seldonh_32.png">icons/seldonh_32.png</file>
         <file alias="seldonh_48.png">icons/seldonh_48.png</file>
         <file alias="seldonh_64.png">icons/seldonh_64.png</file>

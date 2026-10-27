@@ -34,6 +34,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QFile>
 #include <QFileInfo>
 #include <QSvgGenerator>
+
+#include "ChrScene.h"
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QLabel>
@@ -442,7 +444,7 @@ int FigurePanel::count() const { return tabs_->count(); }
 void FigurePanel::clearCurves()
 {
     for (int i = tabs_->count() - 1; i >= 0; --i) {
-        if (!qobject_cast<CurveWidget*>(tabs_->widget(i))) continue;
+        if (!qobject_cast<CurveWidget*>(tabs_->widget(i)) && !qobject_cast<ChrSceneWidget*>(tabs_->widget(i))) continue;
         QWidget* w = tabs_->widget(i);
         tabs_->removeTab(i);
         delete w;
@@ -461,6 +463,7 @@ void FigurePanel::showPage(QWidget* page, const QString& title)
 {
     int i = tabs_->indexOf(page);
     if (i < 0) i = tabs_->addTab(page, title);
+    else tabs_->setTabText(i, title);
     tabs_->setCurrentIndex(i);
     updatePlaceholder();
 }
@@ -507,7 +510,7 @@ bool FigurePanel::addCurvesJson(const QJsonObject& o, QString* err)
 void FigurePanel::saveCurrent()
 {
     QWidget* w = tabs_->currentWidget();
-    if (!qobject_cast<CurveWidget*>(w)) return;     // ex. onglet d'aide : rien à enregistrer
+    if (!qobject_cast<CurveWidget*>(w) && !qobject_cast<ChrSceneWidget*>(w)) return;     // ex. onglet d'aide : rien à enregistrer
     const QString pngFilter = tr("Image PNG (*.png)"), svgFilter = tr("Image vectorielle SVG (*.svg)");
     QString selected = pngFilter;
     QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer la figure"), tabs_->tabText(tabs_->currentIndex()) + ".png",
@@ -525,8 +528,22 @@ bool FigurePanel::saveCurrentTo(const QString& path, QString* err) const
 {
     QWidget* w = tabs_->currentWidget();
     auto* c = qobject_cast<CurveWidget*>(w);
-    if (!c) { if (err) *err = tr("Aucune figure à enregistrer."); return false; }
     const QString title = tabs_->tabText(tabs_->currentIndex());
+    if (auto* sc = qobject_cast<ChrSceneWidget*>(w)) {             // scène d'un modèle ChronoModel
+        const QSize sz = sc->exportSize();
+        bool ok = false;
+        if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
+            const QByteArray svg = sc->renderSvg(sz, title);
+            QFile f(path);
+            ok = !svg.isEmpty() && f.open(QIODevice::WriteOnly) && f.write(svg) == svg.size();
+        } else {
+            const QImage img = sc->render(sz * 2);                  // PNG net : deux pixels par point de scène
+            ok = !img.isNull() && img.save(path, "PNG");
+        }
+        if (!ok && err) *err = tr("Impossible d'écrire %1.").arg(path);
+        return ok;
+    }
+    if (!c) { if (err) *err = tr("Aucune figure à enregistrer."); return false; }
     const QSize size = c->exportSize(QSize(1600, 1000));
     if (QFileInfo(path).suffix().compare("svg", Qt::CaseInsensitive) == 0) {
         const QByteArray svg = c->renderSvg(c->exportSize(QSize(800, 500)), title);

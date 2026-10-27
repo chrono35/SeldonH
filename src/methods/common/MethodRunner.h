@@ -64,6 +64,11 @@ public:
     // Vrai si la question demande de CRÉER un modèle ChronoModel (« fais-moi un modèle avec deux phases… ») : les valeurs
     // citées (âges, mesures) sont alors des données du modèle, pas des datations à calculer une par une.
     static bool isModelRequest(const QString& question);
+    // Courbe âge-profondeur ou tableau CSV au format d'import de ChronoModel (fiche 13 imposée).
+    static bool isAgeDepthRequest(const QString& question);
+    // Méthodes de datation citées dans une question (pour n'injecter que leurs fiches « Date — … ») :
+    // "c14", "f14c", "tl", "am", "gauss" (gaussienne, uniforme, TPQ…), "density".
+    static QStringList datingMethodsIn(const QString& question);
 
     // Une demande de création de modèle ne déclenche aucun calcul automatique (résultat vide).
     static RunOutcome analyzeQuestion(const QString& question, DateFormat format = DateFormat::BcAd);
@@ -113,6 +118,10 @@ public:
     // Demandes JSON écrites dans la question (fragment collé d'un bloc chronomodel ou d'un .chr) :
     //   « calcul Event avec ces deux dates {"method":"c14","age":2570,"error":35}, {"method":"c14",…} ».
     static QVector<QJsonObject> jsonRequests(const QString& text);
+    // Bloc plot dont une série (ou la racine) donne une loi au lieu de valeurs : {"law":"normal","mean":-500,"sd":40}
+    // (mêmes lois et paramètres que density_file). Les points sont calculés par SeldonH (le modèle de langage ne sait pas
+    // évaluer une densité point par point). Objet vide (et `err`) si une loi est invalide ; inchangé sans loi.
+    static QJsonObject expandPlotLaws(const QJsonObject& plot, QString* err = nullptr);
 
     // Décalage (wiggle) écrit dans la question : « wiggle entre 100 et 300 » (range), « décalage de 20 ± 5 »
     // (gaussian), « wiggle de 20 ans » (fixed). Objet vide si aucun.
@@ -124,6 +133,10 @@ public:
     //  - datation au format .chr de ChronoModel ({"plugin_id":"14c","data":{"age":…,"error":…,"ref_curve":…}}) aplatie ;
     //  - nombres écrits en texte (« "35" », « "2,5" ») convertis.
     static QJsonObject normalizeRequest(QJsonObject request);
+    // Noms de champs abandonnés (refYear, errorF, deltaR…) : SeldonH n'emploie que ceux du .chr (ref_year, error_f,
+    // delta_r…). Message d'erreur pour le modèle de langage (« champ « refYear » inconnu : écrire « ref_year » »), vide si
+    // tout va bien. Les datations d'un événement (« dates ») sont vérifiées aussi.
+    static QString obsoleteFieldError(const QJsonObject& request);
 };
 
 } // namespace seldon

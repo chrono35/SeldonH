@@ -33,6 +33,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //   - formater la conversation avec le modèle de chat du modèle (ChatML maison pour Qwen,
 //     llama_chat_apply_template pour Gemma / Llama / Mistral ...) ;
 //   - générer en streaming avec réutilisation du cache KV (préfixe commun) ;
+//   - modèles récurrents ou hybrides (Qwen3.5, Mamba…) : points de reprise de l'état récurrent, sans lesquels
+//     le cache ne peut pas être raccourci et tout le prompt serait réévalué à chaque question ;
 //   - tronquer proprement l'historique si le contexte est plein.
 //
 // Cette classe n'est PAS thread-safe, sauf requestStop() qui peut être appelée de n'importe
@@ -85,6 +87,7 @@ struct SamplingParams {
 struct GenStats {
     int    promptTokens   = 0;   // taille totale du prompt
     int    reusedTokens   = 0;   // tokens retrouvés dans le cache KV
+    bool   fromCheckpoint = false;  // reusedTokens obtenu en restaurant un point de reprise (modèle hybride)
     int    generated      = 0;
     int    droppedMessages = 0;  // messages supprimés pour tenir dans le contexte
     double promptMs       = 0;
@@ -148,6 +151,9 @@ public:
     int  trainContextSize() const;
     int  countTokens(const std::string& text) const;
     void resetCache();                   // oublie le cache KV (nouvelle conversation)
+    bool usesCheckpoints() const { return needCheckpoints_; }   // modèle récurrent / hybride
+    size_t checkpointCount() const { return checkpoints_.size(); }
+    size_t checkpointBytes() const;      // mémoire occupée par les points de reprise
 
     // Construit le prompt texte (exposé pour les tests).
     std::string formatPrompt(const std::vector<ChatMessage>& chat, bool enableThinking,
@@ -158,6 +164,19 @@ private:
     std::string pieceOf(llama_token t) const;
     bool decodeTokens(const llama_token* tok, int n, std::string& err);
     llama_sampler* makeSampler(const SamplingParams& sp) const;
+    void forgetCache();                  // vide le cache KV, cached_ et les points de reprise
+
+    // --- Points de reprise (modèles récurrents / hybrides) ---
+    // L'état d'une couche récurrente résume tous les tokens lus : on ne peut pas en retirer la fin
+    // (llama_memory_seq_rm échoue). On sauvegarde donc l'état récurrent seul (LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY,
+    // quelques dizaines de Mo) à des positions qui resteront communes au tour suivant ; les couches d'attention,
+    // elles, se raccourcissent normalement. Même mécanisme que les « context checkpoints » de llama-server.
+    struct Checkpoint { size_t nTokens = 0; std::vector<uint8_t> state; };
+    std::string formatPrefix(const std::vector<ChatMessage>& chat, size_t n) const;   // n premiers messages
+    std::vector<size_t> checkpointPositions(const std::vector<ChatMessage>& msgs,
+                                            const std::vector<llama_token>& prompt) const;
+    void saveCheckpoint(size_t nTokens);
+    bool restoreCheckpoint(size_t maxTokens, size_t& restored);
 
     llama_model*         model_ = nullptr;
     llama_context*       ctx_   = nullptr;
@@ -169,6 +188,9 @@ private:
     bool                 chatML_ = false;     // format ChatML géré en interne
     bool                 templateHasThinkSwitch_ = false;
     std::vector<llama_token> cached_;         // tokens présents dans le cache KV (séquence 0)
+    bool                 needCheckpoints_ = false;   // modèle récurrent ou hybride
+    std::vector<Checkpoint> checkpoints_;     // ordre de création ; nTokens <= cached_.size()
+    static constexpr size_t kMaxCheckpoints = 3;   // ≈ 50 Mo chacun pour Qwen3.5-4B
     std::atomic<bool>    stop_{false};
 };
 

@@ -162,17 +162,17 @@ QVector<QJsonObject> AmMethod::parse(const QString& question) const
     if (hasI) o["inc"] = inc;
     if (hasD) o["dec"] = dec;
     if (hasA) o["alpha95"] = a95;
-    if (hasF) { o["field"] = field; o["errorF"] = hasE ? errF : 0.0; }
-    o["steps"] = 500;
+    if (hasF) { o["field"] = field; o["error_f"] = hasE ? errF : 0.0; }
+    o["integration_steps"] = 500;
     QString nI, nD, nF;
     namedCurves(q, nI, nD, nF);
     // Courbes non nommées : défaut régional (« Bulgarie »), sans compter les noms de courbes (« bulgaria_f » ne
     // désigne que la courbe d'intensité).
     QString region = q;
     region.remove(QRegularExpression(QStringLiteral(R"((?<![a-z0-9_])[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*_[idf](?![a-z0-9_]))")));
-    if (hasI) o["curveI"] = nI.isEmpty() ? defaultCurve('I', region) : nI;
-    if (hasD) o["curveD"] = nD.isEmpty() ? defaultCurve('D', region) : nD;
-    if (hasF) o["curveF"] = nF.isEmpty() ? defaultCurve('F', region) : nF;
+    if (hasI) o["curve_i"] = nI.isEmpty() ? defaultCurve('I', region) : nI;
+    if (hasD) o["curve_d"] = nD.isEmpty() ? defaultCurve('D', region) : nD;
+    if (hasF) o["curve_f"] = nF.isEmpty() ? defaultCurve('F', region) : nF;
     out << o;
     return out;
 }
@@ -186,16 +186,16 @@ MethodResult AmMethod::compute(const QJsonObject& p) const
 
     const long double incl = p.value("inc").toDouble(), decl = p.value("dec").toDouble();
     const long double a95 = p.value("alpha95").toDouble();
-    const long double field = p.value("field").toDouble(), errF = p.value("errorF").toDouble();
-    const int steps = std::max(1, p.value("steps").toInt(500));
+    const long double field = p.value("field").toDouble(), errF = p.value("error_f").toDouble();
+    const int steps = std::max(1, p.value("integration_steps").toInt(500));
 
     if ((need.I || need.D) && !(a95 > 0.0L)) return MethodResult::failure("α95 (strictement positif) est nécessaire");
     if (need.F && !(errF > 0.0L)) return MethodResult::failure("l'erreur sur l'intensité (strictement positive) est nécessaire");
 
     const QString qnone;       // pas de texte de question ici : les défauts viennent de l'appelant (JSON)
-    const QString nI = p.value("curveI").toString(defaultCurve('I', qnone)).toLower();
-    const QString nD = p.value("curveD").toString(defaultCurve('D', qnone)).toLower();
-    const QString nF = p.value("curveF").toString(defaultCurve('F', qnone)).toLower();
+    const QString nI = p.value("curve_i").toString(defaultCurve('I', qnone)).toLower();
+    const QString nD = p.value("curve_d").toString(defaultCurve('D', qnone)).toLower();
+    const QString nF = p.value("curve_f").toString(defaultCurve('F', qnone)).toLower();
 
     const RefCurve *cI = nullptr, *cD = nullptr, *cF = nullptr;
     auto load = [&](const QString& n, const RefCurve*& dst, const char* what) -> QString {
@@ -269,9 +269,9 @@ QStringList AmMethod::referenceCurves(const QJsonObject& p) const
     const QString proc = p.value("process").toString().toUpper();
     const QString qnone;
     QStringList out;
-    if (proc.contains('I')) out << QStringLiteral("I|am|") + p.value("curveI").toString(defaultCurve('I', qnone)).toLower();
-    if (proc.contains('D')) out << QStringLiteral("D|am|") + p.value("curveD").toString(defaultCurve('D', qnone)).toLower();
-    if (proc.contains('F')) out << QStringLiteral("F|am|") + p.value("curveF").toString(defaultCurve('F', qnone)).toLower();
+    if (proc.contains('I')) out << QStringLiteral("I|am|") + p.value("curve_i").toString(defaultCurve('I', qnone)).toLower();
+    if (proc.contains('D')) out << QStringLiteral("D|am|") + p.value("curve_d").toString(defaultCurve('D', qnone)).toLower();
+    if (proc.contains('F')) out << QStringLiteral("F|am|") + p.value("curve_f").toString(defaultCurve('F', qnone)).toLower();
     return out;
 }
 
@@ -282,7 +282,7 @@ QString AmMethod::describe(const QJsonObject& p) const
     const QString proc = p.value("process").toString();
     if (proc.contains('I')) parts << QStringLiteral("I = %1°").arg(n(p.value("inc").toDouble()));
     if (proc.contains('D')) parts << QStringLiteral("D = %1°").arg(n(p.value("dec").toDouble()));
-    if (proc.contains('F')) parts << QStringLiteral("F = %1 ± %2 µT").arg(n(p.value("field").toDouble()), n(p.value("errorF").toDouble()));
+    if (proc.contains('F')) parts << QStringLiteral("F = %1 ± %2 µT").arg(n(p.value("field").toDouble()), n(p.value("error_f").toDouble()));
     if (proc.contains('I') || proc.contains('D')) parts << QStringLiteral("α95 = %1°").arg(n(p.value("alpha95").toDouble()));
     return QStringLiteral("Archéomagnétisme (%1) : %2").arg(proc, parts.join(", "));
 }

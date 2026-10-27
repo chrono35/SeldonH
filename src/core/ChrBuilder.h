@@ -88,6 +88,13 @@ public:
     // Résumé compact d'un .chr existant, injectable dans un prompt (interprétation, relecture).
     static QString summarize(const QJsonObject& chr, int maxEvents = 60);
 
+    // Vérification croisée de la spécification écrite par le modèle de langage avec ce qu'a donné l'utilisateur
+    // (`source` : ses questions et ses fichiers joints). Renvoie les écarts, en français :
+    //   - valeur numérique d'une date ou d'une borne absente de la source (valeur inventée ou recopiée d'un exemple) ;
+    //   - nom de date (référence) absent de la source (référence inventée) ;
+    //   - « valeur ± erreur » ou référence de laboratoire (Ly-12345, Bdx-478) de la source absente du modèle (oubli).
+    static QStringList crossCheck(const QJsonObject& spec, const QString& source);
+
     // Convention de contrainte : [a, b] = a plus ancien que b. ChronoModel stocke bwd_id (plus ancien) / fwd_id (plus récent) ;
     // sens vérifié sur trois projets réels.
     static constexpr bool kBwdIsOlder = true;

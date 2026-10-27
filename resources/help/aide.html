@@ -11,10 +11,11 @@
   Pour l'éditer :
    - restez en HTML simple (titres, paragraphes, listes, tableaux, <code>) : l'application ignore les blocs
      <style> et <script> et applique sa propre mise en forme, qui suit le thème clair/sombre du système ;
-   - un exemple cliquable s'écrit  <a class="ex" data-method="c14">C14 de 3560 ± 20 BP</a>  (sans href).
+   - un exemple cliquable s'écrit  <a class="ex" data-method="c14">C14 de 3560 +- 20 BP</a>  (sans href).
      Dans l'application, un clic recopie la phrase dans la zone de question ; dans le navigateur, il la copie
      dans le presse-papiers. data-method (facultatif) indique la méthode de calcul qui doit comprendre la
      phrase : les tests automatiques vérifient chacun de ces exemples ;
+   - un exemple sur plusieurs lignes (tableau CSV…) sépare ses lignes par <br> : elles sont recopiées telles quelles ;
    - pour un lien interne, utilisez  <a href="#ancre">  vers un  <h2 id="ancre">.
 -->
 <style>
@@ -54,10 +55,11 @@
   <li><a href="#demarrer">1. Démarrer</a></li>
   <li><a href="#interface">2. L'interface</a></li>
   <li><a href="#dater">3. Faire une datation</a></li>
+  <li><a href="#calculatrice">3 bis. Calculatrice</a></li>
   <li><a href="#resultats">4. Lire un résultat (HPD)</a></li>
   <li><a href="#evenement">4 bis. Combiner des datations en un événement</a></li>
   <li><a href="#modele">5. Créer un modèle ChronoModel</a></li>
-  <li><a href="#interpreter">6. Interpréter des résultats</a></li>
+  <li><a href="#interpreter">6. Contrôler la convergence</a></li>
   <li><a href="#graphiques">7. Graphiques</a></li>
   <li><a href="#competences">8. Enrichir les compétences</a></li>
   <li><a href="#reglages">9. Préférences</a></li>
@@ -75,7 +77,7 @@
 
 <h2 id="interface">2. L'interface</h2>
 <ul>
-  <li><b>Zone de dialogue</b> (à gauche, en haut) : vos questions et les réponses. Sous une réponse, des liens permettent de la copier ou, pour un modèle ChronoModel, de l'enregistrer en <code>.chr</code>.</li>
+  <li><b>Zone de dialogue</b> (à gauche, en haut) : vos questions et les réponses. Sous une réponse, des liens permettent de la copier ou, pour un modèle ChronoModel, de l'enregistrer en <code>.chr</code> ; <b>↻ Relancer</b> repose la même question avec exactement le même texte envoyé au modèle (la dernière réponse est remplacée ; une question plus ancienne est reposée à la fin de la conversation) ; <b>📄 Exporter le prompt</b> enregistre ce qui a été envoyé au modèle (voir <a href="#prompt">Exporter le prompt</a>).</li>
   <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code>, ou les résultats de ChronoModel en <code>.html</code>). Les images ne sont pas acceptées : le modèle de langage ne reçoit que du texte.</li>
   <li><b>Panneau graphiques</b> (à droite, fermé au démarrage) : une courbe par calcul, et cet onglet d'aide. Un clic sur une figure de la conversation l'ouvre ; <code>F4</code> l'affiche ou le masque.</li>
   <li><b>Volet Historique</b> (à gauche, repliable) : vos conversations, la plus récente en haut (voir plus bas). Une fine bande avec une flèche le replie ou le déplie : <b>volet ouvert, elle est à sa droite</b> (◀ pour le replier) ; volet replié, elle reste au bord gauche de la fenêtre (▶ pour le rouvrir). Raccourci : <code>Ctrl+Maj+H</code> (<code>⌘⇧H</code> sur Mac), ou le menu <i>Affichage</i>.</li>
@@ -94,6 +96,15 @@
 </ul>
 <table><tr><td class="warn"><b>Confidentialité :</b> l'historique est stocké <b>en clair sur cet ordinateur</b>, dans le dossier de données de SeldonH. Il contient aussi le texte des fichiers que vous avez joints. Il n'est jamais envoyé nulle part par SeldonH. Pour ne rien conserver, décochez « Enregistrer automatiquement les conversations » dans les Préférences, puis effacez l'historique existant.</td></tr></table>
 
+<h3 id="prompt">Exporter le prompt (reproductibilité)</h3>
+<p>Le lien <b>📄 Exporter le prompt</b>, sous chaque réponse, enregistre exactement ce que SeldonH a envoyé au modèle de langage pour l'obtenir, afin de comprendre une réponse, de la comparer à une autre ou de la reproduire :</p>
+<ul>
+  <li>la date, la version de SeldonH, le <b>moteur</b> (modèle local et son fichier, taille du contexte, ou serveur et modèle distants, appel d'outils) et les <b>paramètres d'échantillonnage</b> (température, longueur maximale, mode réflexion ; pour le modèle local top-k, top-p, min-p, pénalités et graine) ;</li>
+  <li>tous les <b>messages</b> : le texte système (compétences permanentes, format des dates, consignes personnelles), les échanges précédents, puis la question telle que le modèle l'a reçue, avec les fiches de compétences injectées, les résultats de calcul de SeldonH et le fichier joint ;</li>
+  <li>la <b>réponse obtenue</b>, les éventuelles suites d'une réponse coupée, et le nombre de messages que le moteur a dû oublier si le contexte était plein.</li>
+</ul>
+<p>Deux formats : <b>JSON</b> (complet, réutilisable par un programme) ou <b>Markdown</b> (lisible). L'instantané est gardé dans l'historique ; les conversations enregistrées avant cette version n'en ont pas. Avec un modèle local et une température non nulle, la graine aléatoire change à chaque génération : pour reproduire une réponse à l'identique, mettez la température à 0.</p>
+
 <h2 id="dater">3. Faire une datation</h2>
 <p>Écrivez simplement la mesure avec son erreur. SeldonH reconnaît la méthode, calcule, affiche une fiche de résultat et la figure de la densité dans la conversation. Cliquez sur la figure pour l'ouvrir dans le panneau des graphiques, à droite (zoom, export PNG ou SVG) ; ce panneau, fermé au démarrage, s'ouvre aussi par <i>Affichage &gt; Panneau graphiques</i> (F4). Le modèle de langage commente ensuite.</p>
 
@@ -101,28 +112,28 @@
   <tr><th>Méthode</th><th>Exemple (cliquez)</th><th>À savoir</th></tr>
   <tr>
     <td><b>Radiocarbone</b> (14C)</td>
-    <td><a class="ex" data-method="c14">C14 de 3560 ± 20 BP</a><br>
-        <a class="ex" data-method="c14">14C 3560 ± 20 BP, courbe IntCal13</a><br>
-        <a class="ex" data-method="c14">coquille marine, 14C 3000 ± 30 BP, ΔR 100 ± 50</a><br>
-        <a class="ex" data-method="c14">14C 2500 ± 30 BP, hémisphère sud</a></td>
+    <td><a class="ex" data-method="c14">C14 de 3560 +- 20 BP</a><br>
+        <a class="ex" data-method="c14">14C 3560 +- 20 BP, courbe IntCal13</a><br>
+        <a class="ex" data-method="c14">coquille marine, 14C 3000 +- 30 BP, ΔR 100 +- 50</a><br>
+        <a class="ex" data-method="c14">14C 2500 +- 30 BP, hémisphère sud</a></td>
     <td>Âge conventionnel en <b>BP</b> (avant 1950). Courbe par défaut : IntCal20 ; SHCal20 si « hémisphère sud » ; Marine20 si matériel marin (précisez ΔR ± erreur). Courbes disponibles : IntCal04/09/13/20, SHCal04/13/20, Marine04/09/13/20, UWSY98 (nommez-la dans la question pour la choisir).</td>
   </tr>
   <tr>
     <td><b>F14C</b> (post-bombe)</td>
-    <td><a class="ex" data-method="f14c">échantillon F14C = 1,1023 ± 0,0030</a></td>
+    <td><a class="ex" data-method="f14c">échantillon F14C = 1,1023 +- 0,0030</a></td>
     <td>Pour les échantillons postérieurs à 1950. Courbes « bomb » de ChronoModel (hémisphères nord et sud).</td>
   </tr>
   <tr>
     <td><b>TL / OSL</b></td>
-    <td><a class="ex" data-method="tl">TL 800 ± 60 ans, mesuré en 2015</a><br>
-        <a class="ex" data-method="tl">OSL 12,5 ± 1,2 ka</a></td>
+    <td><a class="ex" data-method="tl">TL 800 +- 60 ans, mesuré en 2015</a><br>
+        <a class="ex" data-method="tl">OSL 12,5 +- 1,2 ka</a></td>
     <td>Précisez l'année de mesure ; sinon SeldonH suppose l'année en cours et l'indique dans un avertissement.</td>
   </tr>
   <tr>
     <td><b>Archéomagnétisme</b></td>
     <td><a class="ex" data-method="am">archéomagnétisme : inclinaison 65°, alpha95 = 1</a><br>
         <a class="ex" data-method="am">archéomagnétisme : inclinaison 62, déclinaison -3, α95 = 2</a><br>
-        <a class="ex" data-method="am">archéomagnétisme : intensité 52 ± 3 µT</a></td>
+        <a class="ex" data-method="am">archéomagnétisme : intensité 52 +- 3 µT</a></td>
     <td>Inclinaison (I), déclinaison (D) et/ou intensité (F), avec α95 pour les directions. Courbes intégrées : Paris (Gallet 2002) pour I et D, GwH2013 pour F, Bulgarie. La déclinaison seule demande aussi l'inclinaison : son erreur vaut α95 / (2,448 · cos I).</td>
   </tr>
   <tr>
@@ -140,8 +151,8 @@
 <h3>Plusieurs datations dans la même question</h3>
 <p>Citez-les à la suite : toutes sont calculées, chacune avec sa fiche, et leurs densités sont <b>superposées sur une seule figure</b> (une couleur par date, avec la légende). Les méthodes peuvent être mélangées : chaque valeur ± erreur est rattachée au mot-clé qui la précède (« C14 », « TL »…) ou à l'unité qui la suit (« BP »).</p>
 <ul>
-  <li><a class="ex" data-method="c14">C14 de 2500 ± 30 BP et 3000 ± 40 BP</a></li>
-  <li><a class="ex" data-method="tl">TL 488 ± 19 ans mesuré en 2015 et C14 2500 ± 30 BP</a></li>
+  <li><a class="ex" data-method="c14">C14 de 2500 +- 30 BP et 3000 +- 40 BP</a></li>
+  <li><a class="ex" data-method="tl">TL 488 +- 19 ans mesuré en 2015 et C14 2500 +- 30 BP</a></li>
 </ul>
 <p>Si l'assistant calcule ensuite d'autres dates pour la même question, elles s'ajoutent à cette figure au lieu d'ouvrir un nouvel onglet. Pour estimer <b>une date commune</b> à partir de ces datations, voir <a href="#evenement">Combiner des datations en un événement</a>.</p>
 
@@ -150,13 +161,13 @@
 <table>
   <tr><th>Décalage</th><th>Exemple (cliquez)</th><th>Effet</th></tr>
   <tr><td><b>Fixe</b></td>
-      <td><a class="ex" data-method="c14">C14 2500 ± 30 BP, wiggle de 25 ans</a></td>
+      <td><a class="ex" data-method="c14">C14 2500 +- 30 BP, wiggle de 25 ans</a></td>
       <td>La densité est translatée de δ.</td></tr>
   <tr><td><b>Intervalle</b> (δ uniforme)</td>
       <td><a class="ex" data-method="gauss">date gaussienne N(250, 10) avec un wiggle entre 100 et 300</a></td>
       <td>Densité élargie : ici 352 → 548 apr. J.-C. (HPD 95 %), moyenne 450.</td></tr>
   <tr><td><b>Gaussien</b></td>
-      <td><a class="ex" data-method="tl">TL 800 ± 60 ans mesuré en 2015, décalage de 20 ± 5 ans</a></td>
+      <td><a class="ex" data-method="tl">TL 800 +- 60 ans mesuré en 2015, décalage de 20 +- 5 ans</a></td>
       <td>Densité élargie : les écarts-types s'ajoutent en quadrature.</td></tr>
 </table>
 <p>Mots reconnus : « wiggle », « décalage », « delta » ou « δ » (mais pas « delta R » / « ΔR », réservoir marin du 14C). Le décalage n'est appliqué automatiquement que si la question contient <b>une seule</b> datation ; avec plusieurs, précisez à l'assistant laquelle est décalée, ou utilisez un <a href="#evenement">événement</a>.</p>
@@ -170,18 +181,98 @@
 <h3>Quand la question est incomplète</h3>
 <p>Si l'âge ou l'erreur manque, SeldonH ne calcule pas et le modèle vous demande la valeur manquante. Il ne doit jamais citer d'intervalle calibré « de tête » : en cas de doute, demandez-lui de refaire le calcul avec la phrase complète.</p>
 
+<h2 id="calculatrice">3 bis. Calculatrice</h2>
+<p>Une question qui n'est <b>qu'un calcul</b> est calculée par SeldonH lui-même : résultat exact et immédiat, <b>sans le modèle de langage</b> (rien n'est envoyé à un modèle distant, et il n'a pas besoin d'être chargé). Elle peut commencer par « calcule », « combien font » ou « que vaut », et finir par « = » ou « ? ». Dès qu'il y a un autre mot (« que vaut 2+3 en BP ? »), une unité (« BP ») ou une erreur « +- », la question part au modèle ou devient une datation.</p>
+<ul>
+  <li><a class="ex" data-method="calc">2+3</a> · <a class="ex" data-method="calc">(1950 - 3560) * 1,03</a> · <a class="ex" data-method="calc">sqrt(30^2 + 40^2)</a></li>
+  <li><a class="ex" data-method="calc">ADtoBP(-550)</a> · <a class="ex" data-method="calc">BPtoAD(2500)</a> · <a class="ex" data-method="calc">BCtoAD(551)</a> · <a class="ex" data-method="calc">ADtoKa(-50000)</a></li>
+  <li><a class="ex" data-method="calc">65 / (2,448 * cos(62))</a> · <a class="ex" data-method="calc">round(1950 / 7; 2)</a></li>
+  <li><a class="ex" data-method="calc">a = 3560<br>b = 20<br>sqrt(a^2 + b^2)<br>ADtoBP(-a)</a></li>
+  <li><a class="ex" data-method="calc">C14toF14C(2500; 30)</a> · <a class="ex" data-method="calc">F14CtoC14(1.1023; 0.0030)</a></li>
+  <li><a class="ex" data-method="calc">ReducVGP(43.6; 1.44; 8.5; 61.2; 48.85; 2.35)</a> · <a class="ex" data-method="calc">ReducGAD(61.2; 43.6; 48.85)</a> · <a class="ex" data-method="calc">ReducVADM(58.3; 43.6; 48.85)</a></li>
+  <li><a class="ex" data-method="calc">p = VGP(43.6; 1.44; 8.5; 61.2; 2.1)<br>VGPtoDI(p; p_lon; 48.85; 2.35)</a> · <a class="ex" data-method="calc">VADM(58.3; 1.5; 43.6)</a></li>
+  <li><a class="ex" data-method="calc">(2500 +- 30) - (2400 +- 40)</a> · <a class="ex" data-method="calc">2 * (310 +- 50)</a> · <a class="ex" data-method="calc">ADtoBP(-550 +- 20)</a></li>
+  <li><a class="ex" data-method="calc">moy_ponderee(2500 +- 30; 2470 +- 35; 2530 +- 25)</a> · <a class="ex" data-method="calc">moyenne(2500; 2470; 2530)</a> · <a class="ex" data-method="calc">ecart_type(2500; 2470; 2530)</a></li>
+</ul>
+<table>
+  <tr><th>Élément</th><th>Écriture</th><th>Remarques</th></tr>
+  <tr><td>Nombres</td><td><code>12</code> <code>1.5</code> <code>1,5</code> <code>2e3</code> <code>2,5E-2</code></td><td>Virgule ou point décimal. Dans les parenthèses d'une fonction : si les arguments sont séparés par <code>;</code>, la virgule est décimale (<code>moyenne(15,6; 12)</code> = 13,8) ; sinon la virgule sépare les arguments (<code>max(1,5)</code> = 5, maximum de 1 et 5). Pour une fonction à un seul argument décimal, écrivez un point : <code>sqrt(2.5)</code> (<code>sqrt(2,5)</code> serait lu comme deux arguments).</td></tr>
+  <tr><td>Opérations</td><td><code>+ - * / ^</code> (aussi <code>**</code>, <code>×</code>, <code>÷</code>, <code>²</code>), parenthèses</td><td>Priorités usuelles ; la puissance est prioritaire sur le signe : <code>-2^2</code> = −4 ; <code>2^3^2</code> = 2^9.</td></tr>
+  <tr><td>Fonctions</td><td><code>sqrt</code> (ou <code>racine</code>), <code>exp</code>, <code>ln</code>, <code>log</code> (base 10), <code>abs</code>, <code>floor</code>, <code>ceil</code>, <code>round(x)</code> ou <code>round(x; n)</code> (n décimales, aussi <code>arrondi</code>), <code>min(…)</code>, <code>max(…)</code></td><td><code>min</code> et <code>max</code> acceptent autant d'arguments que voulu.</td></tr>
+  <tr><td>Trigonométrie</td><td><code>sin cos tan asin acos atan atan2(y; x)</code></td><td><b>En degrés</b> (inclinaisons, déclinaisons). En radians : <code>sinr cosr tanr</code> ; conversions <code>rad(x)</code>, <code>deg(x)</code>.</td></tr>
+  <tr><td>Constantes</td><td><code>pi</code> (ou π), <code>e</code>, <code>ans</code></td><td><code>ans</code> : dernier résultat.</td></tr>
+  <tr><td>Variables</td><td><code>a = 3560</code></td><td>Une instruction par ligne (Maj+Entrée) ou séparées par <code>;</code>. Les variables restent connues jusqu'à la nouvelle conversation ; majuscules et minuscules sont confondues.</td></tr>
+</table>
+<h3 id="calc-erreurs">Valeurs avec incertitude</h3>
+<p>Une valeur s'écrit avec son erreur (1σ) : <code>2500 +- 30</code>, <code>2500 ± 30</code> ou <code>2500 +/- 30</code>. L'erreur suit tous les calculs et toutes les fonctions, propagée au premier ordre : σ² = Σ (∂f/∂x<sub>i</sub> · σ<sub>i</sub>)². Le résultat est affiché arrondi à deux chiffres significatifs de l'erreur (<code>620 ± 100</code>) ; la valeur exacte reste dans la variable.</p>
+<table><tr><td class="warn"><b>Hypothèse : erreurs indépendantes.</b> Les erreurs de valeurs différentes sont supposées sans corrélation. Une même valeur utilisée deux fois n'est pas reconnue comme telle : avec <code>a = 2500 +- 30</code>, <code>a - a</code> donne 0 ± 42 (30 √2), et non 0 ± 0. Pour une grandeur qui dépend deux fois de la même mesure, écrivez la formule pour qu'elle n'apparaisse qu'une fois, ou propagez l'erreur à la main. Le premier ordre suppose aussi des erreurs petites devant la courbure de la fonction (une exponentielle ou un logarithme avec une grande erreur relative sont mal approchés).</td></tr></table>
+<ul>
+  <li><b>« ± » a la priorité de + et −</b> : <code>2*310 +- 50</code> = 620 ± 50, mais <code>2*(310 +- 50)</code> = 620 ± 100. Mettez la valeur et son erreur entre parenthèses.</li>
+  <li><code>val(x)</code> et <code>err(x)</code> : la valeur et l'erreur d'un résultat (valeurs exactes).</li>
+  <li>Les arrondis (<code>round</code>, <code>floor</code>, <code>ceil</code>) gardent l'erreur ; <code>min</code> et <code>max</code> gardent celle de la valeur choisie.</li>
+  <li>Une valeur avec erreur seule (« 3560 +- 20 ») n'est pas un calcul : c'est une mesure, et avec une unité ou un nom de méthode (« 3560 +- 20 BP », « C14 … »), une datation.</li>
+</ul>
+
+<h3 id="calc-stats">Statistiques sur une liste</h3>
+<table>
+  <tr><th>Fonction</th><th>Résultat</th></tr>
+  <tr><td><code>moyenne(…)</code> (<code>mean</code>)</td><td>Moyenne arithmétique. Affiche aussi n, l'écart-type des valeurs et σ/√n ; si les valeurs ont des erreurs, celle de la moyenne est √(Σσ<sub>i</sub>²) / n.</td></tr>
+  <tr><td><code>ecart_type(…)</code> (<code>sd</code>)</td><td>Écart-type de l'échantillon (dénominateur n − 1).</td></tr>
+  <tr><td><code>mediane(…)</code> (<code>median</code>)</td><td>Médiane.</td></tr>
+  <tr><td><code>somme(…)</code> (<code>sum</code>)</td><td>Somme, erreurs ajoutées en quadrature.</td></tr>
+  <tr><td><code>moy_ponderee(…)</code> (<code>wmean</code>)</td><td><b>Moyenne pondérée</b> par 1/σ² et son erreur 1/√(Σ 1/σ<sub>i</sub>²), avec le <b>test de Ward et Wilson</b> (1978) : T = Σ (x<sub>i</sub> − moyenne)² / σ<sub>i</sub>², comparé au χ² à n − 1 degrés de liberté au seuil de 5 %, et sa probabilité p. Si T dépasse le seuil, les valeurs ne sont pas compatibles et la moyenne pondérée n'a pas de sens. Chaque valeur doit avoir une erreur.</td></tr>
+</table>
+<p>Les valeurs sont séparées par <code>;</code> ou <code>,</code>. Variables créées avec <code>m = moy_ponderee(…)</code> : <code>m_t</code>, <code>m_ddl</code>, <code>m_p</code>, <code>m_seuil</code>. Ces fonctions comparent des valeurs ; pour combiner des datations calibrées, utilisez un <a href="#evenement">événement</a> ou un modèle ChronoModel.</p>
+
+<h3 id="conversions">Conversions de dates</h3>
+<p>Dans ces fonctions, <b>AD</b> désigne l'<b>année calendaire signée</b> de ChronoModel (format BC/AD) : négative avant J.-C., l'année 0 étant 1 av. J.-C. (−549 = 550 av. J.-C.). Ce sont les mêmes formules que les formats de date des Préférences.</p>
+<table>
+  <tr><th>Fonction</th><th>Calcul</th><th>Exemple</th></tr>
+  <tr><td><code>ADtoBP(x)</code> · <code>BPtoAD(x)</code></td><td>âge cal BP = 1950 − AD</td><td><code>ADtoBP(-550)</code> = 2500</td></tr>
+  <tr><td><code>ADtoB2K(x)</code> · <code>B2KtoAD(x)</code></td><td>âge cal B2K = 2000 − AD</td><td><code>ADtoB2K(-550)</code> = 2550</td></tr>
+  <tr><td><code>BPtoB2K(x)</code> · <code>B2KtoBP(x)</code></td><td>B2K = BP + 50</td><td><code>BPtoB2K(2500)</code> = 2550</td></tr>
+  <tr><td><code>ADtoKa(x)</code> · <code>KatoAD(x)</code></td><td>âge ka = −AD / 1 000</td><td><code>ADtoKa(-50000)</code> = 50</td></tr>
+  <tr><td><code>ADtoMa(x)</code> · <code>MatoAD(x)</code></td><td>âge Ma = −AD / 1 000 000</td><td><code>MatoAD(1.2)</code> = −1 200 000</td></tr>
+  <tr><td><code>ADtoBC(x)</code> · <code>BCtoAD(x)</code></td><td>année av. J.-C. = 1 − AD</td><td><code>BCtoAD(551)</code> = −550</td></tr>
+</table>
+<h3 id="calc-14c">Radiocarbone : âge 14C et F14C</h3>
+<table>
+  <tr><th>Fonction</th><th>Calcul</th><th>Exemple</th></tr>
+  <tr><td><code>C14toF14C(âge; erreur)</code></td><td>F14C = exp(−âge / 8033) ; erreur = F14C(âge) − F14C(âge + erreur), comme ChronoModel</td><td><code>C14toF14C(2500; 30)</code> = 0,73255 ± 0,00273</td></tr>
+  <tr><td><code>F14CtoC14(F14C; erreur)</code></td><td>âge = −8033 ln F14C ; erreur = 8033 ln(F14C / (F14C − erreur))</td><td><code>F14CtoC14(1.1023; 0.003)</code> = −782,4 ± 21,9 BP</td></tr>
+</table>
+<p>8033 ans est la vie moyenne de Libby (5568 / ln 2). L'erreur est prise du côté ancien, comme dans ChronoModel ; sans erreur (<code>C14toF14C(2500)</code>), seule la valeur est convertie.</p>
+
+<h3 id="calc-am">Archéomagnétisme : VGP, GAD, VADM</h3>
+<p>Angles en degrés ; <b>latitude nord et longitude est positives</b> ; intensité F en µT ; moments dipolaires en 10²² A·m². Pour une courbe de Paris, site de référence 48,85° N ; 2,35° E (vérifiez les coordonnées de référence de la courbe utilisée).</p>
+<table>
+  <tr><th>Fonction</th><th>Résultat</th></tr>
+  <tr><td><code>VGP(lat; lon; D; I)</code> ou <code>VGP(lat; lon; D; I; α95)</code></td><td>Pôle géomagnétique virtuel : latitude (valeur principale), longitude ; avec α95, les demi-axes dp et dm du cône de confiance.</td></tr>
+  <tr><td><code>VGPtoDI(latP; lonP; lat; lon)</code></td><td>Direction D, I que produit ce pôle au site (lat, lon) ; valeur principale I.</td></tr>
+  <tr><td><code>ReducVGP(lat; lon; D; I; latRef; lonRef)</code></td><td><b>Réduction par le VGP</b> d'une direction mesurée au site vers le site de référence : D et I réduites (valeur principale I).</td></tr>
+  <tr><td><code>IGAD(lat)</code></td><td>Inclinaison du dipôle axial centré (GAD) : atan(2 tan lat).</td></tr>
+  <tr><td><code>ReducGAD(I; lat; latRef)</code></td><td><b>Réduction par le GAD</b> de l'inclinaison seule : I + I<sub>GAD</sub>(latRef) − I<sub>GAD</sub>(lat). D inchangée.</td></tr>
+  <tr><td><code>VADM(F; lat)</code> ou <code>VADM(F; σF; lat)</code></td><td>Moment dipolaire axial virtuel : 4π R³ F / (µ0 √(1 + 3 sin² lat)), R = 6 371,2 km ; avec σF, son erreur.</td></tr>
+  <tr><td><code>VDM(F; I)</code> ou <code>VDM(F; σF; I)</code></td><td>Moment dipolaire virtuel : même formule avec la latitude magnétique, tan λ<sub>m</sub> = tan I / 2.</td></tr>
+  <tr><td><code>VADMtoF(m; lat)</code></td><td>Intensité (µT) produite à la latitude lat par le moment m.</td></tr>
+  <tr><td><code>ReducVADM(F; lat; latRef)</code></td><td><b>Réduction par le VADM</b> de l'intensité vers le site de référence : F √(1 + 3 sin² latRef) / √(1 + 3 sin² lat). L'erreur se réduit dans le même rapport.</td></tr>
+</table>
+<p>Une fonction à plusieurs résultats affiche tout ; sa valeur principale sert dans un calcul. Affectée à une variable (<code>p = VGP(…)</code>), elle crée aussi <code>p_lon</code>, <code>p_dp</code>, <code>p_dm</code> (ou <code>_err</code>, <code>_d</code>…, indiqués sous le résultat).</p>
+
+<table><tr><td class="note">Attention : <code>BPtoAD</code> convertit un <b>âge calendaire</b> BP ; il ne calibre pas un âge radiocarbone. Pour un 14C, écrivez la datation (« C14 de 2500 +- 30 BP ») : SeldonH la calibre.</td></tr></table>
+
 <h2 id="resultats">4. Lire un résultat (HPD)</h2>
 <p>Une densité calibrée n'est <b>pas gaussienne</b> : elle est souvent multimodale (plateaux de la courbe). On ne la résume donc <b>jamais</b> par « ± 1σ » ou « ± 2σ ». SeldonH donne :</p>
 <ul>
   <li>les <b>régions HPD à 95 % et à 68 %</b> (Highest Posterior Density) : une ou plusieurs plages, chacune avec sa probabilité ;</li>
-  <li>le <b>MAP</b> (valeur la plus probable), la <b>moyenne ; écart-type</b> et les <b>quartiles</b> de la densité ;</li>
+  <li>le <b>MAP</b> (maximum a posteriori : l'année où la <b>densité</b> de probabilité est maximale), la <b>moyenne ; écart-type</b> et les <b>quartiles</b> de la densité ;</li>
   <li>des avertissements, par exemple si la densité touche la limite ancienne ou récente de la courbe.</li>
 </ul>
 <h3>Un autre niveau de confiance</h3>
 <p>Le niveau est de <b>95 % par défaut</b>. Demandez-en un autre dans la question : la fiche donne alors la HPD à ce niveau (marquée <i>demandé</i>), puis celles à 95 % et 68 % pour comparaison, et le graphique remplit la région au niveau demandé. Niveaux acceptés : de 50 à 99,99 %. L'α95 de l'archéomagnétisme n'est jamais pris pour un niveau de confiance.</p>
 <ul>
-  <li><a class="ex" data-method="c14">C14 de 3560 ± 20 BP, donne la HPD à 99 %</a></li>
-  <li><a class="ex" data-method="tl">TL 800 ± 60 ans, mesuré en 2015, avec un niveau de confiance de 90 %</a></li>
+  <li><a class="ex" data-method="c14">C14 de 3560 +- 20 BP, donne la HPD à 99 %</a></li>
+  <li><a class="ex" data-method="tl">TL 800 +- 60 ans, mesuré en 2015, avec un niveau de confiance de 90 %</a></li>
 </ul>
 
 <table><tr><td class="note">Sur le graphique, <b>seule la région HPD est remplie</b> (95 % par défaut, ou le niveau demandé) ; la courbe entière reste tracée. Les résultats sont ceux de ChronoModel : pour 3560 ± 20 BP avec IntCal13, SeldonH et ChronoModel donnent les mêmes valeurs.</td></tr></table>
@@ -190,9 +281,9 @@
 <p>Quand plusieurs datations, éventuellement de <b>méthodes différentes</b>, datent le même événement (un foyer, un niveau, une construction), SeldonH estime sa date θ avec le <b>modèle d'événement de ChronoModel</b>, par MCMC : chaque date a sa propre dispersion σ<sub>i</sub> autour de θ, de sorte qu'une date discordante pèse peu. Le moteur reprend celui de ChronoModel 4 (échantillonneur par bloc, recuit, adaptation des pas) et ses paramètres MCMC par défaut : 4 chaînes, burn-in 1 000, adaptation par lots de 100 (200 lots au plus), 100 000 itérations d'acquisition, thinning 10.</p>
 <p>Employez le mot <b>événement</b> (ou « event », « combine », « regroupe ») avec au moins deux datations :</p>
 <ul>
-  <li><a class="ex" data-method="event">Calcule l'événement « US 12 » avec C14 2500 ± 30 BP, C14 2470 ± 35 BP et TL 2600 ± 90 ans mesuré en 2015</a></li>
-  <li><a class="ex" data-method="event">Combine en un événement : C14 3560 ± 20 BP et archéomagnétisme : inclinaison 65°, alpha95 = 1</a></li>
-  <li><a class="ex" data-method="event">Calcule l'événement avec C14 2500 ± 30 BP et C14 2530 ± 25 BP, 200 000 itérations, 8 chaînes, graines 1;2;3;4;5;6;7;8</a></li>
+  <li><a class="ex" data-method="event">Calcule l'événement « US 12 » avec C14 2500 +- 30 BP, C14 2470 +- 35 BP et TL 2600 +- 90 ans mesuré en 2015</a></li>
+  <li><a class="ex" data-method="event">Combine en un événement : C14 3560 +- 20 BP et archéomagnétisme : inclinaison 65°, alpha95 = 1</a></li>
+  <li><a class="ex" data-method="event">Calcule l'événement avec C14 2500 +- 30 BP et C14 2530 +- 25 BP, 200 000 itérations, 8 chaînes, graines 1;2;3;4;5;6;7;8</a></li>
 </ul>
 <p>Réglages possibles dans la phrase : nombre d'<b>itérations</b>, de <b>chaînes</b>, <b>burn-in</b>, <b>thinning</b>, <b>graines</b> (pour reproduire exactement un calcul), <b>période d'étude</b> (« période d'étude -1000 à 0 ») et <b>« pas de recuit »</b> (recuit simulé désactivé, comme <i>Recurrence = 0</i> dans ChronoModel) ; sans indication, la période d'étude, loi a priori uniforme de θ, est calculée d'après les datations. Un niveau de confiance autre que 95 % se demande comme pour une date seule.</p>
 
@@ -203,7 +294,7 @@
 </ul>
 <p>Les trois formes de <code>wiggle</code> : <code>{"type":"fixed","value":15}</code>, <code>{"type":"range","min":10,"max":40}</code>, <code>{"type":"gaussian","mean":30,"error":10}</code>. On peut aussi coller les dates telles qu'elles sont dans un fichier <code>.chr</code> de ChronoModel (avec <code>plugin_id</code>, <code>data</code> et <code>delta_type</code>) : SeldonH les convertit. Ou décrire les décalages en phrase à l'assistant, qui appelle alors le calcul :</p>
 <ul>
-  <li><a class="ex">Calcule l'événement « Four » : C14 2500 ± 30 BP sur charbon avec un wiggle entre 10 et 40 ans, et TL 2600 ± 90 ans mesuré en 2015, sans décalage</a></li>
+  <li><a class="ex">Calcule l'événement « Four » : C14 2500 +- 30 BP sur charbon avec un wiggle entre 10 et 40 ans, et TL 2600 +- 90 ans mesuré en 2015, sans décalage</a></li>
 </ul>
 <p>La fiche de résultat donne :</p>
 <ul>
@@ -221,30 +312,37 @@
   <tr><td><b>Acceptation</b></td><td>Part des propositions acceptées (bloc t/σ des dates, décalage de θ).</td><td>Cible d'environ 30 à 46 %.</td></tr>
 </table>
 <p>Le verdict porte sur toutes les variables, θ compris, mais aussi les dispersions σ<sub>i</sub> et S0, qui se mélangent souvent moins bien : la fiche liste les variables sous les seuils. Si θ est bon mais pas les σ<sub>i</sub>, la date de l'événement reste lisible ; sinon augmentez le nombre d'itérations ou de chaînes, et vérifiez que les datations datent bien le même événement.</p>
-<table><tr><td class="warn"><b>Limites :</b> un seul événement, sans contrainte ni phase (pour cela, créez un modèle et lancez-le dans ChronoModel). La densité de θ est lissée avec la largeur de Silverman, et non celle de Sheather-Jones de ChronoModel : de petites différences d'arrondi des HPD sont normales.</td></tr></table>
+<table><tr><td class="warn"><b>Limites :</b> un seul événement, sans contrainte ni phase (pour cela, créez un modèle et lancez-le dans ChronoModel). La densité de θ est estimée à partir des tirages MCMC par un noyau gaussien dont la largeur de bande h suit la règle de Sheather-Jones, comme ChronoModel (repli sur la règle de Silverman si elle n'a pas de solution) ; la fiche donne la valeur de h utilisée. Les tirages différant d'un calcul à l'autre, de petites différences d'arrondi des HPD sont normales.</td></tr></table>
 
 <h2 id="modele">5. Créer un modèle ChronoModel</h2>
 <p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage prépare une spécification, que SeldonH vérifie : si le modèle est complet, la réponse affiche « 📦 Modèle ChronoModel prêt » et le lien <i>💾 Enregistrer le modèle (.chr)</i> ; s'il manque quelque chose (un événement sans date, une relation peu claire, un nom inconnu), SeldonH le liste et n'enregistre rien tant que ce n'est pas complété. La spécification JSON n'est pas affichée ; demandez-la explicitement (« montre le JSON du modèle ») pour la voir.</p>
 <p>Exemples de demandes :</p>
 <ul>
-  <li><a class="ex">Fais-moi un modèle ChronoModel avec deux phases, Phase ancienne puis Phase récente. US 12 (phase ancienne) : date gaussienne -520 ± 35. US 10 (phase récente) : date gaussienne -430 ± 40. US 12 est plus ancienne que US 10.</a></li>
-  <li><a class="ex">Fais-moi un modèle ChronoModel : l'US 5 est datée par une date gaussienne 1000 ± 30 avec un wiggle entre 10 et 40 ans et par une date gaussienne 1030 ± 25 sans décalage ; l'US 4, date gaussienne 1100 ± 30 avec un décalage fixe de -10 ans, est plus récente que l'US 5.</a></li>
+  <li><a class="ex">Fais-moi un modèle ChronoModel avec deux phases, Phase ancienne puis Phase récente. US 12 (phase ancienne) : date gaussienne -520 +- 35. US 10 (phase récente) : date gaussienne -430 +- 40. US 12 est plus ancienne que US 10.</a></li>
+  <li><a class="ex">Fais-moi un modèle ChronoModel : l'US 5 est datée par une date gaussienne 1000 +- 30 avec un wiggle entre 10 et 40 ans et par une date gaussienne 1030 +- 25 sans décalage ; l'US 4, date gaussienne 1100 +- 30 avec un décalage fixe de -10 ans, est plus récente que l'US 5.</a></li>
+  <li><a class="ex">Crée un modèle avec un Event US10 au-dessus de l'Event US6. US3 est au-dessus de US5. US6 est en dessous de US10 et de US7. US7 est aussi au-dessus de US3. US1 est en dessous de US6 et US5. Dans US10 : 14C 6589 +- 30 et 14C 5879 +- 35. US6 : 14C référence Ly-12345 6458 +- 30 en bleu. US5 : 14C 6455 +- 40. US3 : am Rennes2025 inclinaison 65 alpha95 1.2. US7 : une borne à 40 BC couleur rouge. US1 : TL réf Bdx-478 âge 3500 +- 45 fait en 2010 en orange.</a></li>
+  <li><a class="ex">crée le modèle d'âge :<br>Title;teilleulc2.chr<br>method;dating name/code;param a;param b;param c;Depth;Err depth;<br>Unif;surface;1980;2000;;-4;1;<br>14C;LY;310;50;intcal20.14c;-13;2;<br>14C;LY;590;30;intcal20.14c;-21;2;<br>14C;LY;1080;70;intcal20.14c;-29;2;<br>14C;LY;1150;80;intcal20.14c;-36;2;<br>14C;LY;1760;50;intcal20.14c;-53;2;<br>14C;LY;1850;80;intcal20.14c;-62;2;<br>14C;LY;2160;60;intcal20.14c;-84;2;<br>14C;LY;2930;40;intcal20.14c;-106;2;</a></li>
   <li><a class="ex">Quelles informations te faut-il pour construire un modèle de ma stratigraphie ?</a></li>
 </ul>
-<p>Ce qui est exporté aujourd'hui : événements, phases, dates <b>gaussiennes</b>, <b>uniformes</b>, <b>radiocarbone (14C)</b>, <b>luminescence (TL/OSL)</b> et <b>archéomagnétiques</b>, avec leur <b>décalage (wiggle)</b> fixe, intervalle ou gaussien (champs <code>delta_*</code> du <code>.chr</code>), bornes, contraintes entre événements et entre phases, réglages MCMC demandés (dont « pas de recuit »). Les densités tabulées ne sont pas encore exportées : saisissez-les dans ChronoModel (plugin Density) après avoir ouvert le fichier. Pour le radiocarbone, la courbe (IntCal20 par défaut) doit être installée dans ChronoModel.</p>
+<p><b>Dessin du modèle.</b> Dès qu'un modèle est prêt, SeldonH le dessine dans le panneau des graphiques, comme les scènes de ChronoModel : la <b>scène des Events</b> (une boîte par événement, à sa position et dans sa couleur, avec le nom de ses dates ; flèches des contraintes, du plus ancien vers le plus récent) et, s'il y a des phases, la <b>scène des phases</b> (une boîte par phase avec ses événements ; flèches de succession). Pour un projet joint avec 📎, demandez-le : <a class="ex">Dessine le modèle</a>. Molette : zoom ; glisser : déplacer ; double-clic : vue d'ensemble ; <i>Enregistrer…</i> exporte en PNG ou en SVG.</p>
+<p>Les relations stratigraphiques s'écrivent en toutes lettres (au-dessus, en dessous, avant, après, coupe, recouvre…) ; dans le <code>.chr</code>, les événements sont disposés en diagramme, le plus récent en haut. Une couleur citée (« en bleu », « couleur rouge ») est donnée à l'événement ; une référence de laboratoire ou d'échantillon (« Ly-12345 », « Rennes2025 ») devient le nom de la date.</p>
+<p>Ce qui est exporté aujourd'hui : événements, phases, dates <b>gaussiennes</b>, <b>uniformes</b>, <b>radiocarbone (14C)</b>, <b>luminescence (TL/OSL)</b> et <b>archéomagnétiques</b>, avec leur <b>décalage (wiggle)</b> fixe, intervalle ou gaussien (champs <code>delta_*</code> du <code>.chr</code>), bornes, couleurs des événements, des phases et des dates, contraintes entre événements et entre phases, courbes âge-profondeur (profondeurs et leurs erreurs ; sans contrainte donnée, ordre des profondeurs), tableaux CSV au format d'import de ChronoModel, réglages MCMC demandés (dont « pas de recuit »). Les densités tabulées ne sont pas encore exportées : saisissez-les dans ChronoModel (plugin Density) après avoir ouvert le fichier. Pour le radiocarbone, la courbe (IntCal20 par défaut) doit être installée dans ChronoModel.</p>
 <table><tr><td class="warn"><b>À vérifier :</b> ouvrez toujours le <code>.chr</code> dans ChronoModel et contrôlez les événements, les phases et le sens des contraintes avant de lancer le calcul.</td></tr></table>
 
-<h2 id="interpreter">6. Interpréter des résultats</h2>
+<h2 id="interpreter">6. Contrôler la convergence d'un calcul ChronoModel</h2>
+<p>Un projet <code>.chr</code> ne contient pas les résultats, et un export CSV ne suffit pas à juger le calcul. Pour savoir si le calcul MCMC de ChronoModel a convergé :</p>
 <ol>
-  <li>Joignez avec <b>📎</b> le projet <code>.chr</code> ou un export CSV de ChronoModel (les fichiers très longs sont tronqués : joignez de préférence un export ciblé).</li>
-  <li>Posez votre question :</li>
+  <li>dans ChronoModel, exportez le journal des résultats en HTML (onglet Résultats &gt; Log, fichier <code>Log_Posterior_Distrib_Stats.html</code>) ;</li>
+  <li>joignez-le avec <b>📎</b> : SeldonH en extrait les critères de convergence (R̂, ESS bulk et tail) de chaque variable et les dates à σ élevé (valeurs aberrantes possibles) ;</li>
+  <li>posez votre question :</li>
 </ol>
 <ul>
-  <li><a class="ex">Comment interpréter une HPD à 95 % en plusieurs intervalles ?</a></li>
-  <li><a class="ex">Mon modèle donne une phase de 300 ans pour des dates très proches : est-ce normal ?</a></li>
+  <li><a class="ex">Mon calcul a-t-il convergé ?</a></li>
+  <li><a class="ex">Mon calcul ne converge pas : que faire ?</a></li>
   <li><a class="ex">Que veut dire un faible taux d'acceptation dans l'algorithme MCMC ?</a></li>
+  <li><a class="ex">Comment interpréter une HPD à 95 % en plusieurs intervalles ?</a></li>
 </ul>
-<p>Le modèle s'appuie sur les compétences de SeldonH (HPD, traces MCMC, contraintes, durées de phase…) mais reste un assistant : vérifiez toute conclusion importante.</p>
+<p>Un <code>.chr</code> joint sert à relire le modèle (événements, dates, contraintes), pas ses résultats. Le modèle de langage s'appuie sur les compétences de SeldonH (convergence, remèdes, HPD…) mais reste un assistant : vérifiez toute conclusion importante.</p>
 
 <h2 id="graphiques">7. Graphiques</h2>
 <ul>
@@ -322,7 +420,7 @@ Les règles et connaissances, en Markdown, courtes et précises.
   <tr><td>Appel d'outils (modèle distant)</td><td>Case cochée par défaut. Le modèle distant peut alors <b>demander lui-même</b> un calcul (calibration, HPD, archéomagnétisme…) : SeldonH l'exécute sur votre ordinateur avec les méthodes de ChronoModel, puis lui renvoie les valeurs exactes. Seuls la demande (âge, erreur, courbe) et le résultat sont transmis au serveur. Si le serveur ou le modèle ne gère pas les outils, SeldonH le détecte, vous le dit et utilise à la place un bloc de calcul dans la réponse. Le modèle local fonctionne toujours avec ce bloc.</td></tr>
   <tr><td>Budget des compétences</td><td>Nombre maximal de caractères de fiches de compétences ajoutés à chaque question (6000 par défaut, soit environ 1 700 tokens). Plus grand : l'assistant reçoit plus de connaissances, mais il reste moins de place dans la taille du contexte et la réponse démarre plus lentement.</td></tr>
   <tr><td>Dossier des compétences</td><td>Où SeldonH lit vos fiches personnelles.</td></tr>
-  <tr><td>Format des dates</td><td>Comme dans ChronoModel : BC/AD (défaut), BCE/CE, âge cal. BP (1950 − année), âge cal. B2K, date cal. BP/B2K, ka, Ma. Il s'applique aux fiches de résultat et aux graphiques (l'axe est alors inversé pour garder l'ordre chronologique). Une demande dans la question le remplace pour cette question : <a class="ex" data-method="c14">C14 de 3560 ± 20 BP, donne le résultat en cal BP</a></td></tr>
+  <tr><td>Format des dates</td><td>Comme dans ChronoModel : BC/AD (défaut), BCE/CE, âge cal. BP (1950 − année), âge cal. B2K, date cal. BP/B2K, ka, Ma. Il s'applique aux fiches de résultat et aux graphiques (l'axe est alors inversé pour garder l'ordre chronologique). Une demande dans la question le remplace pour cette question : <a class="ex" data-method="c14">C14 de 3560 +- 20 BP, donne le résultat en cal BP</a></td></tr>
   <tr><td>Enregistrer automatiquement les conversations</td><td>Case cochée par défaut : alimente le volet Historique. Décochée, rien de nouveau n'est conservé ; les conversations déjà enregistrées restent jusqu'à leur suppression.</td></tr>
   <tr><td>Consignes personnelles</td><td>Texte libre ajouté à chaque question : <i>Réponds en trois phrases au maximum</i>, <i>Donne les âges en BP</i>, <i>Tutoie-moi</i>… Il règle la présentation des réponses du modèle ; il ne change pas les résultats de calcul de SeldonH. 1 500 caractères maximum, pris en compte tout de suite, sans relancer le modèle.</td></tr>
 </table>
@@ -353,7 +451,7 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <h3>Les réponses sont lentes</h3>
 <p>Sans GPU, la génération se fait sur le processeur. Essayez un modèle plus petit, un contexte plus court, ou désactivez le mode réflexion. Les calculs de datation, eux, restent instantanés ; un événement (MCMC) prend quelques secondes, avec l'avancement dans la barre d'état.</p>
 <h3>SeldonH n'a pas compris ma phrase</h3>
-<p>Reprenez la forme des exemples ci-dessus : <i>méthode + valeur ± erreur + unité</i>. Pour 14C, écrivez « BP » ; pour l'archéomagnétisme, écrivez « archéomagnétisme » avec « inclinaison » et « alpha95 » ; pour un événement, écrivez « événement » avec au moins deux datations.</p>
+<p>Reprenez la forme des exemples ci-dessus : <i>méthode + valeur +- erreur + unité</i> (« +- » se tape plus facilement que « ± », les deux sont compris). Pour 14C, écrivez « BP » ; pour l'archéomagnétisme, écrivez « archéomagnétisme » avec « inclinaison » et « alpha95 » ; pour un événement, écrivez « événement » avec au moins deux datations.</p>
 <h3>Je veux des réponses plus courtes, ou des âges en BP</h3>
 <p>Écrivez-le une fois pour toutes dans <i>Édition &gt; Préférences… &gt; Consignes personnelles</i>. Les fiches de résultat de SeldonH, elles, restent en années calendaires (négatif = avant J.-C.) : c'est le commentaire du modèle qui suit vos consignes.</p>
 <h3>Où est mon historique ?</h3>
@@ -366,7 +464,7 @@ Les règles et connaissances, en Markdown, courtes et précises.
   document.querySelectorAll('a.ex').forEach(function (a) {
     a.addEventListener('click', function (e) {
       e.preventDefault();
-      var t = a.textContent.trim();
+      var t = (a.innerText || a.textContent).trim();
       var done = function () { a.classList.add('done'); a.title = 'Copié dans le presse-papiers'; };
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, done);
       else done();

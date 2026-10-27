@@ -68,10 +68,10 @@ QVector<QJsonObject> TlMethod::parse(const QString& question) const
         o["age"] = ve.value * scale;
         o["error"] = ve.error * scale;
         if (rm.hasMatch()) {
-            o["refYear"] = rm.captured(1).toInt();
+            o["ref_year"] = rm.captured(1).toInt();
         } else {
-            o["refYear"] = QDate::currentDate().year();
-            o["refYearAssumed"] = true;
+            o["ref_year"] = QDate::currentDate().year();
+            o["ref_year_assumed"] = true;
         }
         out << o;
     }
@@ -81,7 +81,7 @@ QVector<QJsonObject> TlMethod::parse(const QString& question) const
 MethodResult TlMethod::compute(const QJsonObject& p) const
 {
     const double age = p.value("age").toDouble(), err = p.value("error").toDouble();
-    const double ref = p.value("refYear").toDouble();
+    const double ref = p.value("ref_year").toDouble();
     if (!(err > 0.0)) return MethodResult::failure("l'erreur doit être strictement positive");
 
     const double centre = ref - age;
@@ -92,7 +92,7 @@ MethodResult TlMethod::compute(const QJsonObject& p) const
         return std::exp(-0.5L * norm * norm) / err;
     };
     QStringList warn;
-    if (p.value("refYearAssumed").toBool())
+    if (p.value("ref_year_assumed").toBool())
         warn << QStringLiteral("année de mesure non précisée : %1 supposée (à indiquer, par ex. « mesuré en 2015 »)").arg(int(ref));
     return MethodResult::fromDensity(buildDensity(tmin, tmax, step, L, true), warn, false);
 }
@@ -101,7 +101,7 @@ QString TlMethod::describe(const QJsonObject& p) const
 {
     return QStringLiteral("TL/OSL : %1 ± %2 ans avant %3")
         .arg(text::numAuto(p.value("age").toDouble(), 1), text::numAuto(p.value("error").toDouble(), 1),
-             QString::number(p.value("refYear").toInt()));
+             QString::number(p.value("ref_year").toInt()));
 }
 
 } // namespace seldon

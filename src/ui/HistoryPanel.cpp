@@ -76,9 +76,6 @@ void CollapseStrip::paintEvent(QPaintEvent*)
 
 HistoryPanel::HistoryPanel(QWidget* parent) : QWidget(parent)
 {
-    newBtn_ = new QPushButton(tr("＋ Nouvelle conversation"));
-    newBtn_->setToolTip(tr("Commence une conversation vide (la conversation actuelle reste dans l'historique)"));
-
     filter_ = new QLineEdit;
     filter_->setPlaceholderText(tr("Rechercher dans les titres…"));
     filter_->setClearButtonEnabled(true);
@@ -107,14 +104,12 @@ HistoryPanel::HistoryPanel(QWidget* parent) : QWidget(parent)
 
     auto* lay = new QVBoxLayout(this);
     lay->setContentsMargins(6, 6, 6, 6);
-    lay->addWidget(newBtn_);
     lay->addWidget(filter_);
     lay->addWidget(list_, 1);
     lay->addWidget(empty_, 1);
     lay->addLayout(row);
     lay->addWidget(delAllBtn_);
 
-    connect(newBtn_, &QPushButton::clicked, this, &HistoryPanel::newRequested);
     connect(filter_, &QLineEdit::textChanged, this, [this] { rebuild(); });
     connect(list_, &QListWidget::itemSelectionChanged, this, &HistoryPanel::updateButtons);
     connect(list_, &QListWidget::itemActivated, this, [this](QListWidgetItem* it) {

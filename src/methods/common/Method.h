@@ -40,13 +40,13 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // Les formules reprennent celles des plugins de ChronoModel (CNRS, GPL-3.0-or-later).
 //
 // Paramètres JSON (clé "method" = identifiant de la méthode) :
-//   c14   {age, error, curve?, deltaR?, deltaRerr?}      âge conventionnel en BP
+//   c14   {age, error, curve?, delta_r?, delta_r_error?}      âge conventionnel en BP
 //   f14c  {f14c, error, curve?}
 //   gauss {age, error, mode: "none"|"eq", a?, b?, c?}   année calendaire signée
 //   unif  {min, max}                                    années calendaires signées
-//   tl    {age, error, refYear}                          âge en années avant refYear
-//   am    {process: "I"|"D"|"F"|"ID"|"IF"|"IDF", inc?, dec?, alpha95?, field?, errorF?,
-//          curveI?, curveD?, curveF?, steps?}
+//   tl    {age, error, ref_year}                          âge en années avant ref_year
+//   am    {process: "I"|"D"|"F"|"ID"|"IF"|"IDF", inc?, dec?, alpha95?, field?, error_f?,
+//          curve_i?, curve_d?, curve_f?, integration_steps?}
 #pragma once
 
 #include <QJsonObject>

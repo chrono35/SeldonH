@@ -76,7 +76,6 @@ signals:
     void openRequested(const QString& id);
     void deleteRequested(const QString& id);
     void deleteAllRequested();
-    void newRequested();
 
 private:
     void rebuild();
@@ -88,7 +87,6 @@ private:
     QLineEdit*    filter_;
     QListWidget*  list_;
     QLabel*       empty_;
-    QPushButton*  newBtn_;
     QPushButton*  openBtn_;
     QPushButton*  delBtn_;
     QPushButton*  delAllBtn_;

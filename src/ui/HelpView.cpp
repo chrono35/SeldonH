@@ -42,13 +42,20 @@ namespace seldon {
 
 namespace {
 
-// Texte brut d'un fragment HTML simple (entités usuelles, balises retirées).
+// Texte brut d'un fragment HTML simple (entités usuelles, balises retirées). Un <br> devient un retour à la ligne
+// (exemple sur plusieurs lignes, par ex. un tableau CSV) ; les autres blancs sont simplifiés.
 QString plainText(QString s)
 {
-    s.remove(QRegularExpression("<[^>]*>"));
-    s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
-     .replace("&nbsp;", QStringLiteral(" ")).replace("&#39;", "'");
-    return s.simplified();
+    static const QRegularExpression br(QStringLiteral("<br\\s*/?>"), QRegularExpression::CaseInsensitiveOption);
+    QStringList lines;
+    for (QString part : s.split(br)) {
+        part.remove(QRegularExpression("<[^>]*>"));
+        part.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+            .replace("&nbsp;", QStringLiteral(" ")).replace("&#39;", "'");
+        lines << part.simplified();
+    }
+    while (!lines.isEmpty() && lines.last().isEmpty()) lines.removeLast();
+    return lines.join(QLatin1Char('\n'));
 }
 
 const QRegularExpression& exRegex()

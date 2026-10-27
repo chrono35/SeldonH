@@ -112,6 +112,9 @@ struct EventMcmcResult {
     std::vector<Density> ti;            // densités a posteriori des t_i (date de l'échantillon)
     std::vector<Density> yi;            // densités a posteriori de t_i + δ_i (« Wiggle » de ChronoModel) ; = ti sans décalage
     std::vector<double>  sigmaMedian;   // médiane a posteriori de σ_i (dispersion de chaque date autour de θ)
+    double      thetaBandwidth = 0.0;   // largeur de bande h (années) du noyau gaussien qui lisse la densité de θ
+    bool        thetaBandwidthSJ = true; // h de Sheather-Jones (faux : repli sur la règle de Silverman)
+    std::vector<double>  tiBandwidth;   // h des densités des t_i
     std::vector<std::vector<double>> thetaTraces;   // traces de θ en acquisition (après thinning), une par chaîne
     std::vector<VarDiagnostic> diagnostics;
     std::vector<ChainReport>   chains;
@@ -146,11 +149,11 @@ RhatEss computeRhatAndEss(const std::vector<std::vector<double>>& chains);
 //   Silverman     : règle « nrd0 » de R, 0.9·min(sd, IQR/1.34)·n^(−1/5) ; sur-lisse les densités multimodales.
 enum class Bandwidth { SheatherJones, Silverman };
 
-// Largeur de bande h pour ces échantillons (n ≥ 2 ; 0 sinon).
-double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule = Bandwidth::SheatherJones);
+// Largeur de bande h pour ces échantillons (n ≥ 2 ; 0 sinon). `used` : règle réellement appliquée (repli possible).
+double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule = Bandwidth::SheatherJones, Bandwidth* used = nullptr);
 
-// Densité par noyau gaussien, sur ~1024 points, restreinte à [lo, hi].
+// Densité par noyau gaussien, sur ~1024 points, restreinte à [lo, hi]. `bandwidth`, `used` : h et règle utilisés.
 Density kernelDensity(const std::vector<double>& samples, double lo, double hi,
-                      Bandwidth rule = Bandwidth::SheatherJones);
+                      Bandwidth rule = Bandwidth::SheatherJones, double* bandwidth = nullptr, Bandwidth* used = nullptr);
 
 } // namespace seldon

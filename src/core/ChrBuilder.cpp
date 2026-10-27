@@ -28,6 +28,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "ChrBuilder.h"
 
+#include <QColor>
 #include <QJsonArray>
 #include <QDate>
 #include <QJsonDocument>
@@ -35,13 +36,16 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QRegularExpression>
 #include <QUuid>
 #include <QHash>
+#include <QSet>
 #include <QPair>
 #include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
 
+#include "../methods/common/CurveStore.h"
 #include "../methods/common/MethodRegistry.h"
+#include "../methods/common/MethodRunner.h"
 #include "../methods/common/TextUtil.h"
 
 namespace seldon {
@@ -128,6 +132,143 @@ void setColor(QJsonObject& o, int r, int g, int b)
     o["red"] = r; o["green"] = g; o["blue"] = b;
 }
 
+// Couleur écrite dans le bloc (« color ») : nom français ou anglais (« bleu », « en rouge », « vert clair »), « #rrggbb »,
+// nom de couleur Qt/SVG, [r, g, b] ou {"red":…, "green":…, "blue":…}. Rouge, orange et bleu reprennent les teintes
+// qu'enregistre ChronoModel (relevées dans un projet corrigé à la main, test_strati_corrige.chr). false si inconnue.
+bool parseColor(const QJsonValue& v, int& r, int& g, int& b)
+{
+    auto c8 = [](double x) { return std::clamp(static_cast<int>(std::lround(x)), 0, 255); };
+    if (v.isArray() || v.isObject()) {
+        QJsonValue cr, cg, cb;
+        if (v.isArray()) {
+            const QJsonArray a = v.toArray();
+            if (a.size() < 3) return false;
+            cr = a[0]; cg = a[1]; cb = a[2];
+        } else {
+            const QJsonObject o = v.toObject();
+            cr = o.contains("red") ? o.value("red") : o.value("r");
+            cg = o.contains("green") ? o.value("green") : o.value("g");
+            cb = o.contains("blue") ? o.value("blue") : o.value("b");
+        }
+        if (!cr.isDouble() || !cg.isDouble() || !cb.isDouble()) return false;
+        r = c8(cr.toDouble()); g = c8(cg.toDouble()); b = c8(cb.toDouble());
+        return true;
+    }
+    if (!v.isString()) return false;
+    const QString raw = v.toString().trimmed();
+    QStringList words = text::fold(raw).split(QRegularExpression(QStringLiteral("[\\s_-]+")), Qt::SkipEmptyParts);
+    bool light = false, dark = false;
+    QStringList kept;
+    for (const QString& w : std::as_const(words)) {
+        if (w == "en" || w == "in" || w == "couleur" || w == "color" || w == "colour") continue;
+        if (w == "clair" || w == "claire" || w == "light" || w == "pale") { light = true; continue; }
+        if (w == "fonce" || w == "foncee" || w == "dark" || w == "sombre") { dark = true; continue; }
+        kept << w;
+    }
+    static const QHash<QString, QColor> names = {
+        { "rouge", QColor(255, 19, 12) },   { "red", QColor(255, 19, 12) },
+        { "orange", QColor(255, 178, 97) },
+        { "bleu", QColor(0, 0, 255) },      { "bleue", QColor(0, 0, 255) },    { "blue", QColor(0, 0, 255) },
+        { "vert", QColor(0, 170, 0) },      { "verte", QColor(0, 170, 0) },    { "green", QColor(0, 170, 0) },
+        { "jaune", QColor(255, 215, 0) },   { "yellow", QColor(255, 215, 0) },
+        { "violet", QColor(148, 0, 211) },  { "violette", QColor(148, 0, 211) }, { "purple", QColor(148, 0, 211) },
+        { "mauve", QColor(190, 130, 220) },
+        { "rose", QColor(255, 105, 180) },  { "pink", QColor(255, 105, 180) },
+        { "noir", QColor(0, 0, 0) },        { "noire", QColor(0, 0, 0) },      { "black", QColor(0, 0, 0) },
+        { "blanc", QColor(255, 255, 255) }, { "blanche", QColor(255, 255, 255) }, { "white", QColor(255, 255, 255) },
+        { "gris", QColor(128, 128, 128) },  { "grise", QColor(128, 128, 128) }, { "grey", QColor(128, 128, 128) },
+        { "gray", QColor(128, 128, 128) },
+        { "marron", QColor(139, 69, 19) },  { "brun", QColor(139, 69, 19) },   { "brune", QColor(139, 69, 19) },
+        { "brown", QColor(139, 69, 19) },
+        { "cyan", QColor(0, 190, 190) },    { "turquoise", QColor(64, 224, 208) },
+        { "bordeaux", QColor(128, 0, 32) }, { "beige", QColor(222, 200, 160) }, { "ocre", QColor(204, 119, 34) },
+    };
+    QColor c;
+    const QString key = kept.join(' ');
+    if (names.contains(key)) c = names.value(key);
+    else {
+        c = QColor::fromString(raw);
+        if (!c.isValid()) c = QColor::fromString(kept.join(QString()));
+        if (!c.isValid()) return false;
+    }
+    if (light) c = QColor((c.red() + 255) / 2, (c.green() + 255) / 2, (c.blue() + 255) / 2);
+    if (dark)  c = QColor(c.red() * 6 / 10, c.green() * 6 / 10, c.blue() * 6 / 10);
+    r = c.red(); g = c.green(); b = c.blue();
+    return true;
+}
+
+// Disposition des événements dans la scène de ChronoModel (y croît vers le bas) en diagramme stratigraphique : le plus
+// ancien en bas, chaque événement une rangée au-dessus du plus haut de ceux qui lui sont antérieurs (plus long chemin
+// dans le graphe des contraintes) ; dans une rangée, ordre des barycentres des prédécesseurs pour limiter les
+// croisements. Les événements sans contrainte sont rangés en grille à droite ; en cas de cycle, grille simple.
+void layoutEvents(QJsonArray& events, const QJsonArray& constraints)
+{
+    constexpr double dx = 600.0, dy = 450.0, x0 = 300.0, y0 = 100.0;     // écarts larges : flèches et noms lisibles
+    const int n = events.size();
+    auto place = [&](int i, double x, double y) {
+        QJsonObject o = events[i].toObject();
+        o["item_x"] = x; o["item_y"] = y;
+        events[i] = o;
+    };
+    QHash<int, int> idx;
+    for (int i = 0; i < n; ++i) idx[events[i].toObject().value("id").toInt()] = i;
+    QVector<QVector<int>> succ(n), pred(n);
+    for (const QJsonValue& cv : constraints) {
+        const QJsonObject c = cv.toObject();
+        const int b = idx.value(c.value("bwd_id").toInt(), -1), f = idx.value(c.value("fwd_id").toInt(), -1);
+        if (b < 0 || f < 0 || b == f) continue;
+        const int older = ChrBuilder::kBwdIsOlder ? b : f, younger = ChrBuilder::kBwdIsOlder ? f : b;
+        succ[older] << younger; pred[younger] << older;
+    }
+    // Plus long chemin depuis les événements les plus anciens (tri topologique de Kahn).
+    QVector<int> level(n, 0), indeg(n, 0), queue;
+    for (int i = 0; i < n; ++i) { indeg[i] = pred[i].size(); if (indeg[i] == 0) queue << i; }
+    for (int q = 0; q < queue.size(); ++q) {
+        const int u = queue[q];
+        for (int v : std::as_const(succ[u])) {
+            level[v] = std::max(level[v], level[u] + 1);
+            if (--indeg[v] == 0) queue << v;
+        }
+    }
+    if (queue.size() < n) {                                        // cycle (signalé par ailleurs) : grille
+        for (int i = 0; i < n; ++i) place(i, x0 + (i % 6) * dx, y0 + (i / 6) * dy);
+        return;
+    }
+    QVector<int> alone;
+    int maxLevel = -1;
+    for (int i = 0; i < n; ++i) {
+        if (succ[i].isEmpty() && pred[i].isEmpty()) alone << i;
+        else maxLevel = std::max(maxLevel, level[i]);
+    }
+    QVector<double> col(n, 0.0);
+    int width = 0;
+    if (maxLevel >= 0) {
+        QVector<QVector<int>> rows(maxLevel + 1);
+        for (int i = 0; i < n; ++i)
+            if (!succ[i].isEmpty() || !pred[i].isEmpty()) rows[level[i]] << i;
+        for (int L = 0; L <= maxLevel; ++L) {
+            QVector<int>& row = rows[L];
+            if (L > 0) {
+                auto bary = [&](int i) {
+                    double s = 0.0;
+                    for (int p : std::as_const(pred[i])) s += col[p];
+                    return pred[i].isEmpty() ? 0.0 : s / pred[i].size();
+                };
+                std::stable_sort(row.begin(), row.end(), [&](int a, int b) { return bary(a) < bary(b); });
+            }
+            for (int k = 0; k < row.size(); ++k) col[row[k]] = k - (row.size() - 1) / 2.0;
+            width = std::max(width, int(row.size()));
+        }
+        const double xc = x0 + (width - 1) / 2.0 * dx;
+        for (int i = 0; i < n; ++i)
+            if (!succ[i].isEmpty() || !pred[i].isEmpty())
+                place(i, xc + col[i] * dx, y0 + (maxLevel - level[i]) * dy);
+    }
+    const int cols = maxLevel >= 0 ? 2 : 6;
+    const double xa = maxLevel >= 0 ? x0 + width * dx + dx / 2.0 : x0;
+    for (int k = 0; k < alone.size(); ++k) place(alone[k], xa + (k % cols) * dx, y0 + (k / cols) * dy);
+}
+
 int curveProcessType(const QString& name, bool* known)
 {
     static const QHash<QString, int> m = {
@@ -198,6 +339,34 @@ int relationOrder(const QString& relation)
     return o ? +1 : -1;
 }
 
+// Dates d'un événement du bloc, quelle que soit la forme écrite par le modèle de langage : « dates » (tableau ou objet
+// seul), « date », « datations », « datation », « mesures »…, ou champs de la date posés directement sur l'événement
+// ({"name":"13 cm","depth":13,"type":"c14","name_date":"Ly-8812","age":310,"error":50}). `flat` : forme à plat utilisée.
+QJsonArray eventDates(const QJsonObject& e, bool* flat = nullptr)
+{
+    if (flat) *flat = false;
+    for (const char* k : { "dates", "date", "datations", "datation", "mesures", "measurements", "samples", "echantillons" }) {
+        const QJsonValue v = e.value(k);
+        if (v.isArray() && !v.toArray().isEmpty()) return v.toArray();
+        if (v.isObject()) return QJsonArray{ v };
+    }
+    const QJsonValue tv = e.contains("date_type") ? e.value("date_type") : e.contains("method") ? e.value("method") : e.value("type");
+    const QString t = tv.toString().trimmed().toLower();
+    static const QSet<QString> dateTypes = { "gauss", "unif", "uniform", "tl", "osl", "tl/osl", "am", "archeomagnetisme", "f14c",
+                                             "density", "densite", "c14", "14c", "radiocarbone" };
+    if (!dateTypes.contains(t)) return {};
+    QJsonObject d;
+    for (const char* k : { "age", "error", "min", "max", "ref_year", "curve", "ref_curve", "delta_r", "delta_r_error", "f14c",
+                           "fraction", "process", "inc", "dec", "alpha95", "field", "error_f", "curve_i", "curve_d", "curve_f",
+                           "integration_steps", "wiggle", "file" })
+        if (e.contains(k)) d[k] = e.value(k);
+    d["type"] = t;
+    for (const char* k : { "date_name", "name_date", "ref", "reference", "code", "lab_ref", "labo" })
+        if (e.contains(k)) { d["name"] = e.value(k); break; }
+    if (flat) *flat = true;
+    return QJsonArray{ d };
+}
+
 struct Range { double lo =  std::numeric_limits<double>::infinity();
                double hi = -std::numeric_limits<double>::infinity();
                void add(double v) { lo = std::min(lo, v); hi = std::max(hi, v); }
@@ -215,11 +384,33 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
     }
 
     bool curveKnown = true;
-    const QString curveName = spec.value("curve").toString();
-    const int processType = curveProcessType(curveName, &curveKnown);
+    QString curveName = spec.value("curve").toString();
+    // Courbe âge-profondeur : type Profondeur de ChronoModel (process_type 80, 'P'). Convention de ChronoModel : la
+    // profondeur est négative, 0 à la surface (10 m s'écrit -10) ; elle va dans X_Inc_Depth, son erreur dans
+    // sX_Alpha95_sDepth. Des profondeurs sans « curve » suffisent à la demander.
+    static const QSet<QString> ageDepthNames = { "age_depth", "age-depth", "agedepth", "age_profondeur", "age-profondeur",
+                                                 "age profondeur", "profondeur", "courbe age-profondeur", "depth" };
+    bool anyDepth = false;
+    for (const QJsonValue& ev : evSpec) anyDepth = anyDepth || ev.toObject().contains("depth") || ev.toObject().contains("profondeur");
+    if (curveName.trimmed().isEmpty() && anyDepth) {
+        curveName = QStringLiteral("age_depth");
+        R.warnings << QStringLiteral("Profondeurs données sans type de courbe : courbe âge-profondeur utilisée.");
+    }
+    const bool ageDepth = ageDepthNames.contains(text::fold(curveName).trimmed());
+    const int processType = ageDepth ? 80 : curveProcessType(curveName, &curveKnown);
     if (!curveKnown)
         R.warnings << QStringLiteral("Type de courbe « %1 » inconnu : modèle sans courbe utilisé.").arg(curveName);
     const bool withCurve = processType != 78;
+
+    // Couleur facultative (« color » ou « couleur ») d'une phase, d'un événement ou d'une date.
+    auto applyColor = [&](QJsonObject& target, const QJsonObject& src, const QString& what) {
+        const QJsonValue cv = src.contains("color") ? src.value("color") : src.value("couleur");
+        if (cv.isUndefined() || cv.isNull() || (cv.isString() && cv.toString().trimmed().isEmpty())) return;
+        int r = 0, g = 0, b = 0;
+        if (parseColor(cv, r, g, b)) setColor(target, r, g, b);
+        else R.warnings << QStringLiteral("Couleur « %1 » non reconnue pour %2 : couleur par défaut utilisée.")
+                               .arg(cv.isString() ? cv.toString() : QString::fromUtf8(QJsonDocument(QJsonArray{ cv }).toJson(QJsonDocument::Compact)), what);
+    };
 
     // ---------- Phases ----------
     QJsonArray phases;
@@ -247,14 +438,22 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
     };
     for (const QJsonValue& v : spec.value("phases").toArray()) {
         const QString n = v.isObject() ? v.toObject().value("name").toString() : v.toString();
-        if (!n.trimmed().isEmpty()) ensurePhase(n);
+        if (n.trimmed().isEmpty()) continue;
+        const int pid = ensurePhase(n);
+        if (v.isObject())
+            for (int i = 0; i < phases.size(); ++i)
+                if (phases[i].toObject().value("id").toInt() == pid) {
+                    QJsonObject p = phases[i].toObject();
+                    applyColor(p, v.toObject(), QStringLiteral("la phase « %1 »").arg(n.trimmed()));
+                    phases[i] = p;
+                }
     }
 
     // ---------- Événements ----------
     QJsonArray events;
     QHash<QString, int> eventId;
     Range span;
-    int nextEvent = 1, row = 0, amWithoutSpan = 0, nextDate = 0;     // amWithoutSpan : dates AM ou densités (étendue inconnue)
+    int nextEvent = 1, amWithoutSpan = 0, nextDate = 0;     // amWithoutSpan : dates AM ou densités (étendue inconnue)
 
     for (const QJsonValue& ev : evSpec) {
         const QJsonObject e = ev.toObject();
@@ -271,9 +470,9 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         o["id"] = id;
         o["name"] = name;
         setColor(o, 71, 112, 76);
-        o["item_x"] = 300.0 + (row % 6) * 130.0;
-        o["item_y"] = 100.0 + (row / 6) * 110.0;
-        ++row;
+        applyColor(o, e, QStringLiteral("l'événement « %1 »").arg(name));
+        o["item_x"] = 0.0;       // diagramme stratigraphique, une fois les contraintes connues (layoutEvents)
+        o["item_y"] = 0.0;
         o["is_current"] = false;
         o["is_selected"] = false;
 
@@ -304,15 +503,33 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         // Dates
         QJsonArray dates;
         int dn = 0;
-        for (const QJsonValue& dv : e.value("dates").toArray()) {
-            const QJsonObject d = dv.toObject();
-            const QString type = d.value("type").toString().toLower();
+        bool flatDate = false;
+        const QJsonArray dateSpecs = eventDates(e, &flatDate);
+        if (flatDate)
+            R.warnings << QStringLiteral("Événement « %1 » : datation écrite directement sur l'événement (sans « dates »), reprise telle quelle.").arg(name);
+        for (const QJsonValue& dv : dateSpecs) {
+            QJsonObject d = dv.toObject();
+            if (!d.contains("name"))
+                for (const char* k : { "ref", "reference", "code", "lab_ref", "labo" })
+                    if (d.value(k).isString()) { d["name"] = d.value(k); break; }
+            const QString type = (d.contains("type") ? d.value("type") : d.value("method")).toString().trimmed().toLower();
+            // Erreurs que le modèle de langage doit corriger (pas de devinette silencieuse) :
+            if (type == QLatin1String("bound") || type == QLatin1String("borne")) {          // borne écrite comme une date
+                R.errors << QStringLiteral("« %1 » : une borne se déclare sur l'événement ({\"name\":\"%1\",\"type\":\"bound\",\"known_fixed\":…}), "
+                                           "pas dans ses dates.").arg(name);
+                continue;
+            }
+            if (const QString bad = MethodRunner::obsoleteFieldError(d); !bad.isEmpty()) {     // refYear, errorF…
+                R.errors << QStringLiteral("Date de « %1 » : %2.").arg(name, bad);
+                continue;
+            }
             QJsonObject out;
             out["UUID"] = uuid4();
             out["id"] = nextDate;               // incrémenté seulement si la date est retenue (voir plus bas)
             out["name"] = d.value("name").toString(QStringLiteral("%1-%2").arg(name).arg(++dn));
             out["valid"] = true;
             setColor(out, 71, 112, 76);
+            applyColor(out, d, QStringLiteral("la date « %1 »").arg(out["name"].toString()));
             out["is_selected"] = false;
             out["origin"] = 0;
             out["subdates"] = QJsonArray();
@@ -361,11 +578,13 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                     R.errors << QStringLiteral("Date TL/OSL invalide dans « %1 » (âge et erreur > 0 requis).").arg(name);
                     continue;
                 }
-                const bool hasRef = d.contains("ref_year");
-                const double ref = hasRef ? d.value("ref_year").toDouble() : QDate::currentDate().year();
-                if (!hasRef)
-                    R.warnings << QStringLiteral("Date TL/OSL « %1 » : année de référence absente, %2 utilisée (année en cours). "
-                                                 "Précisez « ref_year » (année de la mesure).").arg(out["name"].toString()).arg(static_cast<int>(ref));
+                // L'âge TL/OSL est compté depuis l'année de la mesure : sans elle, la date est fausse (pas de valeur par défaut).
+                if (!d.value("ref_year").isDouble()) {
+                    R.errors << QStringLiteral("Date TL/OSL « %1 » (événement « %2 ») : année de la mesure « ref_year » manquante "
+                                               "(demander l'année de la mesure à l'utilisateur).").arg(out["name"].toString(), name);
+                    continue;
+                }
+                const double ref = d.value("ref_year").toDouble();
                 out["plugin_id"] = "tl/osl";
                 out["sampler"] = kDateSampler;
                 out["data"] = QJsonObject{ { "age", age }, { "error", err }, { "ref_year", ref } };
@@ -392,6 +611,30 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                     R.errors << QStringLiteral("Date archéomagnétique « %1 » (process %2) : valeur(s) manquante(s) ou invalide(s) :%3.")
                                     .arg(out["name"].toString(), proc, missing);
                     continue;
+                }
+                // Courbe inconnue de SeldonH : souvent la référence de l'échantillon (« am Rennes2025 inclinaison 65 »)
+                // prise pour une courbe par le modèle de langage. Sans « name » et sans suffixe de composante (_i, _d, _f,
+                // convention des courbes de ChronoModel), elle devient le nom de la date et la courbe par défaut est
+                // utilisée ; sinon elle est gardée (elle peut être installée dans ChronoModel) avec un avertissement.
+                const QStringList knownCurves = CurveStore::names(QStringLiteral("am"));
+                static const QRegularExpression compSuffix(QStringLiteral("_[idf]$"));
+                for (const char* k : { "curve_i", "curve_d", "curve_f" }) {
+                    if (!d.contains(k) || knownCurves.isEmpty()) continue;
+                    const QString given = d.value(k).toString().trimmed();
+                    QString base = given.toLower();
+                    if (base.endsWith(".ref")) base.chop(4);
+                    if (base.isEmpty() || knownCurves.contains(base)) continue;
+                    if (!d.contains("name") && !compSuffix.match(base).hasMatch()) {
+                        out["name"] = given;
+                        d.insert("name", given);
+                        d.remove(k);
+                        R.warnings << QStringLiteral("Date archéomagnétique « %1 » : « %1 » n'est pas une courbe de référence connue, "
+                                                     "elle est prise comme nom (référence) de la date.").arg(given);
+                    } else {
+                        R.warnings << QStringLiteral("Date archéomagnétique « %1 » : courbe « %2 » inconnue de SeldonH ; vérifiez "
+                                                     "qu'elle est installée dans ChronoModel (dossier Calib/AM).")
+                                        .arg(out["name"].toString(), refName(given));
+                    }
                 }
                 const bool hasCurves = d.contains("curve_i") || d.contains("curve_d") || d.contains("curve_f");
                 if (!hasCurves)
@@ -478,9 +721,9 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                                                  "(shcal20 pour l'hémisphère sud, marine20 pour un échantillon marin).").arg(out["name"].toString());
                 }
                 const bool marine = curve.startsWith("marine");
-                const double dR = d.value("delta_r").toDouble(d.value("deltaR").toDouble(0.0));
-                const double dRerr = d.value("delta_r_error").toDouble(d.value("deltaRerr").toDouble(0.0));
-                if (marine && !d.contains("delta_r") && !d.contains("deltaR"))
+                const double dR = d.value("delta_r").toDouble(0.0);
+                const double dRerr = d.value("delta_r_error").toDouble(0.0);
+                if (marine && !d.contains("delta_r"))
                     R.warnings << QStringLiteral("Date radiocarbone « %1 » : courbe marine sans ΔR (0 utilisé). Précisez « delta_r » et "
                                                  "« delta_r_error ».").arg(out["name"].toString());
                 out["plugin_id"] = "14c";
@@ -489,7 +732,7 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
                                            { "error", err }, { "ref_curve", curve } };
                 // Plage d'étude : HPD à 95 % de la calibration (méthode de SeldonH, même courbe), avec une marge.
                 QJsonObject rq{ { "method", "c14" }, { "age", age }, { "error", err }, { "curve", curve.chopped(4) } };
-                if (dR != 0.0 || dRerr != 0.0) { rq["deltaR"] = dR; rq["deltaRerr"] = dRerr; rq["hasDeltaR"] = true; }
+                if (dR != 0.0 || dRerr != 0.0) { rq["delta_r"] = dR; rq["delta_r_error"] = dRerr; rq["has_delta_r"] = true; }
                 const MethodResult cal = MethodRegistry::instance().compute(rq);
                 if (cal.ok && !cal.hpd95.empty()) {
                     double lo = cal.hpd95.front().from, hi = cal.hpd95.front().to;
@@ -518,7 +761,24 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         o["sampler"] = kEventSampler;
         for (const char* k : { "X_Inc_Depth", "Y_Dec", "Z_Field", "sX_Alpha95_sDepth", "sY", "sZ_sF" })
             o[k] = 0.0;
-        if (withCurve) {
+        if (ageDepth) {
+            const QJsonValue dv = e.contains("depth") ? e.value("depth") : e.value("profondeur");
+            const QJsonValue de = e.contains("depth_error") ? e.value("depth_error") : e.value("erreur_profondeur");
+            auto toNum = [](const QJsonValue& v) {
+                if (v.isDouble()) return v.toDouble();
+                if (v.isString()) { bool ok = false; const double x = v.toString().trimmed().replace(',', '.').toDouble(&ok); if (ok) return x; }
+                return std::nan("");
+            };
+            const double depth = toNum(dv), derr = toNum(de);
+            if (std::isnan(depth))
+                R.errors << QStringLiteral("Courbe âge-profondeur : l'événement « %1 » n'a pas de profondeur (« depth »).").arg(name);
+            else {
+                o["X_Inc_Depth"] = -std::abs(depth);
+                if (!std::isnan(derr) && derr > 0) o["sX_Alpha95_sDepth"] = derr;
+                else R.warnings << QStringLiteral("Courbe âge-profondeur : pas d'erreur sur la profondeur de « %1 » (0 utilisé).").arg(name);
+            }
+            o["sampler"] = isBound ? -1 : 1;
+        } else if (withCurve) {
             o["sampler"] = isBound ? -1 : (processType == 85 ? 1 : 2);
             for (const char* k : { "X_Inc_Depth", "Y_Dec", "Z_Field", "SDec",
                                    "sX_Alpha95_sDepth", "sY", "sZ_sF" })
@@ -620,16 +880,30 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         }
         return out;
     };
-    const QJsonArray evCons = buildConstraints(spec.value("event_constraints").toArray(), eventId, "d'événements");
+    QJsonArray evConsSpec = spec.value("event_constraints").toArray();
+    // Courbe âge-profondeur sans contrainte donnée : loi de superposition, du plus profond (plus ancien) au moins profond.
+    if (ageDepth && evConsSpec.isEmpty()) {
+        QVector<QPair<double, QString>> byDepth;
+        for (const QJsonValue& v : std::as_const(events)) {
+            const QJsonObject o = v.toObject();
+            if (o.contains("X_Inc_Depth")) byDepth.append({ -o.value("X_Inc_Depth").toDouble(), o.value("name").toString() });
+        }
+        std::stable_sort(byDepth.begin(), byDepth.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        QJsonArray seq;
+        for (const auto& pr : std::as_const(byDepth)) seq.append(pr.second);
+        if (seq.size() >= 2) {
+            evConsSpec.append(seq);
+            R.warnings << QStringLiteral("Courbe âge-profondeur : contraintes ajoutées dans l'ordre des profondeurs (le plus profond est le plus ancien).");
+        }
+    }
+    const QJsonArray evCons = buildConstraints(evConsSpec, eventId, "d'événements");
     const QJsonArray phCons = buildConstraints(spec.value("phase_constraints").toArray(), phaseId, "de phases");
 
-    // Positions des phases en colonne
-    for (int i = 0; i < phases.size(); ++i) {
-        QJsonObject p = phases[i].toObject();
-        p["item_x"] = 100.0;
-        p["item_y"] = 100.0 + i * 110.0;
-        phases[i] = p;
-    }
+    // Événements en diagramme stratigraphique (le plus récent en haut).
+    layoutEvents(events, evCons);
+
+    // Phases : même disposition que les événements (la plus récente en haut), d'après les contraintes de phases.
+    layoutEvents(phases, phCons);
 
     // ---------- Paramètres ----------
     QJsonObject sIn = spec.value("settings").toObject();
@@ -678,13 +952,21 @@ ChrResult ChrBuilder::build(const QJsonObject& spec)
         { "speed_threshold", withCurve ? 1.0 : 0.0 }, { "time_type", 66 }, { "use_err_mesure", !withCurve },
         { "variance_fixed", 1.0 }, { "variance_type", 66 }
     };
-    if (withCurve)
+    if (ageDepth)            // réglages de teilleulc2.chr (variance globale « G », erreurs de mesure utilisées)
+        curve = QJsonObject{ { "alpha", 0.0 }, { "coeff_lissage_type", 66 }, { "process_type", 80 }, { "speed_threshold", 0.0 },
+                             { "time_type", 66 }, { "use_err_mesure", true }, { "variance_fixed", 1.0 }, { "variance_type", 71 } };
+    else if (withCurve)
         R.warnings << QStringLiteral("Paramètres de courbe (alpha, speed_threshold, variance_fixed) : valeurs par défaut arbitraires.");
 
     QJsonObject root;
     root["app_version"] = "4.0.0";
     root["curve"] = curve;
     root["dates_trash"] = QJsonArray();
+    // Clés qu'écrit ChronoModel 4.0.0 à l'enregistrement (relevées dans test_strati_corrige.chr) ; ajoutées pour que le
+    // fichier produit soit identique à un fichier réenregistré par ChronoModel.
+    root["event_model"] = 1;
+    root["format_date"] = 0;
+    root["format_date_custom"] = QStringLiteral("Years");
     root["events"] = events;
     root["events_constraints"] = evCons;
     root["events_trash"] = QJsonArray();
@@ -803,6 +1085,76 @@ bool ChrBuilder::extractSpec(const QString& md, QJsonObject& spec, QString* err)
     }
     if (err) *err = lastError.isEmpty() ? QStringLiteral("Aucun bloc de modèle trouvé.") : lastError;
     return false;
+}
+
+QStringList ChrBuilder::crossCheck(const QJsonObject& spec, const QString& source)
+{
+    QStringList out;
+    const QString src = text::fold(source);
+    // Nombres de la source (valeurs absolues ; un âge en ka compte aussi en années).
+    QVector<double> nums;
+    static const QRegularExpression numRe(QStringLiteral(R"((?<![\w.,])-?(\d+(?:[.,]\d+)?))"));
+    for (auto it = numRe.globalMatch(src); it.hasNext();) {
+        const double v = text::toNumber(it.next().captured(1));
+        nums << v << v * 1000.0;
+    }
+    auto known = [&](double v) {
+        const double a = std::abs(v);
+        for (double n : std::as_const(nums)) if (std::abs(n - a) <= 1e-9 * std::max(1.0, a)) return true;
+        return false;
+    };
+    auto fmt = [](double v) { return QString::number(v, 'g', 10); };
+    static const char* const valueKeys[] = { "age", "error", "min", "max", "inc", "dec", "alpha95", "field", "error_f", "f14c",
+                                             "ref_year", "delta_r", "delta_r_error" };
+    struct Pair { double v, e; };
+    QVector<Pair> specPairs;
+    QStringList specNames;
+    QStringList unknownValues;
+    for (const QJsonValue& ev : spec.value("events").toArray()) {
+        const QJsonObject e = ev.toObject();
+        const QString en = e.value("name").toString();
+        if (e.contains("known_fixed") && !known(e.value("known_fixed").toDouble()))
+            unknownValues << QStringLiteral("%1 (borne « %2 »)").arg(fmt(e.value("known_fixed").toDouble()), en);
+        for (const char* k : { "depth", "depth_error" })
+            if (e.value(k).isDouble() && !known(e.value(k).toDouble()))
+                unknownValues << QStringLiteral("%1 (%2 de « %3 »)").arg(fmt(e.value(k).toDouble()), QString::fromLatin1(k), en);
+        for (const QJsonValue& dv : eventDates(e)) {
+            const QJsonObject d = dv.toObject();
+            for (const char* k : valueKeys)
+                if (d.value(k).isDouble() && !known(d.value(k).toDouble()))
+                    unknownValues << QStringLiteral("%1 (%2 d'une date de « %3 »)").arg(fmt(d.value(k).toDouble()), QString::fromLatin1(k), en);
+            const QString dn = d.value("name").toString().trimmed();
+            if (!dn.isEmpty()) {
+                specNames << text::fold(dn);
+                if (!src.contains(text::fold(dn)))
+                    out << QStringLiteral("Référence « %1 » (événement « %2 ») absente de votre texte : inventée par le modèle ?").arg(dn, en);
+            }
+            const double v = d.value("age").toDouble(d.value("f14c").toDouble(d.value("field").toDouble(std::nan(""))));
+            const double er = d.value("error").toDouble(d.value("error_f").toDouble(std::nan("")));
+            if (std::isfinite(v) && std::isfinite(er)) specPairs << Pair{ v, er };
+        }
+    }
+    if (!unknownValues.isEmpty())
+        out << QStringLiteral("Valeur(s) absente(s) de votre texte : %1. Inventée(s) ou recopiée(s) d'un exemple par le modèle ?")
+                   .arg(unknownValues.join(QStringLiteral(", ")));
+    // Données de la source oubliées : paires « valeur ± erreur » et références de laboratoire.
+    for (const text::ValueError& ve : text::findValueErrors(src)) {
+        bool found = false;
+        for (const Pair& p : std::as_const(specPairs))
+            if (std::abs(std::abs(p.v) - std::abs(ve.value)) < 1e-9 && std::abs(p.e - ve.error) < 1e-9) { found = true; break; }
+        if (!found) out << QStringLiteral("« %1 ± %2 » de votre texte n'est dans aucune date du modèle.").arg(fmt(ve.value), fmt(ve.error));
+    }
+    static const QRegularExpression refRe(QStringLiteral(R"(\b([a-z]{2,6}-\d{2,})\b)"));
+    QStringList seen;
+    for (auto it = refRe.globalMatch(src); it.hasNext();) {
+        const QString ref = it.next().captured(1);
+        if (seen.contains(ref)) continue;
+        seen << ref;
+        bool used = false;
+        for (const QString& n : std::as_const(specNames)) used = used || n.contains(ref);
+        if (!used) out << QStringLiteral("Référence « %1 » de votre texte absente du modèle.").arg(ref);
+    }
+    return out;
 }
 
 QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)

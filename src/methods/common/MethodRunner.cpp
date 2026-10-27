@@ -314,9 +314,9 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         const QString method = d.value("method").toString().toLower();
         if (method.isEmpty() || method == "event") return fail(QStringLiteral("la datation %1 n'a pas de « method » valide").arg(k + 1));
         d["method"] = method;
-        if (method == "am") { d["process"] = d.value("process").toString("I").toUpper(); if (!d.contains("steps")) d["steps"] = 500; }
+        if (method == "am") { d["process"] = d.value("process").toString("I").toUpper(); if (!d.contains("integration_steps")) d["integration_steps"] = 500; }
         if (d.contains("curve")) d["curve"] = d.value("curve").toString().toLower();
-        if (method == "c14" && d.contains("deltaR")) d["hasDeltaR"] = true;
+        if (method == "c14" && d.contains("delta_r")) d["has_delta_r"] = true;
         QString label = d.value("name").toString().trimmed();
         const QString desc = reg.describe(d);
         if (label.isEmpty()) label = desc.isEmpty() ? QStringLiteral("Date %1").arg(k + 1) : desc;
@@ -385,6 +385,14 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     E.html += QStringLiteral("<p><b>θ a posteriori</b> (date de l'événement)</p>");
     E.prompt += QStringLiteral("Date de l'événement θ (densité a posteriori) :\n");
     appendSummary(E.html, E.prompt, R.theta, t95, t68, ts, E.level, fmt);
+    // Lissage de la densité de θ (estimation par noyau gaussien des tirages MCMC) : h fait partie du résultat.
+    const QString hRule = R.thetaBandwidthSJ ? QStringLiteral("Sheather-Jones") : QStringLiteral("Silverman (repli : l'équation de Sheather-Jones n'a pas de solution)");
+    const QString hTheta = dateformat::spread(R.thetaBandwidth, fmt);
+    E.html += QStringLiteral("<p><small>Densité de θ lissée par un noyau gaussien de largeur de bande <b>h = %1</b> (règle de %2), "
+                             "sur %3 tirages.</small></p>")
+                  .arg(hTheta.toHtmlEscaped(), hRule.toHtmlEscaped(),
+                       QLocale(QLocale::French).toString(qlonglong(R.thetaTraces.empty() ? 0 : R.thetaTraces.size() * R.thetaTraces.front().size())));
+    E.prompt += QStringLiteral("Densité de θ lissée par noyau gaussien : h = %1 (règle de %2).\n").arg(hTheta, hRule);
     if (!levelWarning.isEmpty()) {
         E.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(levelWarning.toHtmlEscaped());
         E.prompt += QStringLiteral("Avertissement : %1.\n").arg(levelWarning);
@@ -485,6 +493,15 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
                   QStringLiteral("%1 itérations, 1 tirage gardé sur %2 (thinning) → %3 tirages par chaîne")
                       .arg(fr.toString(used.numIter), fr.toString(used.thinning), fr.toString(kept)));
     mrows += mrow(QStringLiteral("Mixing"), text::numAuto(used.mixingLevel, 4).toHtmlEscaped());
+    {
+        QStringList hs;
+        for (size_t k = 0; k < R.tiBandwidth.size() && k < size_t(names.size()); ++k)
+            hs << QStringLiteral("%1 : %2").arg(names[int(k)].toHtmlEscaped(), dateformat::spread(R.tiBandwidth[k], fmt).toHtmlEscaped());
+        mrows += mrow(QStringLiteral("Lissage des densités"),
+                      QStringLiteral("noyau gaussien, règle de %1 ; h(θ) = <b>%2</b>%3")
+                          .arg(hRule.toHtmlEscaped(), hTheta.toHtmlEscaped(),
+                               hs.isEmpty() ? QString() : QStringLiteral(" ; h des t<sub>i</sub> : ") + hs.join(", ")));
+    }
     mrows += mrow(QStringLiteral("Recuit simulé"),
                   used.annealRecurrence > 0
                       ? QStringLiteral("toutes les %1 itérations, température jusqu'à 2<sup>%2</sup> pendant %3 itérations")
@@ -632,6 +649,11 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         if (rq0.value("layout").toString() == QLatin1String("overlay")) overlay = true;
         if (!colorOf(rq0).isEmpty()) anyColor = true;
         const QJsonObject rq = normalizeRequest(rq0);
+        if (const QString bad = obsoleteFieldError(rq0); !bad.isEmpty()) {     // nom de champ d'une ancienne version
+            html += QStringLiteral("<p><i>Calcul impossible : %1.</i></p>").arg(bad.toHtmlEscaped());
+            prompt += QStringLiteral("Calcul impossible : %1. Réécris la demande avec ces noms.\n").arg(bad);
+            continue;
+        }
         if (rq.value("method").toString() == QLatin1String("density_file")) {
             // Fichier de densité pour le plugin Density de ChronoModel (loi classique placée sur l'axe du temps).
             const DensityFileResult F = buildDensityFile(rq);
@@ -819,6 +841,71 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     return out;
 }
 
+QString MethodRunner::obsoleteFieldError(const QJsonObject& request)
+{
+    static const QHash<QString, QString> renamed = {
+        { "refYear", "ref_year" }, { "refyear", "ref_year" }, { "errorF", "error_f" }, { "errorf", "error_f" },
+        { "deltaR", "delta_r" }, { "deltaRerr", "delta_r_error" }, { "deltaR_error", "delta_r_error" },
+        { "curveI", "curve_i" }, { "curveD", "curve_d" }, { "curveF", "curve_f" }, { "steps", "integration_steps" } };
+    QStringList bad;
+    for (auto it = request.begin(); it != request.end(); ++it)
+        if (renamed.contains(it.key()))
+            bad << QStringLiteral("champ « %1 » inconnu : écrire « %2 »").arg(it.key(), renamed.value(it.key()));
+    for (const QJsonValue& d : request.value("dates").toArray())
+        if (const QString e = obsoleteFieldError(d.toObject()); !e.isEmpty()) bad << e;
+    bad.removeDuplicates();
+    return bad.join(QStringLiteral(" ; "));
+}
+
+QJsonObject MethodRunner::expandPlotLaws(const QJsonObject& plotIn, QString* err)
+{
+    QJsonObject plot = plotIn;
+    QJsonArray series = plot.value("series").toArray();
+    if (series.isEmpty() && (plot.contains("law") || plot.contains("loi"))) {       // forme courte : loi à la racine
+        QJsonObject s;
+        for (const char* k : { "law", "loi", "mean", "sd", "meanlog", "sdlog", "median", "factor", "min", "max", "mode", "mode_min",
+                               "mode_max", "rate", "shape", "scale", "alpha", "beta", "offset", "reverse", "tmin", "tmax", "step",
+                               "points", "name", "color" })
+            if (plot.contains(k)) { s[k] = plot.value(k); if (QLatin1String(k) != QLatin1String("color")) plot.remove(k); }
+        series.append(s);
+    }
+    const QJsonValue rootX = plot.value("x");
+    bool any = false;
+    QString firstDesc;
+    for (int i = 0; i < series.size(); ++i) {
+        QJsonObject s = series[i].toObject();
+        if (!s.contains("law") && !s.contains("loi")) {
+            if (!s.contains("x") && rootX.isArray()) s["x"] = rootX;     // la série garde l'abscisse commune
+            series[i] = s;
+            continue;
+        }
+        QJsonObject spec = s;
+        spec.remove("x"); spec.remove("y"); spec.remove("name");
+        if (!spec.contains("points") && !spec.contains("step")) spec["points"] = 801;
+        const DensityFileResult d = buildDensityFile(spec);
+        if (!d.ok) {
+            if (err) *err = d.error;
+            return {};
+        }
+        QJsonArray xs, ys;
+        for (size_t k = 0; k < d.density.t.size(); ++k) { xs.append(d.density.t[k]); ys.append(d.density.v[k]); }
+        QJsonObject out;
+        for (const char* k : { "color", "fill", "width" }) if (s.contains(k)) out[k] = s.value(k);
+        out["name"] = s.value("name").toString(d.description);
+        out["x"] = xs;
+        out["y"] = ys;
+        series[i] = out;
+        if (firstDesc.isEmpty()) firstDesc = d.description;
+        any = true;
+    }
+    if (!any) return plotIn;
+    plot.remove("x");
+    plot["series"] = series;
+    if (!plot.contains("title")) plot["title"] = firstDesc;
+    if (!plot.contains("fill")) plot["fill"] = true;
+    return plot;
+}
+
 bool MethodRunner::isModelRequest(const QString& question)
 {
     const QString q = text::fold(question);
@@ -826,7 +913,35 @@ bool MethodRunner::isModelRequest(const QString& question)
     static const QRegularExpression context(QStringLiteral(
         R"(\b(chronomodel|evenement|evenements|phase|phases|contrainte|contraintes|stratigraph\w*|fais|faire|cree|creer|construi\w*|genere|generer|prepare|exporte\w*)"
         R"(|event|events|constraints?|bounds?|create|build|make|generate|export\w*)\b)"));
+    // Courbe âge-profondeur ou tableau CSV de ChronoModel : c'est un modèle, même sans le mot « modèle ».
+    if (isAgeDepthRequest(question)) return true;
     return model.match(q).hasMatch() && context.match(q).hasMatch();
+}
+
+QStringList MethodRunner::datingMethodsIn(const QString& question)
+{
+    const QString q = text::fold(question);
+    static const QVector<QPair<QString, QRegularExpression>> pats = {
+        { "c14", QRegularExpression(QStringLiteral(R"(\b(?:14\s?c|c\s?-?14|radiocarbones?|radiocarbon|carbone 14|carbon 14|intcal\w*|shcal\w*|marine\d*)\b|\d\s*bp\b|\bbp\b)")) },
+        { "f14c", QRegularExpression(QStringLiteral(R"(\bf14c\b|fraction moderne|post-?bombe?|\bbomb\w*|\bpmc\b)")) },
+        { "tl", QRegularExpression(QStringLiteral(R"(\b(?:tl|osl|irsl|luminescence|thermoluminescence)\b)")) },
+        { "am", QRegularExpression(QStringLiteral(R"(\b(?:am|archeomag\w*|archaeomag\w*|paleomag\w*|palaeomag\w*|inclinaisons?|declinaisons?|inclinations?|declinations?|alpha\s?95|a95|paleointensite\w*|intensites?)\b|α95)")) },
+        { "gauss", QRegularExpression(QStringLiteral(R"(\b(?:gauss\w*|unif\w*|normale|tpq|taq|terminus|dendro\w*|monnaies?|typolog\w*|numismat\w*)\b|\bentre\s+-?\d+\s+et\s+-?\d+)")) },
+        { "density", QRegularExpression(QStringLiteral(R"(densite\s+tabulee|fichier\s+de\s+densite|plugin\s+density|\bdensity\b)")) } };
+    QStringList out;
+    for (const auto& p : pats)
+        if (p.second.match(q).hasMatch()) out << p.first;
+    return out;
+}
+
+bool MethodRunner::isAgeDepthRequest(const QString& question)
+{
+    const QString q = text::fold(question);
+    static const QRegularExpression ageDepth(QStringLiteral(
+        R"(\bage[\s-]*(?:profondeur|depth)\b|\bcourbe\s+(?:de\s+)?profondeur\b|\bdepth[\s-]*(?:age|curve)\b|\bmodele\s+d'age\b)"));
+    // En-tête du tableau d'import de ChronoModel : « method;dating name/code;param a;… ».
+    static const QRegularExpression csvHeader(QStringLiteral(R"(\bmethod\s*[;,\t]\s*dating\s+name)"));
+    return ageDepth.match(q).hasMatch() || csvHeader.match(q).hasMatch();
 }
 
 RunOutcome MethodRunner::analyzeQuestion(const QString& question, DateFormat format)
@@ -1019,18 +1134,14 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
         if (pt >= 1 && pt <= 6) o["process"] = QString::fromLatin1(pn[pt]);
         o.remove("process_type");
     }
-    static const char* const amKeys[][2] = { { "error_f", "errorF" }, { "refI_curve", "curveI" }, { "refD_curve", "curveD" },
-                                              { "refF_curve", "curveF" }, { "curve_i", "curveI" }, { "curve_d", "curveD" },
-                                              { "curve_f", "curveF" }, { "integration_steps", "steps" } };
+    // Noms du .chr pour les courbes (refI_curve…) : mêmes noms que la spécification (curve_i…), sans « .ref ».
+    static const char* const amKeys[][2] = { { "refI_curve", "curve_i" }, { "refD_curve", "curve_d" }, { "refF_curve", "curve_f" } };
     for (const auto& r : amKeys)
-        if (o.contains(r[0]) && !o.contains(r[1])) {
-            QJsonValue v = o.value(r[0]);
-            if (v.isString()) v = v.toString().trimmed().toLower().remove(QRegularExpression(QStringLiteral("\\.ref$")));
-            o[r[1]] = v;
-            o.remove(r[0]);
-        }
-    static const char* const renames[][2] = { { "ref_curve", "curve" }, { "delta_r", "deltaR" }, { "delta_r_error", "deltaRerr" },
-                                              { "ref_year", "refYear" }, { "err", "error" }, { "sigma", "error" },
+        if (o.contains(r[0]) && !o.contains(r[1])) { o[r[1]] = o.value(r[0]); o.remove(r[0]); }
+    for (const char* k : { "curve_i", "curve_d", "curve_f" })
+        if (o.value(k).isString())
+            o[k] = o.value(k).toString().trimmed().toLower().remove(QRegularExpression(QStringLiteral("\\.ref$")));
+    static const char* const renames[][2] = { { "ref_curve", "curve" }, { "err", "error" }, { "sigma", "error" },
                                               { "fraction", "f14c" } };       // plugin f14c du .chr : « fraction »
     for (const auto& r : renames)
         if (o.contains(r[0]) && !o.contains(r[1])) { o[r[1]] = o.value(r[0]); o.remove(r[0]); }
@@ -1056,8 +1167,8 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
     if (!m.isEmpty()) o["method"] = m;
 
     // Nombres écrits en texte.
-    static const char* const numeric[] = { "age", "error", "deltaR", "deltaRerr", "refYear", "min", "max", "inc", "dec", "alpha95",
-                                           "field", "errorF", "f14c", "level", "tmin", "tmax" };
+    static const char* const numeric[] = { "age", "error", "delta_r", "delta_r_error", "ref_year", "min", "max", "inc", "dec", "alpha95",
+                                           "field", "error_f", "f14c", "level", "tmin", "tmax" };
     for (const char* k : numeric)
         if (o.value(k).isString()) {
             const double d = numberFromText(o.value(k).toString());

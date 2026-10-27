@@ -52,6 +52,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QStatusBar>
 #include <QThread>
 #include <QToolButton>
+#include <QSvgRenderer>
+#include <QPainter>
 #include <QTextCursor>
 #include <QUrl>
 #include <QUrlQuery>
@@ -70,6 +72,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "src/methods/common/Tools.h"
 #include "src/llm/RemoteEngine.h"
 #include "src/ui/ChatView.h"
+#include "src/ui/ChrScene.h"
 #include "src/ui/FigurePanel.h"
 #include "src/ui/HelpView.h"
 #include "src/ui/HistoryPanel.h"
@@ -212,12 +215,78 @@ void MainWindow::buildUi()
     inputRow->addWidget(input_, 1);
     inputRow->addLayout(buttons);
 
+    // Saisie redimensionnable : poignée entre la conversation et la zone de saisie (tirer vers le haut pour l'agrandir).
+    // La hauteur choisie est retenue d'une session à l'autre.
+    auto* bottom = new QWidget;
+    auto* bottomLay = new QVBoxLayout(bottom);
+    bottomLay->setContentsMargins(0, 0, 0, 0);
+    bottomLay->addLayout(attachRow);
+    bottomLay->addLayout(inputRow, 1);
+    input_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    input_->setMinimumHeight(input_->fontMetrics().lineSpacing() * 2 + 16);
+
+    inputSplitter_ = new QSplitter(Qt::Vertical);
+    inputSplitter_->addWidget(chat_);
+    inputSplitter_->addWidget(bottom);
+    inputSplitter_->setStretchFactor(0, 1);
+    inputSplitter_->setStretchFactor(1, 0);
+    inputSplitter_->setCollapsible(0, false);
+    inputSplitter_->setCollapsible(1, false);
+    inputSplitter_->setChildrenCollapsible(false);
+    inputSplitter_->handle(1)->setToolTip(tr("Tirer pour agrandir ou réduire la zone de saisie"));
+    {
+        const int saved = QSettings().value("ui/inputHeight", 0).toInt();
+        const int h = saved > 0 ? saved : input_->sizeHint().height() + 8;
+        inputSplitter_->setSizes({ 600, h });
+    }
+    connect(inputSplitter_, &QSplitter::splitterMoved, this, [this] {
+        const QList<int> sz = inputSplitter_->sizes();
+        if (sz.size() == 2) QSettings().setValue("ui/inputHeight", sz[1]);
+    });
+
+    // Barre de titre au-dessus de la discussion : nouvelle conversation et titre de la conversation en cours
+    // (accessible même quand le volet Historique est replié).
+    newConvBtn_ = new QToolButton;
+    {
+        QSvgRenderer svg(QStringLiteral(":/icons/nouvelle_conversation.svg"));
+        QIcon icon;
+        for (const int px : { 16, 20, 24, 32, 40, 48, 64 }) {
+            QPixmap pm(px, px);
+            pm.fill(Qt::transparent);
+            QPainter p(&pm);
+            svg.render(&p);
+            icon.addPixmap(pm);
+        }
+        newConvBtn_->setIcon(icon);
+    }
+    newConvBtn_->setIconSize(QSize(24, 24));
+    newConvBtn_->setAutoRaise(true);
+    newConvBtn_->setCursor(Qt::PointingHandCursor);
+    newConvBtn_->setAccessibleName(tr("Nouvelle conversation"));
+    newConvBtn_->setToolTip(tr("<b>Nouvelle conversation</b> (%1)<br>Commence une conversation vide ; "
+                               "la conversation actuelle reste dans l'historique.")
+                                .arg(QKeySequence(QKeySequence::New).toString(QKeySequence::NativeText)));
+    connect(newConvBtn_, &QToolButton::clicked, this, &MainWindow::newConversation);
+    convTitle_ = new QLabel;
+    convTitle_->setTextFormat(Qt::PlainText);
+    convTitle_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);     // un titre long ne force pas la largeur
+    {
+        QFont f = convTitle_->font();
+        f.setBold(true);
+        convTitle_->setFont(f);
+    }
+    auto* titleBar = new QHBoxLayout;
+    titleBar->setContentsMargins(0, 0, 0, 2);
+    titleBar->setSpacing(6);
+    titleBar->addWidget(newConvBtn_);
+    titleBar->addWidget(convTitle_, 1);
+    updateConvTitle();
+
     auto* left = new QWidget;
     auto* leftLay = new QVBoxLayout(left);
     leftLay->setContentsMargins(6, 6, 6, 6);
-    leftLay->addWidget(chat_, 1);
-    leftLay->addLayout(attachRow);
-    leftLay->addLayout(inputRow);
+    leftLay->addLayout(titleBar);
+    leftLay->addWidget(inputSplitter_, 1);
 
     figures_ = new FigurePanel;
     auto* right = new QWidget;
@@ -258,7 +327,6 @@ void MainWindow::buildUi()
     connect(history_, &HistoryPanel::openRequested, this, &MainWindow::openConversation);
     connect(history_, &HistoryPanel::deleteRequested, this, &MainWindow::deleteConversation);
     connect(history_, &HistoryPanel::deleteAllRequested, this, &MainWindow::deleteAllConversations);
-    connect(history_, &HistoryPanel::newRequested, this, &MainWindow::newConversation);
 
     modelLabel_ = new QLabel(tr("Aucun modèle"));
     statsLabel_ = new QLabel;
@@ -339,13 +407,14 @@ void MainWindow::showWelcome()
            "%1 pour :"
            "<ul><li>réaliser des <b>datations simples</b> et vérifier leur cohérence ;</li>"
            "<li><b>construire un modèle ChronoModel</b> (événements, phases, contraintes) et l'exporter en <code>.chr</code> ;</li>"
-           "<li><b>interpréter les résultats</b> (joignez un <code>.chr</code> ou un export CSV avec 📎).</li></ul>")
+           "<li><b>contrôler la convergence</b> d'un calcul ChronoModel (joignez avec 📎 le journal des résultats exporté en HTML, "
+           "<code>Log_Posterior_Distrib_Stats.html</code>, onglet Résultats &gt; Log).</li></ul>")
               .arg(settings_.useRemote ? tr("Assistant utilisant un <b>modèle distant</b> (vos questions sont envoyées au serveur configuré ; "
                                             "les calculs de datation restent locaux)")
                                        : tr("Assistant local (aucune donnée ne quitte votre ordinateur)"))
         + tr("Pour essayer, cliquez sur un exemple (il est recopié dans la zone de question) :<ul>"
              "<li>%1</li><li>%2</li><li>%3</li></ul>")
-              .arg(ex(QStringLiteral("C14 de 3560 ± 20 BP")),
+              .arg(ex(QStringLiteral("C14 de 3560 +- 20 BP")),
                    ex(QStringLiteral("archéomagnétisme : inclinaison 65°, alpha95 = 1")),
                    ex(QStringLiteral("date uniforme entre -500 et -400")))
         + tr("<a href=\"seldon://help\">Mode d'emploi</a> (F1 ou <code>/aide</code>) — "
@@ -443,6 +512,20 @@ void MainWindow::updateControls()
     stopBtn_->setVisible(generating_);
     sendBtn_->setVisible(!generating_);
     if (history_) history_->setBusy(generating_);
+    if (newConvBtn_) newConvBtn_->setEnabled(!generating_);
+}
+
+void MainWindow::updateConvTitle()
+{
+    if (!convTitle_) return;
+    QString title;
+    for (const Turn& t : std::as_const(turns_))
+        if (!t.synthetic) { title = Conversation::makeTitle(t.question); break; }
+    const bool empty = title.isEmpty();
+    if (empty) title = tr("Nouvelle conversation");
+    convTitle_->setText(title);
+    convTitle_->setToolTip(empty ? QString() : title);
+    convTitle_->setEnabled(!empty);                   // grisé tant qu'aucune question n'a été posée
 }
 
 void MainWindow::chooseModel()
@@ -522,21 +605,179 @@ QStringList MainWindow::recentSkillIds(int n) const
     return ids;
 }
 
-QVector<ChatMessage> MainWindow::buildChat() const
+QVector<ChatMessage> MainWindow::buildChat(QJsonArray* refs) const
 {
     QVector<ChatMessage> v;
     const std::string userPrompt = settings_.userPrompt.toStdString();
-    v.append({ "system", skills_.alwaysText().toStdString() + dateformat::systemHint(dateformat::fromId(settings_.dateFormat))
-                 + ((remoteActive() && settings_.remoteTools) ? toolsSystemHint() : std::string()) + userPromptSystemBlock(userPrompt) });
+    const std::string system = skills_.alwaysText().toStdString() + dateformat::systemHint(dateformat::fromId(settings_.dateFormat))
+                               + ((remoteActive() && settings_.remoteTools) ? toolsSystemHint() : std::string()) + userPromptSystemBlock(userPrompt);
+    v.append({ "system", system });
+    if (refs) refs->append(QJsonObject{ { "role", "system" }, { "content", QString::fromStdString(system) } });
     for (int i = 0; i < turns_.size(); ++i) {
         const Turn& t = turns_[i];
         const bool last = (i == turns_.size() - 1);
         const QString said = (t.answer.trimmed() + t.toolBlocks).trimmed();     // réponse + appels d'outils réécrits en blocs
         if (!last && said.isEmpty()) continue;       // tour interrompu/en erreur : ignoré
-        v.append({ "user", t.modelUser.toStdString() + (last ? userPromptReminder(userPrompt) : std::string()) });
-        if (!last) v.append({ "assistant", said.toStdString() });
+        const std::string suffix = last ? userPromptReminder(userPrompt) : std::string();
+        v.append({ "user", t.modelUser.toStdString() + suffix });
+        if (refs) {
+            QJsonObject u{ { "role", "user" }, { "turn", i } };
+            if (!suffix.empty()) u["suffix"] = QString::fromStdString(suffix);
+            refs->append(u);
+        }
+        if (!last) {
+            v.append({ "assistant", said.toStdString() });
+            if (refs) refs->append(QJsonObject{ { "role", "assistant" }, { "turn", i } });
+        }
     }
     return v;
+}
+
+QJsonObject MainWindow::promptSnapshot(const QJsonArray& messages, const SamplingParams& sp) const
+{
+    // Paramètres en float : arrondis à 6 décimales pour l'export (0.2f s'écrirait 0.20000000298023224).
+    auto f6 = [](float v) { return std::round(double(v) * 1e6) / 1e6; };
+    QJsonObject engine, sampling{ { "temperature", f6(sp.temperature) }, { "max_tokens", sp.maxTokens }, { "thinking", sp.enableThinking } };
+    if (remoteActive()) {
+        engine = QJsonObject{ { "type", "distant" }, { "url", settings_.remoteUrl }, { "model", settings_.remoteModel },
+                              { "tools", settings_.remoteTools } };
+    } else {
+        engine = QJsonObject{ { "type", "local" }, { "model", QFileInfo(settings_.modelPath).fileName() }, { "model_path", settings_.modelPath },
+                              { "n_ctx", settings_.nCtx }, { "threads", settings_.nThreads }, { "gpu_layers", settings_.nGpuLayers } };
+        sampling["top_k"] = sp.topK;
+        sampling["top_p"] = f6(sp.topP);
+        sampling["min_p"] = f6(sp.minP);
+        sampling["repeat_penalty"] = f6(sp.repeatPenalty);
+        sampling["presence_penalty"] = f6(sp.presencePenalty);
+        sampling["penalty_last_n"] = sp.penaltyLastN;
+        sampling["seed"] = sp.seed == 0xFFFFFFFFu ? QJsonValue(QStringLiteral("aléatoire")) : QJsonValue(double(sp.seed));
+    }
+    return QJsonObject{ { "date", QDateTime::currentDateTime().toString(Qt::ISODate) },
+                        { "seldonh", QCoreApplication::applicationVersion() },
+                        { "engine", engine }, { "sampling", sampling }, { "messages", messages } };
+}
+
+QJsonArray MainWindow::expandPromptMessages(const QJsonArray& messages) const
+{
+    QJsonArray out;
+    for (const QJsonValue& v : messages) {
+        const QJsonObject m = v.toObject();
+        QJsonObject e{ { "role", m.value("role") } };
+        if (m.contains("content")) {
+            e["content"] = m.value("content");
+        } else {
+            const int k = m.value("turn").toInt(-1);
+            if (k < 0 || k >= turns_.size()) continue;
+            const Turn& t = turns_[k];
+            e["content"] = m.value("role").toString() == QLatin1String("user")
+                               ? t.modelUser + m.value("suffix").toString()
+                               : (t.answer.trimmed() + t.toolBlocks).trimmed();
+        }
+        out.append(e);
+    }
+    return out;
+}
+
+void MainWindow::relaunchTurn(int turn)
+{
+    if (generating_ || turn < 0 || turn >= turns_.size()) return;
+    if (!modelReady_) {
+        statusBar()->showMessage(tr("Aucun modèle prêt : impossible de relancer la question."), 5000);
+        return;
+    }
+    int q = turn;
+    while (q > 0 && turns_[q].synthetic) --q;           // tour de suite d'un calcul : on relance la question d'origine
+    if (q == turns_.size() - 1) {                        // dernière question : nouvelle réponse à la place de l'ancienne
+        Turn& t = turns_.last();
+        t.answer.clear();
+        t.toolBlocks.clear();
+        t.thinking.clear();
+        t.truncation = 0;
+        chat_->setActions(t.view, {});
+        chat_->setAssistant(t.view, QString(), QString(), false, false);
+        statusBar()->showMessage(tr("Question relancée (même prompt, nouvelle réponse)."), 5000);
+    } else {                                             // question plus ancienne : reposée à la fin de la conversation
+        Turn t;
+        const Turn& src = turns_[q];
+        t.question = src.question;
+        t.modelUser = src.modelUser;                     // même texte envoyé (connaissances, résultats, fichier joint)
+        t.skillIds = src.skillIds;
+        t.followUp = src.followUp;
+        t.drewModel = src.drewModel;
+        logUser(src.question + tr("\n\n↻ Question relancée"));
+        t.view = newAssistantBubble();
+        turns_.append(t);
+    }
+    saveCurrent();
+    startGeneration();
+}
+
+void MainWindow::exportPrompt(int turn)
+{
+    if (turn < 0 || turn >= turns_.size() || turns_[turn].prompt.isEmpty()) return;
+    const Turn& t = turns_[turn];
+    QJsonObject full = t.prompt;
+    full["messages"] = expandPromptMessages(t.prompt.value("messages").toArray());
+    QJsonArray suites;
+    for (const QJsonValue& v : t.prompt.value("suites").toArray()) {
+        QJsonObject s = v.toObject();
+        s["messages"] = expandPromptMessages(s.value("messages").toArray());
+        suites.append(s);
+    }
+    if (!suites.isEmpty()) full["suites"] = suites;
+    full["question"] = t.question;
+    full["skills"] = QJsonArray::fromStringList(t.skillIds);
+    full["answer"] = t.answer;                           // réponse obtenue avec ce prompt
+    if (!t.toolBlocks.isEmpty()) full["tool_calls"] = t.toolBlocks;
+
+    const QString jsonFilter = tr("Prompt complet, JSON (*.json)"), mdFilter = tr("Prompt lisible, Markdown (*.md)");
+    QString selected = jsonFilter;
+    const QString base = QStringLiteral("prompt_%1_%2").arg(QDateTime::fromString(t.prompt.value("date").toString(), Qt::ISODate)
+                                                                .toString(QStringLiteral("yyyyMMdd_HHmmss")))
+                                                       .arg(turn + 1);
+    QString path = QFileDialog::getSaveFileName(this, tr("Exporter le prompt"), QDir::homePath() + "/" + base + ".json",
+                                                jsonFilter + ";;" + mdFilter, &selected);
+    if (path.isEmpty()) return;
+    const QString suf = QFileInfo(path).suffix().toLower();
+    if (suf != "json" && suf != "md") path += selected == mdFilter ? ".md" : ".json";
+
+    QByteArray data;
+    if (QFileInfo(path).suffix().compare("md", Qt::CaseInsensitive) == 0) {
+        const QJsonObject eng = full.value("engine").toObject(), smp = full.value("sampling").toObject();
+        QString md = tr("# Prompt envoyé au modèle — SeldonH %1\n\n").arg(full.value("seldonh").toString());
+        md += tr("- **Date** : %1\n").arg(full.value("date").toString());
+        md += eng.value("type").toString() == QLatin1String("distant")
+                  ? tr("- **Moteur** : distant, %1 (%2), appel d'outils %3\n").arg(eng.value("model").toString(), eng.value("url").toString(),
+                                                                                    eng.value("tools").toBool() ? tr("activé") : tr("désactivé"))
+                  : tr("- **Moteur** : local, %1 (contexte %2 tokens)\n").arg(eng.value("model").toString()).arg(eng.value("n_ctx").toInt());
+        QStringList params;
+        for (auto it = smp.begin(); it != smp.end(); ++it)
+            params << QStringLiteral("%1 = %2").arg(it.key(), it.value().isString() ? it.value().toString() : QString::fromUtf8(QJsonDocument(QJsonArray{ it.value() }).toJson(QJsonDocument::Compact)).mid(1).chopped(1));
+        md += tr("- **Paramètres** : %1\n").arg(params.join(", "));
+        md += tr("- **Compétences injectées** : %1\n").arg(t.skillIds.isEmpty() ? tr("aucune") : t.skillIds.join(", "));
+        if (full.contains("dropped_messages"))
+            md += tr("- **Messages oubliés par le moteur** (contexte plein) : %1\n").arg(full.value("dropped_messages").toInt());
+        auto messages = [&](const QJsonArray& msgs) {
+            QString s;
+            for (const QJsonValue& v : msgs) {
+                const QJsonObject m = v.toObject();
+                s += QStringLiteral("\n## %1\n\n````text\n%2\n````\n").arg(m.value("role").toString(), m.value("content").toString());
+            }
+            return s;
+        };
+        md += tr("\n# Messages\n") + messages(full.value("messages").toArray());
+        for (const QJsonValue& v : std::as_const(suites)) md += tr("\n# Suite de la réponse (réponse coupée)\n") + messages(v.toObject().value("messages").toArray());
+        md += tr("\n# Réponse obtenue\n\n````markdown\n%1\n````\n").arg(t.answer);
+        data = md.toUtf8();
+    } else {
+        data = QJsonDocument(full).toJson(QJsonDocument::Indented);
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly) || f.write(data) != data.size()) {
+        QMessageBox::warning(this, tr("Exporter le prompt"), tr("Impossible d'écrire %1.").arg(path));
+        return;
+    }
+    statusBar()->showMessage(tr("Prompt exporté : %1").arg(path), 6000);
 }
 
 void MainWindow::sendMessage()
@@ -548,6 +789,40 @@ void MainWindow::sendMessage()
         input_->clear();
         showHelp();
         return;
+    }
+
+    // Calcul seul (« 2+3 », « ADtoBP(-550) », « a = 3560 ») : calculatrice locale, exacte et instantanée ; rien n'est envoyé
+    // au modèle de langage, qui n'a pas besoin d'être chargé.
+    if (!generating_) {
+        const QString q0 = input_->toPlainText().trimmed();
+        if (calc_.isCalculation(q0)) {
+            logUser(q0);
+            logNotice(calcHtml(calc_.evaluate(q0)));
+            input_->clear();
+            return;
+        }
+    }
+
+    // « Dessine le modèle » : scènes du .chr joint, ou du dernier modèle joint ou créé dans la conversation. Fait par
+    // l'application (même sans modèle de langage chargé) ; le modèle de langage est seulement prévenu.
+    bool drawRequested = false;
+    if (!generating_) {
+        const QString q0 = input_->toPlainText().trimmed();
+        if (ChrSceneWidget::asksForDrawing(q0) && !ChrBuilder::asksForJson(q0)) {
+            if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; }
+            if (!lastChr_.isEmpty()) {
+                drawRequested = true;
+                // Seulement le dessin (ou pas de modèle de langage) : fait par l'application, sans le modèle de langage.
+                if (!modelReady_ || ChrSceneWidget::isOnlyDrawing(q0)) {
+                    logUser(attachName_.isEmpty() ? q0 : q0 + "\n\n📎 " + attachName_);
+                    showChrScenes(lastChr_, lastChrTitle_, true);
+                    input_->clear();
+                    clearAttachment();
+                    saveCurrent();
+                    return;
+                }
+            }
+        }
     }
 
     if (generating_) return;
@@ -566,14 +841,26 @@ void MainWindow::sendMessage()
     }
 
     // Demande de création de modèle : la fiche qui décrit le format du bloc chronomodel est toujours fournie.
-    QStringList pinned = MethodRunner::isModelRequest(q) ? QStringList{ QStringLiteral("03_chronomodel_creer_modele") } : QStringList();
+    // Fiches « Date — … » des méthodes citées : seuls leurs noms de champs sont montrés au modèle (pas de vocabulaires
+    // concurrents). Création de modèle : fiche commune + ces fiches, et rien d'autre (prompt court, moins d'erreurs).
+    static const QHash<QString, QString> dateSkill = {
+        { "c14", "14_date_c14" }, { "f14c", "15_date_f14c" }, { "tl", "16_date_tl" }, { "am", "17_date_am" },
+        { "gauss", "08_dates_autres_methodes" }, { "density", "18_date_densite" } };
+    const bool modelRequest = MethodRunner::isModelRequest(q);
+    QStringList cited = MethodRunner::datingMethodsIn(q);
+    if (modelRequest && cited.isEmpty()) cited = QStringList{ "c14", "tl", "am", "gauss" };     // méthodes non nommées : les courantes
+    QStringList pinned;
+    if (modelRequest) pinned << QStringLiteral("03_chronomodel_creer_modele");
+    if (MethodRunner::isAgeDepthRequest(q)) pinned << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    for (const QString& m : std::as_const(cited)) pinned << dateSkill.value(m);
     // Résultats de ChronoModel joints : fiche de diagnostic de l'utilisateur si elle existe, sinon la fiche intégrée des logs.
     if (attachChronoResults_) {
         bool user = false;
         for (const Skill& s : skills_.skills()) user = user || s.id == QLatin1String("chronomodel_resultats_convergence");
         pinned << (user ? QStringLiteral("chronomodel_resultats_convergence") : QStringLiteral("11_chronomodel_logs"));
     }
-    const QList<SkillMatch> matches = skills_.select(q, settings_.skillChars, recentSkillIds(3), pinned);
+    // Création de modèle : budget 0 → seulement les fiches imposées ci-dessus.
+    const QList<SkillMatch> matches = skills_.select(q, modelRequest ? 0 : settings_.skillChars, recentSkillIds(3), pinned);
     const QString knowledge = SkillManager::format(matches);
 
     if (!turns_.isEmpty() && turns_.last().truncation) {     // nouvelle question : plus de « Continuer » sur la précédente
@@ -583,6 +870,7 @@ void MainWindow::sendMessage()
 
     Turn t;
     t.question = q;
+    t.drewModel = drawRequested;
     for (const SkillMatch& m : matches) t.skillIds << m.skill->id;
 
     // Calculs déterministes (calibration 14C) : faits par l'application, pas par le modèle.
@@ -612,21 +900,29 @@ void MainWindow::sendMessage()
     if (dating.found)          mu += dating.promptBlock + "\n";
     if (!knowledge.isEmpty())  mu += "[Connaissances de référence]\n" + knowledge + "\n\n";
     if (!attachText_.isEmpty()) mu += "[Fichier joint : " + attachName_ + "]\n" + attachText_ + "\n\n";
+    if (drawRequested)
+        mu += QStringLiteral("[SeldonH a dessiné le modèle « %1 » dans le panneau des graphiques (scène des Events%2). "
+                             "Le dessin est DÉJÀ fait et affiché : n'écris AUCUN bloc de code (ni plot, ni autre) pour le dessiner, "
+                             "ne décris pas le dessin ; réponds seulement au reste de la question.]\n\n")
+                  .arg(lastChrTitle_, ChrSceneWidget::hasPhases(lastChr_) ? QStringLiteral(" et scène des phases") : QString());
+    if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; }
     t.modelUser = mu.isEmpty() ? q : mu + "[Question]\n" + q;
 
     QString shown = q;
     if (!attachName_.isEmpty()) shown += "\n\n📎 " + attachName_;
     logUser(shown);
+    if (drawRequested) showChrScenes(lastChr_, lastChrTitle_, true);
     if (dating.found) {
         logNotice(dating.noticeHtml);
         if (!dating.plot.isEmpty()) logDatingPlot(dating.plot, turns_.size());     // le tour t est ajouté juste après
-        for (const QJsonObject& p : dating.extraPlots) logPlot(p);
+        for (const QJsonObject& p : std::as_const(dating.extraPlots)) logPlot(p);
     }
     t.view = newAssistantBubble();
     turns_.append(t);
 
     input_->clear();
     clearAttachment();
+    updateConvTitle();
 
     saveCurrent();                                // la question est gardée même si l'application s'arrête pendant la réponse
     startGeneration();
@@ -644,8 +940,11 @@ void MainWindow::startGeneration()
     sp.temperature    = static_cast<float>(settings_.temperature);
     sp.maxTokens      = settings_.effectiveMaxTokens(remoteActive());   // + réserve pour la réflexion (modèle local)
     sp.enableThinking = settings_.thinking;
-    if (remoteActive()) emit requestRemoteGenerate(buildChat(), sp);
-    else emit requestGenerate(buildChat(), sp);
+    QJsonArray refs;
+    const QVector<ChatMessage> chat = buildChat(&refs);
+    if (!turns_.isEmpty()) turns_.last().prompt = promptSnapshot(refs, sp);
+    if (remoteActive()) emit requestRemoteGenerate(chat, sp);
+    else emit requestGenerate(chat, sp);
 }
 
 // Suite d'une réponse coupée : le modèle reçoit la conversation, le début de sa réponse et la consigne de continuer ;
@@ -666,7 +965,8 @@ void MainWindow::continueAnswer(int turn)
     t.truncation = 0;
     chat_->setActions(t.view, {});
 
-    QVector<ChatMessage> chat = buildChat();      // se termine par la question de ce tour
+    QJsonArray refs;
+    QVector<ChatMessage> chat = buildChat(&refs);  // se termine par la question de ce tour
     chat.append(ChatMessage{ "assistant", t.answer.toStdString() });
     chat.append(ChatMessage{ "user", "[SeldonH] Ta réponse précédente a été coupée avant la fin. Écris uniquement la suite, en reprenant "
                           "exactement là où le texte s'arrête, éventuellement au milieu d'un mot, d'une phrase ou d'un bloc de "
@@ -684,12 +984,47 @@ void MainWindow::continueAnswer(int turn)
     sp.temperature    = static_cast<float>(settings_.temperature);
     sp.maxTokens      = settings_.maxTokens;
     sp.enableThinking = false;                    // pas de nouvelle réflexion : seulement la suite du texte
+    for (int k = int(refs.size()); k < chat.size(); ++k)       // début de réponse et consigne de suite : texte tel quel
+        refs.append(QJsonObject{ { "role", QString::fromStdString(chat[k].role) }, { "content", QString::fromStdString(chat[k].content) } });
+    {
+        QJsonArray suites = t.prompt.value("suites").toArray();
+        suites.append(promptSnapshot(refs, sp));
+        t.prompt["suites"] = suites;
+    }
     if (remoteActive()) emit requestRemoteGenerate(chat, sp);
     else emit requestGenerate(chat, sp);
 }
 
 // Le bloc ```chronomodel n'est pas montré tel quel : un résumé (modèle prêt / ce qui manque) le remplace, sauf si la
 // dernière vraie question de l'utilisateur demande explicitement le JSON.
+QString MainWindow::calcHtml(const QVector<Calculator::Line>& lines) const
+{
+    QString h = tr("<p><b>🧮 Calcul fait par SeldonH</b> <i>(calculatrice locale, sans le modèle de langage)</i></p><table cellspacing='0' cellpadding='3'>");
+    for (const Calculator::Line& l : lines) {
+        h += QStringLiteral("<tr><td><code>%1</code></td><td>").arg(l.expr.toHtmlEscaped());
+        const QString shown = Calculator::formatValue(l.value, l.uncertainty);
+        if (l.ok) h += l.variable.isEmpty() ? QStringLiteral("= <b>%1</b>").arg(shown)
+                                            : QStringLiteral("→ <b>%1</b> = %2").arg(l.variable.toHtmlEscaped(), shown);
+        else h += QStringLiteral("⚠ %1").arg(l.error.toHtmlEscaped());
+        if (l.ok && !l.details.isEmpty()) {
+            h += QStringLiteral("<br><i>%1</i>").arg(l.details.toHtmlEscaped());
+            if (!l.variable.isEmpty() && l.parts.size() > 1) {
+                QStringList names;
+                for (int k = 1; k < l.parts.size(); ++k) names << l.variable + "_" + l.parts[k].first;
+                h += tr("<br><small>variables : %1</small>").arg(names.join(", ").toHtmlEscaped());
+            }
+        }
+        h += QStringLiteral("</td></tr>");
+    }
+    h += QStringLiteral("</table>");
+    bool withErr = false;
+    for (const Calculator::Line& l : lines) withErr = withErr || (l.ok && l.uncertainty > 0);
+    if (withErr)
+        h += tr("<p><small>Incertitudes (1σ) propagées au premier ordre en supposant les <b>erreurs indépendantes</b> : "
+                "une même valeur utilisée deux fois n'est pas reconnue comme corrélée (a − a donne 0 ± σ√2).</small></p>");
+    return h;
+}
+
 QString MainWindow::shownAnswer(const QString& answer) const
 {
     bool showJson = false;
@@ -791,6 +1126,10 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
     t.answer = QString::fromStdString(s.answer);       // texte complet (avec le bloc de modèle) : historique, enregistrement
     QString answer = shownAnswer(t.answer);
+    if (t.drewModel) {                                 // dessin fait par SeldonH : un bloc plot du modèle serait faux
+        answer = ChrSceneWidget::stripPlotBlocks(answer);
+        if (answer.isEmpty()) answer = tr("*Modèle dessiné par SeldonH dans le panneau des graphiques.*");
+    }
     if (!continuing_) t.thinking = QString::fromStdString(s.thinking);
     if (interrupted) answer += tr("\n\n*(réponse interrompue)*");
     else if (t.truncation) answer += QStringLiteral("\n\n*%1*").arg(truncationNotice(t));
@@ -798,7 +1137,90 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     logAssistantText(turns_.size() - 1, answer, t.thinking);
     setTurnActions(turns_.size() - 1);
 
-    applyPlotBlocks(t.answer);
+    if (!t.drewModel) applyPlotBlocks(t.answer);
+
+    // Modèle ChronoModel complet : il est dessiné tout de suite (scène des Events, et des phases s'il y en a).
+    QJsonObject spec;
+    if (!interrupted && ChrBuilder::extractSpec(t.answer, spec)) {
+        const ChrResult r = ChrBuilder::build(spec);
+        // Vérification croisée avec ce qu'a écrit l'utilisateur : valeurs ou références inventées, données oubliées.
+        const QStringList gaps = ChrBuilder::crossCheck(spec, userSourceText());
+        if (!gaps.isEmpty()) {
+            QString h = tr("<p><b>⚠ Vérification du modèle par rapport à votre texte</b></p><ul>");
+            for (const QString& g : gaps) h += QStringLiteral("<li>%1</li>").arg(g.toHtmlEscaped());
+            h += tr("</ul><p><i>Vérifiez ces points avant d'enregistrer ; demandez à l'assistant de corriger le modèle si besoin.</i></p>");
+            logNotice(h);
+        }
+        if (r.ok) {
+            lastChr_ = r.chr;
+            lastChrTitle_ = r.suggestedName;
+            showChrScenes(r.chr, r.suggestedName, true);
+        }
+    }
+}
+
+void MainWindow::showChrScene(const QJsonObject& chr, const QString& kind, const QString& title)
+{
+    QPointer<ChrSceneWidget>& page = kind == QLatin1String("phases") ? phaseScene_ : eventScene_;
+    if (page) page->setChr(chr);
+    else page = new ChrSceneWidget(chr, kind == QLatin1String("phases") ? ChrSceneWidget::Phases : ChrSceneWidget::Events);
+    showFiguresPanel();
+    figures_->showPage(page, title);
+}
+
+void MainWindow::addSceneFigure(const QJsonObject& fig)
+{
+    const QJsonObject chr = fig.value("chr").toObject();
+    const auto kind = fig.value("chr_scene").toString() == QLatin1String("phases") ? ChrSceneWidget::Phases : ChrSceneWidget::Events;
+    const int id = chatFigures_.size();
+    chatFigures_.append(ChatFigure{ fig, nullptr });
+    chat_->addFigure(id, ChrSceneWidget::thumbnail(chr, kind, 520, devicePixelRatioF()), fig.value("title").toString());
+}
+
+QString MainWindow::userSourceText() const
+{
+    QString s;
+    for (const Turn& t : turns_) {
+        if (t.synthetic) continue;
+        s += t.question + QLatin1Char('\n');
+        const int a = t.modelUser.indexOf(QStringLiteral("[Fichier joint : "));
+        if (a >= 0) {
+            const int b = t.modelUser.indexOf(QStringLiteral("\n[Question]"), a);
+            s += t.modelUser.mid(a, b < 0 ? -1 : b - a) + QLatin1Char('\n');
+        }
+    }
+    return s;
+}
+
+void MainWindow::showChrScenes(const QJsonObject& chr, const QString& name, bool inChat)
+{
+    const QString base = QFileInfo(name).completeBaseName();
+    const QString suffix = base.isEmpty() ? QString() : QStringLiteral(" — ") + base;
+    const bool phases = ChrSceneWidget::hasPhases(chr);
+    if (phases) showChrScene(chr, QStringLiteral("phases"), tr("Scène des phases") + suffix);
+    else if (phaseScene_) delete phaseScene_;      // modèle sans phase : l'ancienne scène des phases n'a plus de sens
+    showChrScene(chr, QStringLiteral("events"), tr("Scène des Events") + suffix);
+    if (!inChat) return;
+
+    const int nEv = chr.value("events").toArray().size(), nCons = chr.value("events_constraints").toArray().size();
+    QString html = tr("🗺 Modèle%1 dessiné dans le panneau des graphiques : <b>scène des Events</b> (%2 événement(s), %3 contrainte(s))")
+                       .arg(base.isEmpty() ? QString() : QStringLiteral(" « %1 »").arg(base.toHtmlEscaped())).arg(nEv).arg(nCons);
+    if (phases)
+        html += tr(" et <b>scène des phases</b> (%1 phase(s), %2 contrainte(s))")
+                    .arg(chr.value("phases").toArray().size()).arg(chr.value("phases_constraints").toArray().size());
+    html += tr(". Cliquez sur une vignette pour l'ouvrir ; dans le panneau : molette pour zoomer, glisser pour déplacer, "
+               "double-clic pour la vue d'ensemble, <i>Enregistrer…</i> pour l'export PNG ou SVG.");
+    logNotice(html);
+    // Vignettes cliquables, gardées dans l'historique (élément « plot » portant le .chr).
+    QStringList kinds{ QStringLiteral("events") };
+    if (phases) kinds << QStringLiteral("phases");
+    for (const QString& k : std::as_const(kinds)) {
+        const QJsonObject fig{ { "chr_scene", k }, { "chr", chr },
+                               { "title", (k == QLatin1String("phases") ? tr("Scène des phases") : tr("Scène des Events")) + suffix } };
+        addSceneFigure(fig);
+        DisplayItem d; d.kind = DisplayItem::Plot; d.plot = fig;
+        display_.append(d);
+    }
 }
 
 void MainWindow::onFinished(const GenStats& st)
@@ -806,6 +1228,7 @@ void MainWindow::onFinished(const GenStats& st)
     generating_ = false;
     if (!turns_.isEmpty()) {
         Turn& t = turns_.last();
+        if (st.droppedMessages > 0) t.prompt["dropped_messages"] = st.droppedMessages;   // ce que le moteur a réellement gardé
         t.truncation = st.stoppedByUser ? 0 : st.truncation;
         t.tokenLimit = st.tokenLimit;
         t.truncationDetail = QString::fromStdString(st.truncationDetail);
@@ -867,7 +1290,7 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
     }
     const QJsonObject plot = tools::mergePlots(plots);
     if (!plot.isEmpty()) logDatingPlot(plot, currentQuestionTurn());
-    for (const QJsonObject& p : extra) logPlot(p);
+    for (const QJsonObject& p : std::as_const(extra)) logPlot(p);
     turns_.last().toolBlocks = blocks;
 
     Turn t;
@@ -912,7 +1335,11 @@ void MainWindow::resetConversation(bool clearFigures)
     chatFigures_.clear();
     convId_.clear();
     convCreated_ = QDateTime();
+    lastChr_ = QJsonObject();
+    lastChrTitle_.clear();
+    calc_.reset();
     chat_->clearAll();
+    updateConvTitle();
     if (clearFigures) figures_->clearCurves();
     emit requestReset();
     clearAttachment();
@@ -943,6 +1370,7 @@ void MainWindow::attachFile()
 
     QString text;
     bool chronoResults = false;
+    attachChr_ = QJsonObject();
     if (ext == "html" || ext == "htm") {
         // Export des résultats de ChronoModel (Log_Posterior_Distrib_Stats.html…) : trop long pour le modèle, SeldonH en
         // extrait les valeurs utiles (convergence, σ des dates). Autre page HTML : son texte.
@@ -956,7 +1384,10 @@ void MainWindow::attachFile()
     }
     if (ext == "chr" || ext == "json") {
         const QJsonDocument d = QJsonDocument::fromJson(data);
-        if (d.isObject() && d.object().contains("events")) text = ChrBuilder::summarize(d.object());
+        if (d.isObject() && d.object().contains("events")) {
+            text = ChrBuilder::summarize(d.object());
+            attachChr_ = d.object();               // dessiné à la demande (« dessine le modèle »)
+        }
     }
     if (text.isEmpty()) {
         text = QString::fromUtf8(data);
@@ -976,6 +1407,7 @@ void MainWindow::clearAttachment()
     attachName_.clear();
     attachText_.clear();
     attachChronoResults_ = false;
+    attachChr_ = QJsonObject();
     attachLabel_->hide();
     attachClear_->hide();
 }
@@ -984,13 +1416,16 @@ void MainWindow::onLink(const QUrl& url)
 {
     if (url.scheme() != "seldon") { QDesktopServices::openUrl(url); return; }
     const QString action = url.host();
-    const int idx = url.path().mid(1).toInt();
+    const QString urlPath = url.path();
+    const int idx = QStringView(urlPath).mid(1).toInt();
     if (action == "choose-model") chooseModel();
     else if (action == "open-models") openModelsFolder();
     else if (action == "help") showHelp();
     else if (action == "insert") insertExample(QUrlQuery(url).queryItemValue(QStringLiteral("q"), QUrl::FullyDecoded));
     else if (action == "chr") saveChrFromTurn(idx);
     else if (action == "continue") continueAnswer(idx);
+    else if (action == "relaunch") relaunchTurn(idx);
+    else if (action == "prompt") exportPrompt(idx);
     else if (action == "figure") showFigure(idx);
     else if (action == "densityfile") saveDensityFile(url);
     else if (action == "copy" && idx >= 0 && idx < turns_.size()) QApplication::clipboard()->setText(turns_[idx].answer);
@@ -1028,6 +1463,9 @@ void MainWindow::saveChrFromTurn(int turn)
         html += "</ul>";
     }
     html += tr("<br><i>Fichier généré automatiquement : vérifiez-le à l'ouverture dans ChronoModel.</i>");
+    lastChr_ = r.chr;
+    lastChrTitle_ = QFileInfo(path).fileName();
+    showChrScenes(r.chr, lastChrTitle_, false);
     logNotice(html);
 }
 
@@ -1039,7 +1477,9 @@ void MainWindow::applyPlotBlocks(const QString& answer)
     while (it.hasNext()) {
         const QJsonDocument d = QJsonDocument::fromJson(it.next().captured(1).toUtf8());
         QString err;
-        const bool ok = d.isObject() && logPlot(d.object(), &err);
+        // Loi donnée par ses paramètres (« law ») : points calculés par SeldonH.
+        const QJsonObject plot = d.isObject() ? MethodRunner::expandPlotLaws(d.object(), &err) : QJsonObject();
+        const bool ok = !plot.isEmpty() && logPlot(plot, &err);
         if (!ok)
             logNotice(tr("<i>📈 Le tracé proposé par l'assistant n'a pas pu être dessiné (%1). Les datations calculées par SeldonH "
                                 "sont tracées automatiquement ; un bloc de tracé doit contenir des valeurs x et y explicites.</i>")
@@ -1087,6 +1527,10 @@ void MainWindow::showFigure(int id)
     if (id < 0 || id >= chatFigures_.size()) return;
     showFiguresPanel();
     ChatFigure& f = chatFigures_[id];
+    if (f.plot.contains("chr_scene")) {                // scène d'un modèle : onglet de scène réutilisé
+        showChrScene(f.plot.value("chr").toObject(), f.plot.value("chr_scene").toString(), f.plot.value("title").toString());
+        return;
+    }
     if (f.page) {
         const QString title = f.plot.value("title").toString();
         figures_->showPage(f.page, title.isEmpty() ? tr("Courbe") : title);
@@ -1162,6 +1606,10 @@ void MainWindow::setTurnActions(int turn)
         actions << tr("<a href=\"seldon://continue/%1\">▶ Continuer la réponse</a>").arg(turn);
     if (!t.answer.isEmpty())
         actions << QStringLiteral("<a href=\"seldon://copy/%1\">Copier</a>").arg(turn);
+    if (!t.answer.isEmpty() || t.truncation)
+        actions << tr("<a href=\"seldon://relaunch/%1\" title=\"Redemander la même question avec le même prompt\">↻ Relancer</a>").arg(turn);
+    if (!t.prompt.isEmpty())
+        actions << tr("<a href=\"seldon://prompt/%1\" title=\"Enregistrer exactement ce qui a été envoyé au modèle (JSON ou Markdown)\">📄 Exporter le prompt</a>").arg(turn);
     if (!actions.isEmpty()) chat_->setActions(t.view, actions);
 }
 
@@ -1174,15 +1622,15 @@ void MainWindow::saveCurrent()
     c.updated = QDateTime::currentDateTime();
     c.backend = remoteActive() ? tr("modèle distant : %1").arg(settings_.remoteModel)
                                : tr("modèle local : %1").arg(modelDesc_);
-    for (const Turn& t : turns_) {
+    for (const Turn& t : std::as_const(turns_)) {
         StoredTurn s;
-        s.question = t.question; s.modelUser = t.modelUser; s.answer = t.answer; s.toolBlocks = t.toolBlocks;
+        s.question = t.question; s.modelUser = t.modelUser; s.answer = t.answer; s.toolBlocks = t.toolBlocks; s.prompt = t.prompt;
         s.skillIds = t.skillIds; s.followUp = t.followUp; s.synthetic = t.synthetic;
         c.turns.append(s);
     }
     c.display = display_;
     if (!c.hasContent()) return;
-    for (const StoredTurn& s : c.turns)
+    for (const StoredTurn& s : std::as_const(c.turns))
         if (!s.synthetic) { c.title = Conversation::makeTitle(s.question); break; }
     QString err;
     if (!store_.save(c, &err)) {
@@ -1231,13 +1679,13 @@ void MainWindow::openConversation(const QString& id)
 
     convId_ = c.id;
     convCreated_ = c.created;
-    for (const StoredTurn& s : c.turns) {
+    for (const StoredTurn& s : std::as_const(c.turns)) {
         Turn t;
-        t.question = s.question; t.modelUser = s.modelUser; t.answer = s.answer; t.toolBlocks = s.toolBlocks;
+        t.question = s.question; t.modelUser = s.modelUser; t.answer = s.answer; t.toolBlocks = s.toolBlocks; t.prompt = s.prompt;
         t.skillIds = s.skillIds; t.followUp = s.followUp; t.synthetic = s.synthetic;
         turns_.append(t);
     }
-    for (const DisplayItem& d : c.display) {
+    for (const DisplayItem& d : std::as_const(c.display)) {
         switch (d.kind) {
         case DisplayItem::User:
             chat_->addUser(d.text);
@@ -1246,7 +1694,8 @@ void MainWindow::openConversation(const QString& id)
             chat_->addNotice(d.text);
             break;
         case DisplayItem::Plot:
-            if (figures_->addCurvesJson(d.plot)) recallFigure(d.plot);
+            if (d.plot.contains("chr_scene")) addSceneFigure(d.plot);      // vignette ; la scène s'ouvre au clic
+            else if (figures_->addCurvesJson(d.plot)) recallFigure(d.plot);
             break;
         case DisplayItem::Assistant: {
             const int view = chat_->addAssistant();
@@ -1258,7 +1707,14 @@ void MainWindow::openConversation(const QString& id)
         }
         display_.append(d);
     }
+    for (int i = int(turns_.size()) - 1; i >= 0 && lastChr_.isEmpty(); --i) {     // « dessine le modèle » possible ensuite
+        QJsonObject spec;
+        if (!ChrBuilder::extractSpec(turns_[i].answer, spec)) continue;
+        const ChrResult r = ChrBuilder::build(spec);
+        if (r.ok) { lastChr_ = r.chr; lastChrTitle_ = r.suggestedName; }
+    }
     history_->setItems(historyItems_, convId_);
+    updateConvTitle();
     statusBar()->showMessage(tr("Conversation rouverte : %1. Vous pouvez la poursuivre.").arg(c.title), 6000);
 }
 
@@ -1269,7 +1725,7 @@ void MainWindow::deleteConversation(const QString& id)
         return;
     }
     QString title = id;
-    for (const ConversationInfo& i : historyItems_) if (i.id == id) title = i.title;
+    for (const ConversationInfo& i : std::as_const(historyItems_)) if (i.id == id) title = i.title;
     const auto ans = QMessageBox::question(this, tr("Supprimer la conversation"),
                                            tr("Supprimer définitivement la conversation « %1 » ?").arg(title));
     if (ans != QMessageBox::Yes) return;

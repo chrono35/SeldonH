@@ -63,6 +63,9 @@ int main(int argc, char *argv[])
     QApplication a(argc, argv);
     QCoreApplication::setOrganizationName("SeldonH");
     QCoreApplication::setApplicationName("SeldonH");
+#ifdef APP_VERSION
+    QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));     // VERSION de SeldonH.pro
+#endif
     QNetworkProxyFactory::setApplicationProxyFactory(new LocalDirectProxyFactory);
 
     QIcon icon;

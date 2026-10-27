@@ -35,7 +35,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // Inclinaison (I), déclinaison (D), intensité (F) ou leurs combinaisons ID, IF, IDF, comparées aux courbes
 // de variation séculaire. Pour les combinaisons, intégration sur la variance supplémentaire σ² (steps pas).
 //
-// Paramètres : process, inc, dec, alpha95, field, errorF, curveI, curveD, curveF, steps (défaut 500).
+// Paramètres : process, inc, dec, alpha95, field, error_f, curve_i, curve_d, curve_f, integration_steps (défaut 500).
 #pragma once
 
 #include <QRegularExpression>

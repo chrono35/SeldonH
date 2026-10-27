@@ -1124,8 +1124,9 @@ double bandwidthSJ(const std::vector<double>& x, double sd, double iqr)
 
 } // namespace
 
-double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule)
+double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule, Bandwidth* used)
 {
+    if (used) *used = Bandwidth::Silverman;
     const size_t n = samples.size();
     if (n < 2) return 0.0;
     std::vector<double> s = samples;
@@ -1138,21 +1139,22 @@ double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule)
     const double iqr = quant(0.75) - quant(0.25);
     if (rule == Bandwidth::SheatherJones) {
         const double h = bandwidthSJ(s, sd, iqr);
-        if (h > 0.0) return h;
+        if (h > 0.0) { if (used) *used = Bandwidth::SheatherJones; return h; }
     }
     double h = 0.9 * std::min(sd, iqr / 1.34) * std::pow(double(n), -0.2);          // bw.nrd0 de R (Silverman)
     if (!(h > 0.0)) h = sd > 0.0 ? 0.9 * sd * std::pow(double(n), -0.2) : 1.0;
     return h;
 }
 
-Density kernelDensity(const std::vector<double>& samples, double lo, double hi, Bandwidth rule)
+Density kernelDensity(const std::vector<double>& samples, double lo, double hi, Bandwidth rule, double* bandwidth, Bandwidth* used)
 {
     Density d;
     const size_t n = samples.size();
     if (n < 2) return d;
     std::vector<double> s = samples;
     std::sort(s.begin(), s.end());
-    const double h = kernelBandwidth(s, rule);
+    const double h = kernelBandwidth(s, rule, used);
+    if (bandwidth) *bandwidth = h;
     const double a = std::max(lo, s.front() - 4.0 * h), b = std::min(hi, s.back() + 4.0 * h);
     if (!(b > a)) return d;
     const int K = 1024;
@@ -1265,10 +1267,14 @@ EventMcmcResult runEventMcmc(const std::vector<EventDateInput>& dates, const Mcm
         R.thetaTraces.push_back(ch->out.theta);
         R.chains.push_back(ch->out.report);
     }
-    R.theta = kernelDensity(allTheta, tmin, tmax);
+    Bandwidth thetaRule = Bandwidth::SheatherJones;
+    R.theta = kernelDensity(allTheta, tmin, tmax, Bandwidth::SheatherJones, &R.thetaBandwidth, &thetaRule);
+    R.thetaBandwidthSJ = thetaRule == Bandwidth::SheatherJones;
     if (!R.theta.valid()) { R.error = "densité a posteriori de θ vide"; return R; }
     for (size_t k = 0; k < n; ++k) {
-        R.ti.push_back(kernelDensity(allTi[k], -kInf, kInf));
+        double hk = 0.0;
+        R.ti.push_back(kernelDensity(allTi[k], -kInf, kInf, Bandwidth::SheatherJones, &hk));
+        R.tiBandwidth.push_back(hk);
         R.yi.push_back(dates[k].wiggle.type == Wiggle::None ? R.ti.back() : kernelDensity(allYi[k], -kInf, kInf));
         std::vector<double> sg = allSigma[k];
         std::nth_element(sg.begin(), sg.begin() + long(sg.size() / 2), sg.end());
