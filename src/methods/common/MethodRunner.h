@@ -152,6 +152,10 @@ public:
     //  - « method » en minuscules, alias (14c, radiocarbone, osl, archeomag…) et noms d'outils (calculer_evenement…) ;
     //  - datation au format .chr de ChronoModel ({"plugin_id":"14c","data":{"age":…,"error":…,"ref_curve":…}}) aplatie ;
     //  - nombres écrits en texte (« "35" », « "2,5" ») convertis.
+    // Dates d'un « event » ou d'un « combine » sans nom (ou nommées comme l'événement) : le nom est repris de la date du
+    // .chr qui a la même méthode et les mêmes valeurs (de préférence le même décalage), chaque date du .chr servant une
+    // fois. `known` : dates des .chr de la conversation, au format du .chr ou déjà normalisées.
+    static QJsonObject fillDateNames(QJsonObject request, const QVector<QJsonObject>& known);
     static QJsonObject normalizeRequest(QJsonObject request);
     // Noms de champs abandonnés (refYear, errorF, deltaR…) : SeldonH n'emploie que ceux du .chr (ref_year, error_f,
     // delta_r…). Message d'erreur pour le modèle de langage (« champ « refYear » inconnu : écrire « ref_year » »), vide si

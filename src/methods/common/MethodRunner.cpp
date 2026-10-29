@@ -308,7 +308,8 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     std::vector<EventDateInput> inputs;
     std::vector<MethodResult> calibs;
     QStringList curveRefs;           // courbes de référence de toutes les datations
-    QStringList names;
+    QStringList names;               // nom de la date et ce qu'elle est (« Ly-1234 — 14C : 2500 ± 30 BP — IntCal20 ») : texte
+    QStringList plotNames;           // nom de la date seul : légende des graphiques
     QStringList colors;              // couleur de chaque datation (sinon celle de l'événement, sinon défaut)
     double lo = 1e300, hi = -1e300;
     for (int k = 0; k < dates.size(); ++k) {
@@ -321,9 +322,12 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         if (method == "am") { d["process"] = d.value("process").toString("I").toUpper(); if (!d.contains("integration_steps")) d["integration_steps"] = 500; }
         if (d.contains("curve")) d["curve"] = d.value("curve").toString().toLower();
         if (method == "c14" && d.contains("delta_r")) d["has_delta_r"] = true;
-        QString label = d.value("name").toString().trimmed();
+        // Une date nommée comme l'événement (le modèle de langage a recopié son nom) n'a pas de nom propre.
+        QString dateName = d.value("name").toString().trimmed();
+        if (dateName.compare(name, Qt::CaseInsensitive) == 0) dateName.clear();
         const QString desc = reg.describe(d);
-        if (label.isEmpty()) label = desc.isEmpty() ? QStringLiteral("Date %1").arg(k + 1) : desc;
+        const QString what = desc.isEmpty() ? QStringLiteral("Date %1").arg(k + 1) : desc;
+        const QString label = dateName.isEmpty() ? what : desc.isEmpty() ? dateName : dateName + QStringLiteral(" — ") + desc;
         const MethodResult r = reg.compute(d);
         if (!r.ok) return fail(QStringLiteral("datation %1 (%2) : %3").arg(k + 1).arg(label, r.error));
         curveRefs << reg.referenceCurves(d);
@@ -336,7 +340,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         else if (w.type == Wiggle::Gaussian) { dlo = w.mean - 3 * w.error; dhi = w.mean + 3 * w.error; }
         lo = std::min(lo, r.density.t.front() + dlo);
         hi = std::max(hi, r.density.t.back() + dhi);
-        inputs.push_back({ label.toStdString(), r.density, w });
+        inputs.push_back({ (dateName.isEmpty() ? what : dateName).toStdString(), r.density, w });     // variables du MCMC (R̂, ESS)
         // Affichage : densité de t + δ (calibration « wiggle » de ChronoModel) ; le MCMC garde la vraisemblance sans décalage.
         MethodResult shown = r;
         if (w.type != Wiggle::None) {
@@ -345,6 +349,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
         }
         calibs.push_back(shown);
         names << label;
+        plotNames << (dateName.isEmpty() ? what : dateName);
     }
 
     if (const QStringList cl = curveLabels(curveRefs); !cl.isEmpty()) {
@@ -514,7 +519,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
                 hk += QStringLiteral(", t + δ : ") + dateformat::spread(R.yiBandwidth[k], fmt);
                 if (!R.yiBandwidthSJ[k]) hk += QStringLiteral(" (Silverman)");
             }
-            hs << QStringLiteral("%1 : %2").arg(names[int(k)].toHtmlEscaped(), hk.toHtmlEscaped());
+            hs << QStringLiteral("%1 : %2").arg(plotNames[int(k)].toHtmlEscaped(), hk.toHtmlEscaped());
         }
         mrows += mrow(QStringLiteral("Lissage des densités"),
                       QStringLiteral("noyau gaussien, règle de %1 ; h(θ) = <b>%2</b>%3")
@@ -537,7 +542,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     if (!eventColor.isEmpty()) ts0["color"] = eventColor;
     E.series.append(ts0);
     for (size_t k = 0; k < inputs.size(); ++k) {
-        QJsonObject s = plotSeries((inputs[k].wiggle.type != Wiggle::None ? QStringLiteral("%1 (calibration de t + δ)") : QStringLiteral("%1 (calibration)")).arg(names[int(k)]), calibs[k].density, fmt);
+        QJsonObject s = plotSeries(plotNames[int(k)], calibs[k].density, fmt);
         s["fill"] = false;
         s["width"] = 1.2;
         if (!colors[int(k)].isEmpty()) s["color"] = colors[int(k)];
@@ -2097,6 +2102,45 @@ QVector<QJsonObject> objectsOfBlock(const QString& body)
 }
 
 } // namespace
+
+QJsonObject MethodRunner::fillDateNames(QJsonObject request, const QVector<QJsonObject>& known)
+{
+    if (known.isEmpty() || !request.value("dates").isArray()) return request;
+    static const char* const values[] = { "age", "error", "f14c", "min", "max", "inc", "dec", "alpha95", "field", "error_f", "ref_year" };
+    QVector<QJsonObject> pool;
+    for (const QJsonObject& k : known) {
+        const QJsonObject n = normalizeRequest(k);
+        if (!n.value("name").toString().trimmed().isEmpty()) pool << n;
+    }
+    QVector<bool> used(pool.size(), false);
+    const QString eventName = request.value("name").toString().trimmed();
+    QJsonArray dates = request.value("dates").toArray();
+    for (int i = 0; i < dates.size(); ++i) {
+        QJsonObject d = dates[i].toObject();
+        const QString own = d.value("name").toString().trimmed();
+        if (!own.isEmpty() && own.compare(eventName, Qt::CaseInsensitive) != 0) continue;
+        const QJsonObject n = normalizeRequest(d);
+        int best = -1;
+        for (int j = 0; j < pool.size(); ++j) {
+            if (used[j] || pool[j].value("method").toString() != n.value("method").toString()) continue;
+            int same = 0;
+            bool differ = false;
+            for (const char* v : values) {
+                if (!n.contains(v)) continue;
+                if (!pool[j].contains(v) || std::abs(pool[j].value(v).toDouble() - n.value(v).toDouble()) > 1e-9) { differ = true; break; }
+                ++same;
+            }
+            if (differ || same < 2) continue;
+            if (best < 0 || (pool[j].value("wiggle") == n.value("wiggle") && pool[best].value("wiggle") != n.value("wiggle"))) best = j;
+        }
+        if (best < 0) continue;
+        used[best] = true;
+        d["name"] = pool[best].value("name").toString().trimmed();
+        dates[i] = d;
+    }
+    request["dates"] = dates;
+    return request;
+}
 
 QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
 {

@@ -83,6 +83,9 @@ public:
     // manque ; un bloc encore ouvert (réponse en cours) devient « Préparation du modèle… ». `showJson` : l'utilisateur a
     // demandé le JSON, le bloc reste visible (avec le résumé).
     static QString displayMarkdown(const QString& markdown, bool showJson = false);
+    // Retire les blocs de modèle (```chronomodel, ou ```json avec "events") d'une réponse qui n'en demandait pas, avec
+    // la ligne d'annonce qui les précède (« **Modèle ChronoModel** (à exporter) : ») et un séparateur --- resté seul.
+    static QString stripModelBlocks(const QString& markdown);
     // La question demande explicitement à voir le JSON / le bloc du modèle.
     static bool asksForJson(const QString& question);
     // Résumé compact d'un .chr existant, injectable dans un prompt (interprétation, relecture).

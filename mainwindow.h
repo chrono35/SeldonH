@@ -151,7 +151,10 @@ private:
     void showFiguresPanel();                      // ouvre le panneau des graphiques (masqué, ou replié avec le séparateur)
     void continueAnswer(int turn);              // reprend une réponse coupée (limite de tokens, contexte, flux interrompu)
     QString truncationNotice(const Turn& t) const;
+    void rememberChrDates(const QJsonObject& chr);
+    static QString historyUser(const Turn& t);          // message d'un tour passé, sans ses fiches de connaissances
     QString shownAnswer(const QString& answer) const;   // bloc de modèle remplacé par un résumé (JSON seulement sur demande)
+    bool modelExpected() const;                           // la conversation demande un modèle ChronoModel (bloc chronomodel admis)
     // Messages envoyés au modèle. `refs` (facultatif) : les mêmes messages sous forme compacte, pour l'instantané du prompt.
     QVector<seldon::ChatMessage> buildChat(QJsonArray* refs = nullptr) const;
     // Instantané de ce qui est envoyé au modèle : date, version, moteur, paramètres d'échantillonnage, messages (renvois).
@@ -163,7 +166,6 @@ private:
     // Ce qu'a donné l'utilisateur dans la conversation : ses questions et le texte de ses fichiers joints (vérification
     // croisée d'un modèle écrit par le modèle de langage).
     QString userSourceText() const;
-    QStringList recentSkillIds(int turns) const;
     void saveChrFromTurn(int turn);
     // Dessine un .chr dans le panneau : scène des Events et, s'il a des phases, scène des phases. `inChat` : avis et
     // vignettes cliquables ajoutés à la discussion (et à l'historique).
@@ -260,6 +262,7 @@ private:
     QString calcHtml(const QVector<seldon::Calculator::Line>& lines) const;
     QJsonObject          attachChr_;                      // pièce jointe = projet .chr (dessinable)
     QJsonObject          lastChr_;                        // dernier .chr de la conversation (joint ou créé)
+    QVector<QJsonObject> chrDates_;                       // dates des .chr joints dans la conversation : noms repris dans les calculs
     QString              lastChrTitle_;
     QPointer<seldon::ChrSceneWidget> eventScene_, phaseScene_;   // onglets des scènes (nuls si fermés)
     QString              modelDesc_;

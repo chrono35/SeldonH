@@ -621,11 +621,29 @@ void MainWindow::openPreferences()
 
 // ------------------------------------------------------------------ conversation
 
-QStringList MainWindow::recentSkillIds(int n) const
+// Dates d'un .chr joint : le modèle de langage oublie souvent leurs noms en écrivant le calcul (voir fillDateNames).
+void MainWindow::rememberChrDates(const QJsonObject& chr)
 {
-    QStringList ids;
-    for (int i = std::max(0, int(turns_.size()) - n); i < turns_.size(); ++i) ids << turns_[i].skillIds;
-    return ids;
+    for (const QJsonValue& e : chr.value("events").toArray())
+        for (const QJsonValue& d : e.toObject().value("dates").toArray())
+            if (d.isObject()) chrDates_ << d.toObject();
+}
+
+// Message d'un tour passé tel que renvoyé dans l'historique : sans ses fiches de connaissances (celles de la question
+// en cours sont jointes à son propre message). Les garder ferait grossir chaque tour de 10 à 20 000 caractères et
+// dépasser le contexte d'un modèle distant (32 k tokens pour ministral-8b) après quelques questions.
+QString MainWindow::historyUser(const Turn& t)
+{
+    static const QString head = QStringLiteral("[Connaissances de référence]\n");
+    const int a = t.modelUser.indexOf(head);
+    if (a < 0) return t.modelUser;
+    int b = -1;
+    for (const QString& next : { QStringLiteral("\n[Fichier joint : "), QStringLiteral("\n[Résultats ChronoModel"),
+                                 QStringLiteral("\n[SeldonH a dessiné"), QStringLiteral("\n[Question]\n") }) {
+        const int k = t.modelUser.indexOf(next, a + head.size());
+        if (k >= 0 && (b < 0 || k < b)) b = k + 1;
+    }
+    return b < 0 ? t.modelUser.left(a) : t.modelUser.left(a) + t.modelUser.mid(b);
 }
 
 QVector<ChatMessage> MainWindow::buildChat(QJsonArray* refs) const
@@ -642,7 +660,7 @@ QVector<ChatMessage> MainWindow::buildChat(QJsonArray* refs) const
         const QString said = (t.answer.trimmed() + t.toolBlocks).trimmed();     // réponse + appels d'outils réécrits en blocs
         if (!last && said.isEmpty()) continue;       // tour interrompu/en erreur : ignoré
         const std::string suffix = last ? userPromptReminder(userPrompt) : std::string();
-        v.append({ "user", t.modelUser.toStdString() + suffix });
+        v.append({ "user", (last ? t.modelUser : historyUser(t)).toStdString() + suffix });
         if (refs) {
             QJsonObject u{ { "role", "user" }, { "turn", i } };
             if (!suffix.empty()) u["suffix"] = QString::fromStdString(suffix);
@@ -693,7 +711,7 @@ QJsonArray MainWindow::expandPromptMessages(const QJsonArray& messages) const
             if (k < 0 || k >= turns_.size()) continue;
             const Turn& t = turns_[k];
             e["content"] = m.value("role").toString() == QLatin1String("user")
-                               ? t.modelUser + m.value("suffix").toString()
+                               ? (k == turns_.size() - 1 ? t.modelUser : historyUser(t)) + m.value("suffix").toString()
                                : (t.answer.trimmed() + t.toolBlocks).trimmed();
         }
         out.append(e);
@@ -833,7 +851,7 @@ void MainWindow::sendMessage()
         const QString q0 = input_->toPlainText().trimmed();
         const QString k0 = lexicon_.translate(q0);
         if (ChrSceneWidget::asksForDrawing(k0) && !ChrBuilder::asksForJson(q0)) {
-            if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; }
+            if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; rememberChrDates(attachChr_); }
             if (!lastChr_.isEmpty()) {
                 drawRequested = true;
                 // Seulement le dessin (ou pas de modèle de langage) : fait par l'application, sans le modèle de langage.
@@ -893,8 +911,17 @@ void MainWindow::sendMessage()
         for (const Skill& s : skills_.skills()) user = user || s.id == QLatin1String("chronomodel_resultats_convergence");
         pinned << (user ? QStringLiteral("chronomodel_resultats_convergence") : QStringLiteral("11_chronomodel_logs"));
     }
+    // Les fiches de création de modèle (« ÉCRIS un bloc chronomodel ») ne sont jointes qu'à une demande de modèle, ou à la
+    // suite d'un modèle déjà produit (« ajoute une phase ») : leurs mots-clés (event, wiggle, .chr) les feraient venir dans
+    // un simple calcul d'Event, où elles empêchent l'appel de l'outil. Les fiches des tours passés ne sont plus dans
+    // l'historique (voir historyUser) : rien d'autre n'est exclu.
+    bool modelFollowUp = false;
+    for (const Turn& p : std::as_const(turns_)) { QJsonObject spec; modelFollowUp = modelFollowUp || ChrBuilder::extractSpec(p.answer, spec); }
+    QStringList exclude;
+    if (!modelRequest && !modelFollowUp)
+        exclude << QStringLiteral("03_chronomodel_creer_modele") << QStringLiteral("13_chronomodel_courbe_age_profondeur");
     // Création de modèle : budget 0 → seulement les fiches imposées ci-dessus.
-    const QList<SkillMatch> matches = skills_.select(qk, modelRequest ? 0 : settings_.skillChars, recentSkillIds(3), pinned);
+    const QList<SkillMatch> matches = skills_.select(qk, modelRequest ? 0 : settings_.skillChars, exclude, pinned);
     const QString knowledge = SkillManager::format(matches);
 
     if (!turns_.isEmpty() && turns_.last().truncation) {     // nouvelle question : plus de « Continuer » sur la précédente
@@ -949,7 +976,7 @@ void MainWindow::sendMessage()
                              "Le dessin est DÉJÀ fait et affiché : n'écris AUCUN bloc de code (ni plot, ni autre) pour le dessiner, "
                              "ne décris pas le dessin ; réponds seulement au reste de la question.]\n\n")
                   .arg(lastChrTitle_, ChrSceneWidget::hasPhases(lastChr_) ? QStringLiteral(" et scène des phases") : QString());
-    if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; }
+    if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; rememberChrDates(attachChr_); }
     t.modelUser = mu.isEmpty() ? q : mu + "[Question]\n" + q;
 
     QString shown = q;
@@ -1070,8 +1097,26 @@ QString MainWindow::calcHtml(const QVector<Calculator::Line>& lines) const
     return h;
 }
 
+// Un bloc ```chronomodel n'est admis que si la dernière vraie question demande un modèle (ou son JSON), ou si la
+// conversation en a déjà produit un (« ajoute une phase » à la suite). Sinon (simple datation), le modèle de langage
+// l'a ajouté de lui-même : il est retiré, au lieu d'afficher « Modèle ChronoModel incomplet ».
+bool MainWindow::modelExpected() const
+{
+    int last = int(turns_.size()) - 1;
+    while (last >= 0 && turns_[last].synthetic) --last;
+    if (last < 0) return true;
+    const QString& q = turns_[last].question;
+    if (MethodRunner::isModelRequest(q) || ChrBuilder::asksForJson(q)) return true;
+    QJsonObject spec;
+    for (int i = 0; i < last; ++i)
+        if (ChrBuilder::extractSpec(turns_[i].answer, spec)) return true;
+    return false;
+}
+
 QString MainWindow::shownAnswer(const QString& answer) const
 {
+    if (!modelExpected())
+        return ChrBuilder::displayMarkdown(MethodRunner::hideCalcBlocks(ChrBuilder::stripModelBlocks(answer), false), false);
     bool showJson = false;
     for (int i = turns_.size() - 1; i >= 0; --i)
         if (!turns_[i].synthetic) { showJson = ChrBuilder::asksForJson(turns_[i].question); break; }
@@ -1130,8 +1175,9 @@ DateFormat MainWindow::displayFormat() const
 bool MainWindow::runRequestedCalculations()
 {
     if (turns_.isEmpty() || turns_.last().followUp) return false;
-    const QVector<QJsonObject> blocks = MethodRunner::extractCalcBlocks(turns_.last().answer);
+    QVector<QJsonObject> blocks = MethodRunner::extractCalcBlocks(turns_.last().answer);
     if (blocks.isEmpty()) return false;
+    for (QJsonObject& b : blocks) b = MethodRunner::fillDateNames(b, chrDates_);
 
     const RunOutcome out = MethodRunner::run(blocks, displayFormat());
     if (!out.found) return false;
@@ -1171,6 +1217,7 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     Turn& t = turns_.last();
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
     t.answer = QString::fromStdString(s.answer);       // texte complet (avec le bloc de modèle) : historique, enregistrement
+    if (!modelExpected()) t.answer = ChrBuilder::stripModelBlocks(t.answer);     // bloc de modèle non demandé
     QString answer = shownAnswer(t.answer);
     if (t.drewModel) {                                 // dessin fait par SeldonH : un bloc plot du modèle serait faux
         answer = ChrSceneWidget::stripPlotBlocks(answer);
@@ -1388,7 +1435,10 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
     QStringList forModel;
     QString blocks;
     for (const ToolCall& c : calls) {
-        const tools::ToolOutcome o = tools::execute(c.name, c.arguments, fmt);
+        QString args = c.arguments;
+        if (const QJsonDocument a = QJsonDocument::fromJson(args.toUtf8()); a.isObject() && !chrDates_.isEmpty())
+            args = QString::fromUtf8(QJsonDocument(MethodRunner::fillDateNames(a.object(), chrDates_)).toJson(QJsonDocument::Compact));
+        const tools::ToolOutcome o = tools::execute(c.name, args, fmt);
         results.append({ c.id, c.name, o.content });
         if (o.executed) {
             logNotice(o.run.noticeHtml);
@@ -1451,6 +1501,7 @@ void MainWindow::resetConversation(bool clearFigures)
     convId_.clear();
     convCreated_ = QDateTime();
     lastChr_ = QJsonObject();
+    chrDates_.clear();
     lastChrTitle_.clear();
     lastResults_ = chronoresults::Report();
     lastResultsName_.clear();

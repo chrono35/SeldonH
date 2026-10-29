@@ -1080,6 +1080,42 @@ QString ChrBuilder::displayMarkdown(const QString& md, bool showJson)
     return out + rest;
 }
 
+QString ChrBuilder::stripModelBlocks(const QString& md)
+{
+    static const QRegularExpression block("^```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^```[ \\t]*$\\n?",
+                                          QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption |
+                                          QRegularExpression::CaseInsensitiveOption);
+    // Ligne d'annonce du bloc, juste avant lui : « **Modèle ChronoModel** (à exporter) : ».
+    static const QRegularExpression intro(QStringLiteral(R"((?:^|\n)[^\n]*mod[eè]le[^\n]*:[ \t*_]*\n\s*$)"),
+                                          QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression rule(QStringLiteral(R"((?:\n\s*-{3,}\s*)+$)"));
+    QString out;
+    qsizetype pos = 0;
+    auto it = block.globalMatch(md);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        const bool model = m.captured(1).compare(QLatin1String("chronomodel"), Qt::CaseInsensitive) == 0
+                        || QJsonDocument::fromJson(m.captured(2).toUtf8()).object().contains("events");
+        if (!model) continue;
+        QString before = md.mid(pos, m.capturedStart() - pos);
+        before.remove(intro);
+        out += before;
+        pos = m.capturedEnd();
+    }
+    if (pos == 0) {
+        // Bloc encore ouvert (réponse en cours d'écriture) : rien ne s'affiche à partir de lui.
+        static const QRegularExpression open("^```[ \\t]*chronomodel[ \\t]*$",
+                                             QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
+        const auto mo = open.match(md);
+        if (!mo.hasMatch()) return md;
+        QString before = md.left(mo.capturedStart());
+        before.remove(intro);
+        return before.remove(rule).trimmed();
+    }
+    out += md.mid(pos);
+    return out.trimmed().remove(rule).trimmed();
+}
+
 bool ChrBuilder::asksForJson(const QString& question)
 {
     static const QRegularExpression re(QStringLiteral("\\bjson\\b|bloc (de code )?chronomodel|specification (json |du modele|de modele)|"
@@ -1238,6 +1274,8 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
             }
             else                    ds << pl;
             if (const QString w = wiggleOfChr(d); !w.isEmpty()) ds.last() += QStringLiteral(" [wiggle %1]").arg(w);
+            // Nom de la date (référence de l'échantillon) : à reprendre dans « name », jamais remplacé par celui de l'événement.
+            if (const QString dn = d.value("name").toString().trimmed(); !dn.isEmpty()) ds.last() = QStringLiteral("« %1 » ").arg(dn) + ds.last();
         }
         if (!ds.isEmpty()) s += " : " + ds.join("; ");
         s += "\n";

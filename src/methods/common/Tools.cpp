@@ -145,7 +145,8 @@ QVector<ToolDef> build()
                                                 { "description", QStringLiteral("Datations : objets avec « method » (c14, f14c, tl, gauss, unif, am) et les "
                                                                                 "paramètres de cette méthode (mêmes noms que les autres outils, ex. "
                                                                                 "{\"method\":\"c14\",\"age\":2500,\"error\":30}), et facultativement "
-                                                                                "« name » et « wiggle » ({\"type\":\"fixed\",\"value\":20}, "
+                                                                                "« name » (nom de la date, ex. « Ly-1234 », « Gor-12 » d'un .chr ; jamais le nom "
+                                                                                "de l'événement) et « wiggle » ({\"type\":\"fixed\",\"value\":20}, "
                                                                                 "{\"type\":\"range\",\"min\":10,\"max\":30} ou "
                                                                                 "{\"type\":\"gaussian\",\"mean\":20,\"error\":5}) pour un décalage δ entre "
                                                                                 "l'échantillon et l'événement.") },
