@@ -84,6 +84,13 @@ inline const QString& plusMinus()
     return pm;
 }
 
+// Année astronomique signée, à l'année près : « -499 », « 1200 » (affichage par défaut de SeldonH et de ChronoModel).
+inline QString yearSigned(double signedYear)
+{
+    return QString::number(std::lround(signedYear));
+}
+
+// Année historique (format « av./apr. J.-C. », sur demande) : « 500 av. J.-C. » pour -499, « 1200 apr. J.-C. ».
 inline QString yearLabel(double signedYear)
 {
     const long v = std::lround(signedYear);
@@ -113,6 +120,76 @@ inline QVector<ValueError> findValueErrors(const QString& folded)
         if (v.error > 0) out << v;
     }
     return out;
+}
+
+// ------------------------------------------------------------------ années av. J.-C. et année 0
+// SeldonH, ChronoModel et les courbes de calibration (IntCal…) comptent en années ASTRONOMIQUES : l'année 0 existe,
+// 0 = 1 av. J.-C., −1 = 2 av. J.-C., −499 = 500 av. J.-C. Une année écrite « N av. J.-C. » (ou N BC, BCE, AEC) vaut
+// donc 1 − N ; « N apr. J.-C. » (AD, CE) vaut N. L'affichage fait la conversion inverse (yearLabel).
+
+// Ères écrites après (ou avant, pour AD) un nombre. BC/BCE/AEC et les formes françaises sans casse ; AD et CE en
+// majuscules seulement (« ce » est un mot courant).
+inline const QString& eraBc()
+{
+    static const QString re = QStringLiteral(
+        R"((?:(?i)av\.?\s*j\.?\s*-?\s*c\.?|avant\s+j\.?\s*-?\s*c\.?|avant\s+(?:notre|l')\s*[eè]re(?:\s+commune)?|av\.?\s*n\.?\s*[eè]\.?|\bbce?\b|\baec\b))");
+    return re;
+}
+inline const QString& eraAd()
+{
+    static const QString re = QStringLiteral(
+        R"((?:(?i:apr\.?\s*j\.?\s*-?\s*c\.?|apr[eè]s\s+j\.?\s*-?\s*c\.?|de\s+notre\s+[eè]re)|\bAD\b|\bCE\b))");
+    return re;
+}
+
+// « 500 av. J.-C. », « 500 BC », « AD 1200 », « 1200 apr. J.-C. », « -499 », « 2,5 » -> année astronomique.
+// NaN si le texte n'est pas une année seule.
+inline double yearFromText(QString s)
+{
+    s = s.trimmed();
+    s.remove(QChar(0x00A0)).remove(QChar(0x202F));
+    const QString num = QStringLiteral(R"(([-−]?\d+(?:[.,]\d+)?))");
+    static const QRegularExpression plain(QStringLiteral("^") + num + QStringLiteral("$"));
+    static const QRegularExpression bc(QStringLiteral("^") + num + QStringLiteral(R"(\s*)") + eraBc() + QStringLiteral(R"(\s*$)"));
+    static const QRegularExpression adAfter(QStringLiteral("^") + num + QStringLiteral(R"(\s*)") + eraAd() + QStringLiteral(R"(\s*$)"));
+    static const QRegularExpression adBefore(QStringLiteral(R"(^(?:AD|ad)\s*)") + num + QStringLiteral("$"));
+    if (const auto m = plain.match(s); m.hasMatch()) return toNumber(m.captured(1));
+    if (const auto m = bc.match(s); m.hasMatch()) return 1.0 - std::abs(toNumber(m.captured(1)));
+    if (const auto m = adAfter.match(s); m.hasMatch()) return toNumber(m.captured(1));
+    if (const auto m = adBefore.match(s); m.hasMatch()) return toNumber(m.captured(1));
+    return std::nan("");
+}
+
+// Texte où chaque année écrite avec son ère devient l'année astronomique signée, avant la lecture des dates :
+//   « entre 500 av. J.-C. et 400 av. J.-C. » -> « entre -499 et -399 » ; « entre 800 et 900 av. J.-C. » -> « entre -799 et -899 » ;
+//   « 500 ± 20 av. J.-C. » -> « -499 ± 20 » ; « AD 1200 », « 1200 apr. J.-C. » -> « 1200 ». Les âges BP ne sont pas touchés.
+inline QString erasToAstronomical(const QString& in)
+{
+    auto astro = [](const QString& n) { return QString::number(1.0 - std::abs(toNumber(n)), 'g', 12); };
+    const QString num = QStringLiteral(R"((?<![\d.,])(\d+(?:[.,]\d+)?))");
+    QString s = in;
+    // 1. Intervalle dont seule la seconde borne porte l'ère av. J.-C. : elle vaut pour les deux.
+    static const QRegularExpression range(QStringLiteral(R"(((?:entre|between|de|from|du)\s+))") + num
+                                          + QStringLiteral(R"((\s*(?:et|à|a|au|-|–|to|and)\s*))") + num + QStringLiteral(R"(\s*)") + eraBc(),
+                                          QRegularExpression::CaseInsensitiveOption);
+    for (QRegularExpressionMatch m = range.match(s); m.hasMatch(); m = range.match(s))
+        s.replace(m.capturedStart(), m.capturedLength(), m.captured(1) + astro(m.captured(2)) + m.captured(3) + astro(m.captured(4)));
+    // 2. « N ± E av. J.-C. »
+    static const QRegularExpression withError(num + QStringLiteral(R"((\s*(?:±|\+\s*/?\s*-)\s*\d+(?:[.,]\d+)?\s*(?:ans\s+)?))") + eraBc());
+    for (QRegularExpressionMatch m = withError.match(s); m.hasMatch(); m = withError.match(s))
+        s.replace(m.capturedStart(), m.capturedLength(), astro(m.captured(1)) + QLatin1Char(' ') + m.captured(2).trimmed() + QLatin1Char(' '));
+    // 3. « N av. J.-C. »
+    static const QRegularExpression bc(num + QStringLiteral(R"(\s*)") + eraBc());
+    for (QRegularExpressionMatch m = bc.match(s); m.hasMatch(); m = bc.match(s))
+        s.replace(m.capturedStart(), m.capturedLength(), astro(m.captured(1)));
+    // 4. « N apr. J.-C. », « AD N » : l'ère est retirée.
+    static const QRegularExpression adAfter(num + QStringLiteral(R"(\s*)") + eraAd());
+    for (QRegularExpressionMatch m = adAfter.match(s); m.hasMatch(); m = adAfter.match(s))
+        s.replace(m.capturedStart(), m.capturedLength(), m.captured(1));
+    static const QRegularExpression adBefore(QStringLiteral(R"(\bAD\s*)") + num);
+    for (QRegularExpressionMatch m = adBefore.match(s); m.hasMatch(); m = adBefore.match(s))
+        s.replace(m.capturedStart(), m.capturedLength(), m.captured(1));
+    return s;
 }
 
 } // namespace text

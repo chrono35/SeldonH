@@ -5,8 +5,8 @@ keywords: bp, calendaire, avant jc, av. j.-c., ad, bc, annee zero, moyenne ponde
 priority: 5
 ---
 **Échelles**
-- BP (Before Present) : présent = 1950. Année calendaire AD = 1950 − BP. Exemple : 2500 BP = −550 (550 av. J.-C. en numérotation astronomique).
-- Numérotation : en numérotation astronomique l'année 0 existe (1 av. J.-C. = 0, 2 av. J.-C. = −1). En numérotation historique il n'y a pas d'année 0. Toujours préciser laquelle est utilisée (ChronoModel travaille avec des années signées).
+- BP (Before Present) : présent = 1950. Année calendaire AD = 1950 − BP. Exemple : 2500 BP = −550 en numérotation astronomique, soit 551 av. J.-C.
+- Numérotation : en numérotation astronomique l'année 0 existe (1 av. J.-C. = 0, 2 av. J.-C. = −1, N av. J.-C. = 1 − N). SeldonH, ChronoModel, les fichiers .chr et les courbes de calibration (IntCal…) comptent en années astronomiques. Par défaut, écris les années ainsi, signées (« −499 », « 1200 »), comme les blocs de résultat ; n'emploie « av. J.-C. » que si l'utilisateur le demande. En numérotation historique il n'y a pas d'année 0. Toujours préciser laquelle est utilisée (ChronoModel travaille avec des années signées).
 - Âge 14C conventionnel (BP) ≠ âge calendaire : il doit être calibré.
 
 **Erreur de mesure** : une erreur « ±σ » est un écart-type (1σ, ≈ 68 %) d'une loi gaussienne ; ±2σ ≈ 95 %. Si un laboratoire donne ±2σ, divise par 2 avant d'utiliser le σ. Cela ne vaut **que pour la mesure** : une densité calendaire (calibrée ou a posteriori) n'est pas gaussienne, on la résume par des HPD à 95 % et 68 %, jamais par des « sigma ».

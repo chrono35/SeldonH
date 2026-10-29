@@ -374,9 +374,36 @@ struct Range { double lo =  std::numeric_limits<double>::infinity();
 
 } // namespace
 
-ChrResult ChrBuilder::build(const QJsonObject& spec)
+namespace {
+
+// Années écrites avec leur ère dans la spécification (« known_fixed »: "40 BC", « tmin »: "1000 av. J.-C. ») : années
+// astronomiques, comme les courbes de calibration (40 BC = -39).
+QJsonValue yearsToNumbers(const QJsonValue& v, const QString& key = QString())
+{
+    static const QStringList years = { "known_fixed", "tmin", "tmax", "age", "min", "max" };
+    if (v.isObject()) {
+        QJsonObject o = v.toObject();
+        for (auto it = o.begin(); it != o.end(); ++it) it.value() = yearsToNumbers(it.value(), it.key());
+        return o;
+    }
+    if (v.isArray()) {
+        QJsonArray a = v.toArray();
+        for (int i = 0; i < a.size(); ++i) a[i] = yearsToNumbers(a[i], key);
+        return a;
+    }
+    if (v.isString() && years.contains(key)) {
+        const double y = seldon::text::yearFromText(v.toString());
+        if (std::isfinite(y)) return y;
+    }
+    return v;
+}
+
+} // namespace
+
+ChrResult ChrBuilder::build(const QJsonObject& specIn)
 {
     ChrResult R;
+    const QJsonObject spec = yearsToNumbers(specIn).toObject();
     const QJsonArray evSpec = spec.value("events").toArray();
     if (evSpec.isEmpty()) {
         R.errors << QStringLiteral("La spécification ne contient aucun événement (« events »).");

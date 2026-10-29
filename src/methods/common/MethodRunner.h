@@ -80,7 +80,7 @@ public:
                                                  DateFormat format = DateFormat::BcAd);
     // Période d'étude écrite dans la question : « entre 0 et 2000 », « de 500 av. J.-C. à 500 », « période d'étude
     // de -500 à 500 », « study period from 0 to 2000 », « between 0 and 2000 ». Valeurs telles qu'écrites (format
-    // d'affichage ; « av. J.-C. » / « BC » rend la valeur négative). Faux si absente. « Entre X et Y » n'est pas une
+    // d'affichage ; « N av. J.-C. » / « N BC » donne l'année astronomique 1 − N). Faux si absente. « Entre X et Y » n'est pas une
     // période dans une question de loi uniforme ni dans le passage d'un décalage (wiggle).
     static bool periodFromQuestion(const QString& question, double& from, double& to);
 
@@ -97,9 +97,29 @@ public:
     // {"type":"range","min":a,"max":b} ou {"type":"gaussian","mean":m,"error":e}.
     // Vrai si la question demande de combiner ses datations en un événement (« calcule l'événement… », « combine »).
     static bool asksEvent(const QString& question);
+    // Combinaison de datations d'une même date (« Combine » de ChronoModel, produit des vraisemblances), éventuellement
+    // de méthodes différentes et avec décalages (wiggle) :
+    //   {"method":"combine", "name":"Four 3", "dates":[{"method":"c14",…}, {"method":"am",…, "wiggle":{…}}],
+    //    "level":95, "tmin":…, "tmax":…}
+    // Vrai si la question demande de combiner ses datations (« combine », « combinaison ») sans parler d'événement
+    // (« événement » → MCMC, voir asksEvent).
+    static bool asksCombine(const QString& question);
+    // Traces MCMC chargées (traces::loaded) et colonnes citées dans la question : demande « traces » (durée, date entre
+    // deux colonnes, densité d'une colonne). Vide si aucune trace chargée ou rien de reconnu.
+    //   « durée entre N(500) et N(200) » -> {"method":"traces","op":"duration","from":"N(500)","to":"N(200)"}
+    static QVector<QJsonObject> tracesFromQuestion(const QString& question);
+    // Calibration inverse demandée dans la question : « quel âge 14C attendre pour un échantillon de 6300 av. J.-C. ? »,
+    // « quelle inclinaison pour l'an 1200 ± 20 ? », « calibration inverse entre 800 et 900 ». Année en BC/AD lue comme
+    // l'affichage (N av. J.-C. = 1 − N) ; t_error seulement s'il est écrit. Objet vide si ce n'en est pas une.
+    static QJsonObject inverseFromQuestion(const QString& question);
+    // Réponse du modèle à l'écran : blocs « calcul », blocs json de calcul et JSON de calcul écrit dans le texte
+    // remplacés par une mention (« 🧮 Calcul confié à SeldonH ») ; tout est montré si l'utilisateur a demandé le JSON.
+    static QString hideCalcBlocks(const QString& markdown, bool showJson);
     // Vrai si la question demande de superposer les densités (« sur le même graphe », « superposées ») : sinon
     // chaque densité est tracée sur sa propre ligne.
     static bool asksOverlay(const QString& question);
+    // La question demande explicitement les traces des chaînes MCMC (« avec les traces », « trace de θ », « trace plot »…).
+    static bool asksTraces(const QString& question);
     // Couleur d'une date ou d'un événement : « color » ("#rrggbb" ou nom), ou red/green/blue (format .chr). Vide sinon.
     static QString colorOf(const QJsonObject& o);
     // Paramètres MCMC et période d'étude cités dans la question (« 200 000 itérations », « 8 chaînes », « graines 1;2 »).

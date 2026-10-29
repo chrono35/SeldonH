@@ -41,14 +41,17 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "src/core/AppSettings.h"
 #include "src/core/Calculator.h"
+#include "src/core/ChronoResults.h"
 #include "src/core/ConversationStore.h"
 #include "src/llm/LlmEngine.h"
 #include "src/llm/RemoteApi.h"
 #include "src/methods/common/DateFormat.h"
+#include "src/skills/Lexicon.h"
 #include "src/skills/SkillManager.h"
 
 class QAction;
 class QLabel;
+class QNetworkAccessManager;
 class QProgressBar;
 class QPushButton;
 class QSplitter;
@@ -194,6 +197,7 @@ private:
 
     seldon::AppSettings  settings_;
     seldon::SkillManager skills_;
+    seldon::Lexicon      lexicon_;                        // repérage des mots-clés en en, es, it, de
 
     QThread*             thread_ = nullptr;
     seldon::LlmEngine*   engine_ = nullptr;
@@ -215,6 +219,13 @@ private:
     QToolButton*         attachClear_ = nullptr;
     QLabel*              modelLabel_ = nullptr;
     QLabel*              statsLabel_ = nullptr;
+    QLabel*              quotaLabel_ = nullptr;     // à droite : place restante dans le contexte, quota du fournisseur
+    int                  localCtx_ = 0;             // contexte du modèle local chargé (tokens)
+    int                  remoteCtx_ = 0;            // contexte du modèle distant (liste /models), 0 = inconnu
+    QNetworkAccessManager* limitsNam_ = nullptr;    // GET /models pour connaître ce contexte
+    void updateQuota(const seldon::GenStats& st);
+    void resetQuota();
+    void fetchRemoteContext();
     QProgressBar*        loadBar_ = nullptr;
     QSplitter*           splitter_ = nullptr;
     QSplitter*           inputSplitter_ = nullptr;      // [conversation | saisie], saisie redimensionnable
@@ -242,6 +253,9 @@ private:
     bool                 generating_ = false;
     QString              attachName_, attachText_;
     bool                 attachChronoResults_ = false;   // pièce jointe = résultats de ChronoModel (résumé extrait)
+    seldon::chronoresults::Report attachResults_;         // résultats joints, lus
+    seldon::chronoresults::Report lastResults_;           // derniers résultats de la conversation (questions suivantes)
+    QString              lastResultsName_;
     seldon::Calculator   calc_;                           // calculatrice locale (variables de la conversation)
     QString calcHtml(const QVector<seldon::Calculator::Line>& lines) const;
     QJsonObject          attachChr_;                      // pièce jointe = projet .chr (dessinable)

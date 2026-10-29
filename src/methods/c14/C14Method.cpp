@@ -138,7 +138,7 @@ MethodResult C14Method::compute(const QJsonObject& p) const
         return expl(-0.5L * d * d / v) / sqrtl(v);
     };
 
-    const Density d = buildDensity(c->tmin(), c->tmax(), c->minStep / 3.0, L, true);
+    const Density d = buildDensity(c->tmin(), c->tmax(), c->minStep / 3.0, L, !p.value("untruncated").toBool());   // « untruncated » : combinaison
     QStringList warn;
     if (name.startsWith("marine") && !p.value("has_delta_r").toBool())
         warn << "courbe marine sans ΔR : la correction réservoir régionale n'est pas précisée (ΔR = 0 par défaut)";

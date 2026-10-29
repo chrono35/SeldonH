@@ -102,3 +102,6 @@ CMakeLists.txt.user*
 /QtInstaller_SeldonH/SeldonH_v*_Installer*
 /QtInstaller_SeldonH/staging/
 /QtInstaller_SeldonH/dmg_content/
+*.bak
+/tests
+/tests

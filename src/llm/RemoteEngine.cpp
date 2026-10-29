@@ -175,7 +175,13 @@ void RemoteEngine::onReplyFinished()
     const QNetworkReply::NetworkError netErr = r->error();
     const QString netErrString = r->errorString();
     const QByteArray rest = r->isOpen() ? r->readAll() : QByteArray();      // fermée après un arrêt ou une erreur de connexion
+    if (const remote::RateLimits rl = remote::parseRateLimits(r->rawHeaderPairs()); rl.tokensRemaining >= 0 || rl.requestsRemaining >= 0)
+        rate_ = rl;
     r->deleteLater();
+    auto withRate = [this](GenStats& s) {
+        s.rateTokensRemaining = rate_.tokensRemaining;  s.rateTokensLimit = rate_.tokensLimit;
+        s.rateRequestsRemaining = rate_.requestsRemaining; s.rateRequestsLimit = rate_.requestsLimit;
+    };
 
     if (status >= 400) errBody_ += rest; else { fullBody_ += rest; handleEvents(sse_.feed(rest)); }
 
@@ -186,6 +192,7 @@ void RemoteEngine::onReplyFinished()
         st.promptTokens = promptTokens_;
         st.genMs = timer_.elapsed();
         st.stoppedByUser = true;
+        withRate(st);
         emit finished(st);
         return;
     }
@@ -237,6 +244,7 @@ void RemoteEngine::onReplyFinished()
     st.generated = completionTokens_ > 0 ? completionTokens_ : pieces_;
     st.promptTokens = promptTokens_;
     st.genMs = timer_.elapsed();
+    withRate(st);
     // Réponse coupée : limite de tokens du serveur, erreur au milieu du flux, ou flux terminé sans [DONE] ni finish_reason.
     if (finishReason_ == QLatin1String("length")) {
         st.truncation = GenStats::TokenLimit;

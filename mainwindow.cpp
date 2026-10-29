@@ -28,6 +28,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "mainwindow.h"
 
+#include <QNetworkRequest>
+
+#include <QNetworkReply>
+
+#include <QNetworkAccessManager>
+
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
@@ -70,7 +76,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "src/methods/common/DensityFile.h"
 #include "src/methods/common/MethodRunner.h"
 #include "src/methods/common/Tools.h"
+#include "src/methods/common/Traces.h"
 #include "src/llm/RemoteEngine.h"
+#include "src/llm/RemoteApi.h"
 #include "src/ui/ChatView.h"
 #include "src/ui/ChrScene.h"
 #include "src/ui/FigurePanel.h"
@@ -90,6 +98,7 @@ MainWindow::MainWindow(QWidget *parent)
     settings_ = AppSettings::load();
     dateformat::setDecimals(settings_.decimals);
     skills_.reload(settings_.skillsDir);
+    lexicon_.reload(settings_.skillsDir);
     CurveStore::setExtraRoots(settings_.curveRoots());
 
     buildUi();
@@ -337,6 +346,9 @@ void MainWindow::buildUi()
     statusBar()->addWidget(modelLabel_);
     statusBar()->addWidget(loadBar_);
     statusBar()->addPermanentWidget(statsLabel_);
+    quotaLabel_ = new QLabel;
+    quotaLabel_->setTextFormat(Qt::RichText);
+    statusBar()->addPermanentWidget(quotaLabel_);
 }
 
 void MainWindow::buildMenus()
@@ -450,6 +462,8 @@ void MainWindow::insertExample(const QString& text)
 void MainWindow::loadModel(const QString& path)
 {
     modelReady_ = false;
+    localCtx_ = 0;
+    resetQuota();
     loading_ = true;
     modelLabel_->setText(tr("Chargement de %1…").arg(QFileInfo(path).fileName()));
     loadBar_->setValue(0);
@@ -468,6 +482,8 @@ void MainWindow::activateRemote()
     cfg.model   = settings_.remoteModel;
     remote_->setConfig(cfg);
     remote_->setTools(settings_.remoteTools ? tools::schemaForApi() : QJsonArray());
+    remoteCtx_ = 0;
+    resetQuota();
     if (!cfg.isValid()) {
         modelReady_ = false;
         modelLabel_->setText(tr("Modèle distant non configuré"));
@@ -477,6 +493,7 @@ void MainWindow::activateRemote()
         modelReady_ = true;
         modelDesc_ = cfg.model;
         modelLabel_->setText(tr("☁ Modèle distant : %1 — %2").arg(cfg.model, remote::hostOf(cfg.baseUrl)));
+        fetchRemoteContext();
         chat_->addNotice(tr("☁ <b>Modèle distant actif</b> : <code>%1</code> sur <code>%2</code>. Vos questions, les compétences "
                             "ajoutées et les fichiers joints sont envoyés à ce serveur ; les calculs de datation restent faits "
                             "sur cet ordinateur.").arg(cfg.model.toHtmlEscaped(), remote::hostOf(cfg.baseUrl).toHtmlEscaped()));
@@ -487,6 +504,11 @@ void MainWindow::activateRemote()
 void MainWindow::onModelLoaded(const QString& description, int ctx)
 {
     loading_ = false;
+    loadBar_->hide();
+    localCtx_ = ctx;
+    // Chargement local terminé alors que le modèle distant est actif (changement de moteur pendant le chargement) :
+    // l'indication reste celle du modèle distant, qui répond aux questions.
+    if (remoteActive()) { updateControls(); return; }
     modelReady_ = true;
     modelDesc_ = description;
     loadBar_->hide();
@@ -498,8 +520,9 @@ void MainWindow::onModelLoaded(const QString& description, int ctx)
 void MainWindow::onModelFailed(const QString& error)
 {
     loading_ = false;
-    modelReady_ = false;
     loadBar_->hide();
+    if (remoteActive()) { updateControls(); return; }   // le modèle distant reste celui qui répond
+    modelReady_ = false;
     modelLabel_->setText(tr("Aucun modèle"));
     chat_->addNotice(tr("<b>Échec du chargement du modèle.</b><br>%1<br>"
                         "<a href=\"seldon://choose-model/0\">Choisir un autre fichier .gguf…</a>").arg(error.toHtmlEscaped()));
@@ -808,12 +831,13 @@ void MainWindow::sendMessage()
     bool drawRequested = false;
     if (!generating_) {
         const QString q0 = input_->toPlainText().trimmed();
-        if (ChrSceneWidget::asksForDrawing(q0) && !ChrBuilder::asksForJson(q0)) {
+        const QString k0 = lexicon_.translate(q0);
+        if (ChrSceneWidget::asksForDrawing(k0) && !ChrBuilder::asksForJson(q0)) {
             if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; }
             if (!lastChr_.isEmpty()) {
                 drawRequested = true;
                 // Seulement le dessin (ou pas de modèle de langage) : fait par l'application, sans le modèle de langage.
-                if (!modelReady_ || ChrSceneWidget::isOnlyDrawing(q0)) {
+                if (!modelReady_ || ChrSceneWidget::isOnlyDrawing(k0)) {
                     logUser(attachName_.isEmpty() ? q0 : q0 + "\n\n📎 " + attachName_);
                     showChrScenes(lastChr_, lastChrTitle_, true);
                     input_->clear();
@@ -834,6 +858,8 @@ void MainWindow::sendMessage()
     }
     const QString q = input_->toPlainText().trimmed();
     if (q.isEmpty()) return;
+    // Repérage des mots-clés (fiches, détecteurs) : question en espagnol, italien ou allemand ramenée au français.
+    const QString qk = lexicon_.translate(q);
 
     if (convId_.isEmpty()) {                      // première question : la conversation reçoit son identifiant
         convId_ = Conversation::newId();
@@ -846,21 +872,29 @@ void MainWindow::sendMessage()
     static const QHash<QString, QString> dateSkill = {
         { "c14", "14_date_c14" }, { "f14c", "15_date_f14c" }, { "tl", "16_date_tl" }, { "am", "17_date_am" },
         { "gauss", "08_dates_autres_methodes" }, { "density", "18_date_densite" } };
-    const bool modelRequest = MethodRunner::isModelRequest(q);
-    QStringList cited = MethodRunner::datingMethodsIn(q);
+    const bool modelRequest = MethodRunner::isModelRequest(qk);
+    QStringList cited = MethodRunner::datingMethodsIn(qk);
     if (modelRequest && cited.isEmpty()) cited = QStringList{ "c14", "tl", "am", "gauss" };     // méthodes non nommées : les courantes
     QStringList pinned;
     if (modelRequest) pinned << QStringLiteral("03_chronomodel_creer_modele");
-    if (MethodRunner::isAgeDepthRequest(q)) pinned << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    if (MethodRunner::isAgeDepthRequest(qk)) pinned << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    // Traces MCMC jointes dans la conversation : la fiche qui décrit le calcul « traces ».
+    if (!seldon::traces::loaded().isEmpty() && !modelRequest) pinned << QStringLiteral("20_combinaison_traces_inverse");
     for (const QString& m : std::as_const(cited)) pinned << dateSkill.value(m);
-    // Résultats de ChronoModel joints : fiche de diagnostic de l'utilisateur si elle existe, sinon la fiche intégrée des logs.
-    if (attachChronoResults_) {
+    // Résultats de ChronoModel : ceux joints à la question, sinon les derniers de la conversation (« fais le tableau des
+    // phases » après une première question). Question sur les phases, successions ou Events : fiche dédiée ; sinon,
+    // résultats joints : fiche de diagnostic de l'utilisateur si elle existe, sinon la fiche intégrée des logs.
+    if (attachChronoResults_) { lastResults_ = attachResults_; lastResultsName_ = attachName_; }
+    const int resultsFocus = lastResultsName_.isEmpty() ? 0 : chronoresults::focusOf(qk);
+    if (resultsFocus) {
+        pinned << QStringLiteral("19_chronomodel_phases_events");
+    } else if (attachChronoResults_) {
         bool user = false;
         for (const Skill& s : skills_.skills()) user = user || s.id == QLatin1String("chronomodel_resultats_convergence");
         pinned << (user ? QStringLiteral("chronomodel_resultats_convergence") : QStringLiteral("11_chronomodel_logs"));
     }
     // Création de modèle : budget 0 → seulement les fiches imposées ci-dessus.
-    const QList<SkillMatch> matches = skills_.select(q, modelRequest ? 0 : settings_.skillChars, recentSkillIds(3), pinned);
+    const QList<SkillMatch> matches = skills_.select(qk, modelRequest ? 0 : settings_.skillChars, recentSkillIds(3), pinned);
     const QString knowledge = SkillManager::format(matches);
 
     if (!turns_.isEmpty() && turns_.last().truncation) {     // nouvelle question : plus de « Continuer » sur la précédente
@@ -900,6 +934,16 @@ void MainWindow::sendMessage()
     if (dating.found)          mu += dating.promptBlock + "\n";
     if (!knowledge.isEmpty())  mu += "[Connaissances de référence]\n" + knowledge + "\n\n";
     if (!attachText_.isEmpty()) mu += "[Fichier joint : " + attachName_ + "]\n" + attachText_ + "\n\n";
+    // Tableau demandé : SeldonH l'affiche avec les valeurs exactes ; le modèle reçoit ces valeurs (dans un budget) et le
+    // commente. Un modèle local à 8 k tokens ne pourrait ni lire ni réécrire 48 phases.
+    QString resultsTable;
+    if (resultsFocus) {
+        if (resultsFocus & chronoresults::FocusTable) resultsTable = chronoresults::tablesHtml(lastResults_, resultsFocus);
+        const int budget = remoteActive() ? 16000 : std::clamp(settings_.nCtx / 2, 2500, 12000);
+        if (!attachChronoResults_)
+            mu += QStringLiteral("[Résultats ChronoModel « %1 », joints plus tôt dans la conversation]\n").arg(lastResultsName_);
+        mu += chronoresults::digest(lastResults_, resultsFocus, q, budget, !resultsTable.isEmpty()) + "\n";
+    }
     if (drawRequested)
         mu += QStringLiteral("[SeldonH a dessiné le modèle « %1 » dans le panneau des graphiques (scène des Events%2). "
                              "Le dessin est DÉJÀ fait et affiché : n'écris AUCUN bloc de code (ni plot, ni autre) pour le dessiner, "
@@ -911,6 +955,7 @@ void MainWindow::sendMessage()
     QString shown = q;
     if (!attachName_.isEmpty()) shown += "\n\n📎 " + attachName_;
     logUser(shown);
+    if (!resultsTable.isEmpty()) logNotice(resultsTable);
     if (drawRequested) showChrScenes(lastChr_, lastChrTitle_, true);
     if (dating.found) {
         logNotice(dating.noticeHtml);
@@ -1030,7 +1075,8 @@ QString MainWindow::shownAnswer(const QString& answer) const
     bool showJson = false;
     for (int i = turns_.size() - 1; i >= 0; --i)
         if (!turns_[i].synthetic) { showJson = ChrBuilder::asksForJson(turns_[i].question); break; }
-    return ChrBuilder::displayMarkdown(answer, showJson);
+    // Blocs de calcul et JSON de calcul : jamais montrés tels quels (l'utilisateur n'a pas à écrire de requête).
+    return ChrBuilder::displayMarkdown(MethodRunner::hideCalcBlocks(answer, showJson), showJson);
 }
 
 QString MainWindow::truncationNotice(const Turn& t) const
@@ -1245,9 +1291,78 @@ void MainWindow::onFinished(const GenStats& st)
     if (st.contextFull) msg += tr(" — contexte saturé");
     if (!st.stoppedByUser && st.truncation) msg += tr(" — réponse coupée");
 
+    updateQuota(st);
     if (!st.stoppedByUser && runRequestedCalculations()) return;      // relance l'assistant avec le résultat
     updateControls();
     statsLabel_->setText(msg);
+}
+
+// Place restante pour la conversation : contexte du modèle moins le prompt de la dernière question et sa réponse
+// (local : contexte créé ; distant : contexte annoncé par /models). Distant : quota du fournisseur s'il est annoncé.
+void MainWindow::updateQuota(const GenStats& st)
+{
+    if (!quotaLabel_) return;
+    const QLocale loc;
+    const int cap = remoteActive() ? remoteCtx_ : localCtx_;
+    const int used = st.promptTokens >= 0 ? st.promptTokens + std::max(0, st.generated) : -1;
+    QString text, tip;
+    if (cap > 0 && used >= 0) {
+        const int left = std::max(0, cap - used);
+        const int pct = int(std::lround(100.0 * left / cap));
+        const QString color = pct < 10 ? QStringLiteral("#c0392b") : pct < 25 ? QStringLiteral("#d68910") : QString();
+        const QString body = tr("Contexte libre : %1 % (%2 sur %3 tokens)").arg(pct).arg(loc.toString(left), loc.toString(cap));
+        text = color.isEmpty() ? body.toHtmlEscaped() : QStringLiteral("<span style='color:%1'>%2</span>").arg(color, body.toHtmlEscaped());
+        tip = tr("Place restante dans le contexte du modèle pour cette conversation (prompt de la dernière question et sa réponse : "
+                 "%1 tokens). Quand il est plein, %2").arg(loc.toString(used),
+                 remoteActive() ? tr("le serveur refuse la question ou coupe la réponse : ouvrez une nouvelle conversation.")
+                                : tr("SeldonH oublie les plus anciens échanges."));
+    } else if (used >= 0) {
+        text = tr("Conversation : %1 tokens (contexte du modèle inconnu)").arg(loc.toString(used)).toHtmlEscaped();
+        tip = tr("Le serveur n'annonce pas la taille du contexte de ce modèle dans sa liste /models.");
+    }
+    if (remoteActive() && (st.rateTokensRemaining >= 0 || st.rateRequestsRemaining >= 0)) {
+        QStringList q;
+        if (st.rateTokensRemaining >= 0)
+            q << (st.rateTokensLimit > 0 ? tr("%1 / %2 tokens").arg(loc.toString(st.rateTokensRemaining), loc.toString(st.rateTokensLimit))
+                                         : tr("%1 tokens").arg(loc.toString(st.rateTokensRemaining)));
+        if (st.rateRequestsRemaining >= 0)
+            q << (st.rateRequestsLimit > 0 ? tr("%1 / %2 requêtes").arg(loc.toString(st.rateRequestsRemaining), loc.toString(st.rateRequestsLimit))
+                                           : tr("%1 requêtes").arg(loc.toString(st.rateRequestsRemaining)));
+        if (!text.isEmpty()) text += QStringLiteral(" — ");
+        text += tr("Quota restant : %1").arg(q.join(QStringLiteral(", "))).toHtmlEscaped();
+        tip += (tip.isEmpty() ? QString() : QStringLiteral("\n")) +
+               tr("Quota du fournisseur, lu dans les en-têtes de sa dernière réponse (souvent par minute ou par jour).");
+    }
+    quotaLabel_->setText(text);
+    quotaLabel_->setToolTip(tip);
+}
+
+void MainWindow::resetQuota()
+{
+    if (!quotaLabel_) return;
+    const int cap = remoteActive() ? remoteCtx_ : localCtx_;
+    quotaLabel_->setText(cap > 0 ? tr("Contexte libre : 100 % (%1 tokens)").arg(QLocale().toString(cap)).toHtmlEscaped() : QString());
+    quotaLabel_->setToolTip(cap > 0 ? tr("Place disponible dans le contexte du modèle pour cette conversation.") : QString());
+}
+
+// Contexte du modèle distant, annoncé par GET {Base URL}/models (OpenRouter, Mistral, vLLM…) ; inconnu sinon.
+void MainWindow::fetchRemoteContext()
+{
+    if (!limitsNam_) limitsNam_ = new QNetworkAccessManager(this);
+    const QString base = settings_.remoteUrl, model = settings_.remoteModel;
+    QNetworkRequest rq(remote::modelsUrl(base));
+    if (!settings_.remoteKey.isEmpty()) rq.setRawHeader("Authorization", "Bearer " + settings_.remoteKey.toUtf8());
+    rq.setTransferTimeout(15000);
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    QNetworkReply* r = limitsNam_->get(rq);
+    connect(r, &QNetworkReply::finished, this, [this, r, base, model] {
+        r->deleteLater();
+        if (!remoteActive() || settings_.remoteUrl != base || settings_.remoteModel != model) return;   // moteur changé entre-temps
+        const QByteArray body = r->isOpen() ? r->readAll() : QByteArray();
+        remoteCtx_ = remote::parseModelLimits(body).value(model).context;
+        if (turns_.isEmpty()) resetQuota();
+    });
 }
 
 // Modèle distant : appel d'outils natif. Mêmes calculs que le bloc ```calcul (MethodRegistry), exécutés ici, sur cet
@@ -1337,6 +1452,10 @@ void MainWindow::resetConversation(bool clearFigures)
     convCreated_ = QDateTime();
     lastChr_ = QJsonObject();
     lastChrTitle_.clear();
+    lastResults_ = chronoresults::Report();
+    lastResultsName_.clear();
+    seldon::traces::clear();             // traces MCMC jointes : propres à la conversation
+    resetQuota();                        // nouvelle conversation : tout le contexte est libre
     calc_.reset();
     chat_->clearAll();
     updateConvTitle();
@@ -1376,10 +1495,26 @@ void MainWindow::attachFile()
         // extrait les valeurs utiles (convergence, σ des dates). Autre page HTML : son texte.
         const QString plain = chronoresults::htmlToText(QString::fromUtf8(data));
         if (chronoresults::looksLike(plain)) {
-            text = chronoresults::summarize(chronoresults::parse(plain), QFileInfo(f).fileName());
+            attachResults_ = chronoresults::parse(plain);
+            text = chronoresults::summarize(attachResults_, QFileInfo(f).fileName());
             chronoResults = true;
         } else {
             text = plain;
+        }
+    }
+    if (ext == "csv" || ext == "tsv" || ext == "txt") {
+        // Export des chaînes MCMC de ChronoModel (Chain_all_Events.csv…) : SeldonH garde les tirages pour les calculs a
+        // posteriori (durées, dates entre deux Events) ; le modèle ne reçoit que la liste des colonnes.
+        const QString plain = QString::fromUtf8(data);
+        if (seldon::traces::looksLike(plain)) {
+            seldon::TraceSet ts;
+            QString err;
+            if (seldon::traces::parse(plain, QFileInfo(f).fileName(), ts, &err)) {
+                seldon::traces::add(ts);
+                text = seldon::traces::summary(ts);
+            } else {
+                text = tr("[Fichier de traces MCMC illisible : %1]").arg(err);
+            }
         }
     }
     if (ext == "chr" || ext == "json") {
@@ -1407,6 +1542,7 @@ void MainWindow::clearAttachment()
     attachName_.clear();
     attachText_.clear();
     attachChronoResults_ = false;
+    attachResults_ = chronoresults::Report();
     attachChr_ = QJsonObject();
     attachLabel_->hide();
     attachClear_->hide();
@@ -1874,6 +2010,7 @@ void MainWindow::saveDensityFile(const QUrl& url)
 void MainWindow::reloadSkills()
 {
     const int n = skills_.reload(settings_.skillsDir);
+    lexicon_.reload(settings_.skillsDir);
     statusBar()->showMessage(tr("%1 compétences chargées").arg(n), 4000);
 }
 

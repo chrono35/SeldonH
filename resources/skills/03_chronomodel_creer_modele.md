@@ -8,7 +8,7 @@ Pour créer un modèle, ÉCRIS un bloc de code de langage « chronomodel » (JSO
 
 - `name` : nom du projet.
 - `events` (obligatoire), un objet par événement, nom unique : `{"name":"<nom>","dates":[<dates>]}` ; facultatifs `"phases":["<phase>"]` et `"color":"<couleur>"`.
-- **Borne** (date fixe connue : « une borne à 40 BC ») : c'est un ÉVÉNEMENT sans dates, `{"name":"<nom>","type":"bound","known_fixed":<année signée>}` (40 BC → -40). Jamais dans `dates`.
+- **Borne** (date fixe connue : « une borne à 40 BC ») : c'est un ÉVÉNEMENT sans dates, `{"name":"<nom>","type":"bound","known_fixed":<année>}` : année astronomique (40 BC → -39) ou en texte, `"known_fixed":"40 BC"`. Jamais dans `dates`.
 - `color` : recopie la couleur demandée (« en bleu » → `"bleu"`, `"rouge"`, `"#ff0000"`) sur l'ÉVÉNEMENT, même si elle est citée avec une de ses dates.
 - `name` d'une date : la référence ou le code donné par l'utilisateur, où qu'il soit dans la phrase (« référence Ly-12345 », « réf Bdx-478 », « am Rennes2025 »). Sans référence donnée, pas de `name` : n'en invente jamais (« Ref-1 », « Ech-1 »…).
 - `phases` (facultatif) : `[{"name":"<phase>"}]` ; un événement y est rattaché par `"phases":["<phase>"]`.

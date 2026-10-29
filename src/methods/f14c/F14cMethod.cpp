@@ -115,10 +115,10 @@ MethodResult F14cMethod::compute(const QJsonObject& p) const
         const long double d = F - mu;
         return expl(-0.5L * d * d / v) / sqrtl(v);
     };
-    const Density d = buildDensity(c->tmin(), c->tmax(), c->minStep / 3.0, L, true);
+    const Density d = buildDensity(c->tmin(), c->tmax(), c->minStep / 3.0, L, !p.value("untruncated").toBool());   // « untruncated » : combinaison
     if (!d.valid())
         return MethodResult::failure(QStringLiteral("F14C = %1 incompatible avec la courbe « %2 » (%3 → %4)")
-                                         .arg(text::numAuto(F), name, text::yearLabel(c->tmin()), text::yearLabel(c->tmax())));
+                                         .arg(text::numAuto(F), name, text::yearSigned(c->tmin()), text::yearSigned(c->tmax())));
     QStringList warn;
     if (F > 1.0) warn << "un F14C > 1 donne souvent deux solutions (montée puis descente de la courbe de la bombe)";
     return MethodResult::fromDensity(d, warn, true);

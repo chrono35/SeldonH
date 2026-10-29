@@ -3,7 +3,7 @@
     <DisplayName>SeldonH</DisplayName>
     <Description>Assistant d'aide à la datation : datations simples, création et interprétation de modèles ChronoModel</Description>
     <Version>1.0.0</Version>
-    <ReleaseDate>2026-10-26</ReleaseDate>
+    <ReleaseDate>2026-10-28</ReleaseDate>
     <Default>true</Default>
     <ForcedInstallation>true</ForcedInstallation>
     <SortingPriority>100</SortingPriority>

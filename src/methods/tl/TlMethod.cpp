@@ -85,7 +85,10 @@ MethodResult TlMethod::compute(const QJsonObject& p) const
     if (!(err > 0.0)) return MethodResult::failure("l'erreur doit être strictement positive");
 
     const double centre = ref - age;
-    const double tmin = centre - 5.0 * err, tmax = centre + 5.0 * err;
+    // Combinaison (« untruncated ») : vraisemblance entière, sur ±12σ.
+    const bool untruncated = p.value("untruncated").toBool();
+    const double k = untruncated ? 12.0 : 5.0;
+    const double tmin = centre - k * err, tmax = centre + k * err;
     const double step = std::abs(tmax - tmin) / 1001.0;
     const auto L = [&](double t) -> long double {
         const long double norm = (age - (ref - t)) / err;
@@ -94,7 +97,7 @@ MethodResult TlMethod::compute(const QJsonObject& p) const
     QStringList warn;
     if (p.value("ref_year_assumed").toBool())
         warn << QStringLiteral("année de mesure non précisée : %1 supposée (à indiquer, par ex. « mesuré en 2015 »)").arg(int(ref));
-    return MethodResult::fromDensity(buildDensity(tmin, tmax, step, L, true), warn, false);
+    return MethodResult::fromDensity(buildDensity(tmin, tmax, step, L, !untruncated), warn, false);
 }
 
 QString TlMethod::describe(const QJsonObject& p) const

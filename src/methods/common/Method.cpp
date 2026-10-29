@@ -65,10 +65,10 @@ MethodResult MethodResult::fromDensity(const Density& d, QStringList warnings, b
         const size_t k = std::min<size_t>(3, n - 1);
         if (d.v.front() > 0.02 * vmax || d.v[k] > 0.05 * vmax)
             r.warnings << QStringLiteral("la densité atteint la limite ancienne du domaine de la courbe (%1) : résultat tronqué")
-                              .arg(text::yearLabel(d.t.front()));
+                              .arg(text::yearSigned(d.t.front()));
         if (d.v.back() > 0.02 * vmax || d.v[n - 1 - k] > 0.05 * vmax)
             r.warnings << QStringLiteral("la densité atteint la limite récente du domaine de la courbe (%1) : résultat tronqué")
-                              .arg(text::yearLabel(d.t.back()));
+                              .arg(text::yearSigned(d.t.back()));
     }
     r.ok = true;
     return r;

@@ -97,6 +97,7 @@ private:
     int                   promptTokens_ = 0;
     int                   completionTokens_ = 0;
     int                   pieces_ = 0;
+    remote::RateLimits    rate_;                // quota annoncé par la dernière réponse du serveur
     bool                  stopped_ = false;
     bool                  thinkOpen_ = false;
     bool                  gotDone_ = false;

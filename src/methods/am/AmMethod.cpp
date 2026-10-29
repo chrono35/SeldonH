@@ -260,7 +260,7 @@ MethodResult AmMethod::compute(const QJsonObject& p) const
         return sum;
     };
 
-    const Density d = buildDensity(tmin, tmax, 1.0, L, true);
+    const Density d = buildDensity(tmin, tmax, 1.0, L, !p.value("untruncated").toBool());   // « untruncated » : combinaison
     return MethodResult::fromDensity(d, {}, true);
 }
 

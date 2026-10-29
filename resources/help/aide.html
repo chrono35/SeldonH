@@ -58,8 +58,11 @@
   <li><a href="#calculatrice">3 bis. Calculatrice</a></li>
   <li><a href="#resultats">4. Lire un résultat (HPD)</a></li>
   <li><a href="#evenement">4 bis. Combiner des datations en un événement</a></li>
+  <li><a href="#combinaison">4 ter. Combinaison de datations (« Combine »)</a></li>
+  <li><a href="#inverse">4 quater. Calibration inverse</a></li>
   <li><a href="#modele">5. Créer un modèle ChronoModel</a></li>
   <li><a href="#interpreter">6. Contrôler la convergence</a></li>
+  <li><a href="#traces">6 bis. Durées et dates à partir des traces MCMC</a></li>
   <li><a href="#graphiques">7. Graphiques</a></li>
   <li><a href="#competences">8. Enrichir les compétences</a></li>
   <li><a href="#reglages">9. Préférences</a></li>
@@ -175,7 +178,24 @@
 <h3>Dates et échelles de temps</h3>
 <ul>
   <li><b>BP</b> = années avant 1950, réservé à l'âge radiocarbone conventionnel. 1954 ± 50 BP n'a rien d'incohérent : c'est environ 2 000 ans.</li>
-  <li>Les résultats sont donnés en <b>années calendaires signées</b>, comme dans ChronoModel (−1898 = 1899 av. J.-C. ; l'année 0 est 1 av. J.-C.), et affichées en « av./apr. J.-C. ».</li>
+  <li>Les résultats sont donnés en <b>années astronomiques signées</b>, comme dans ChronoModel et ses fichiers <code>.chr</code> (−499 = 500 av. J.-C.). L'écriture « av./apr. J.-C. » est donnée sur demande (voir <a href="#annees">Années av. J.-C. et année 0</a>).</li>
+</ul>
+
+<h3 id="annees">Années av. J.-C. et année 0</h3>
+<p>SeldonH compte, comme ChronoModel et les courbes de calibration (IntCal, SHCal, Marine, courbes archéomagnétiques), en <b>années astronomiques</b> : <b>l'année 0 existe</b>. Elle correspond à 1 av. J.-C., −1 à 2 av. J.-C., et de façon générale <b>N av. J.-C. = 1 − N</b>. Les années apr. J.-C. ne changent pas. Les courbes sont construites ainsi : 1950 BP correspond à l'année 0, et 2500 BP à −550, soit 551 av. J.-C. Les fichiers <code>.chr</code> de ChronoModel sont obligatoirement en années astronomiques.</p>
+<p><b>Par défaut, SeldonH affiche les années astronomiques signées</b> (−499, 1200), dans les fiches comme dans les graphiques, exactement comme ChronoModel. Pour l'écriture historique « 500 av. J.-C. », sans année 0, demandez-la dans la question (« donne les dates en av. J.-C. », « en années historiques »), ou choisissez « Années historiques » dans <i>Préférences &gt; Format des dates</i>.</p>
+<table>
+  <tr><th>Écrit dans la question</th><th>Année utilisée (calcul, fichiers .chr)</th><th>Affiché par défaut</th><th>Affiché en années historiques</th></tr>
+  <tr><td>500 av. J.-C., 500 BC, 500 BCE</td><td>−499</td><td>−499</td><td>500 av. J.-C.</td></tr>
+  <tr><td>1 av. J.-C.</td><td>0</td><td>0</td><td>1 av. J.-C.</td></tr>
+  <tr><td>1200, 1200 apr. J.-C., AD 1200</td><td>1200</td><td>1200</td><td>1200 apr. J.-C.</td></tr>
+  <tr><td>−500 (nombre négatif)</td><td>−500</td><td>−500</td><td>501 av. J.-C.</td></tr>
+</table>
+<p>Un nombre négatif est pris tel quel, comme une année astronomique. Une année écrite « N av. J.-C. » (ou BC, BCE) est convertie en 1 − N. Dans un intervalle, l'ère écrite à la fin vaut pour les deux bornes : « entre 800 et 700 av. J.-C. » donne −799 et −699. Cette règle s'applique partout : datations (Gauss, uniforme), période d'étude, bornes d'un modèle ChronoModel, calibration inverse.</p>
+<ul>
+  <li><a class="ex" data-method="unif">Loi uniforme entre 500 av. J.-C. et 400 av. J.-C.</a></li>
+  <li><a class="ex" data-method="gauss">Date gaussienne 500 av. J.-C. ± 20 ans</a></li>
+  <li><a class="ex" data-method="c14">C14 de 3560 +- 20 BP, donne les dates en av. J.-C.</a></li>
 </ul>
 
 <h3>Quand la question est incomplète</h3>
@@ -279,7 +299,7 @@
 
 <h2 id="evenement">4 bis. Combiner des datations en un événement</h2>
 <p>Quand plusieurs datations, éventuellement de <b>méthodes différentes</b>, datent le même événement (un foyer, un niveau, une construction), SeldonH estime sa date θ avec le <b>modèle d'événement de ChronoModel</b>, par MCMC : chaque date a sa propre dispersion σ<sub>i</sub> autour de θ, de sorte qu'une date discordante pèse peu. Le moteur reprend celui de ChronoModel 4 (échantillonneur par bloc, recuit, adaptation des pas) et ses paramètres MCMC par défaut : 4 chaînes, burn-in 1 000, adaptation par lots de 100 (200 lots au plus), 100 000 itérations d'acquisition, thinning 10.</p>
-<p>Employez le mot <b>événement</b> (ou « event », « combine », « regroupe ») avec au moins deux datations :</p>
+<p>Employez le mot <b>événement</b> (ou « event », « regroupe ») avec au moins deux datations. Le mot « combine » seul demande une <a href="#combinaison">combinaison</a> (produit des vraisemblances), pas un événement :</p>
 <ul>
   <li><a class="ex" data-method="event">Calcule l'événement « US 12 » avec C14 2500 +- 30 BP, C14 2470 +- 35 BP et TL 2600 +- 90 ans mesuré en 2015</a></li>
   <li><a class="ex" data-method="event">Combine en un événement : C14 3560 +- 20 BP et archéomagnétisme : inclinaison 65°, alpha95 = 1</a></li>
@@ -314,6 +334,26 @@
 <p>Le verdict porte sur toutes les variables, θ compris, mais aussi les dispersions σ<sub>i</sub> et S0, qui se mélangent souvent moins bien : la fiche liste les variables sous les seuils. Si θ est bon mais pas les σ<sub>i</sub>, la date de l'événement reste lisible ; sinon augmentez le nombre d'itérations ou de chaînes, et vérifiez que les datations datent bien le même événement.</p>
 <table><tr><td class="warn"><b>Limites :</b> un seul événement, sans contrainte ni phase (pour cela, créez un modèle et lancez-le dans ChronoModel). La densité de θ est estimée à partir des tirages MCMC par un noyau gaussien dont la largeur de bande h suit la règle de Sheather-Jones, comme ChronoModel (repli sur la règle de Silverman si elle n'a pas de solution) ; la fiche donne la valeur de h utilisée. Les tirages différant d'un calcul à l'autre, de petites différences d'arrondi des HPD sont normales.</td></tr></table>
 
+<h2 id="combinaison">4 ter. Combinaison de datations (« Combine »)</h2>
+<p>Quand plusieurs mesures datent <b>exactement le même moment</b> (plusieurs 14C sur le même charbon, un 14C et une archéomagnétique sur la même cuisson), SeldonH les <b>combine</b> comme le bouton « Combine » de ChronoModel : la densité combinée est le <b>produit des vraisemblances</b> des datations. Contrairement à ChronoModel, les méthodes peuvent être <b>différentes</b> (14C, F14C, TL/OSL, archéomagnétisme, Gauss, uniforme), et chaque datation peut avoir son propre <a href="#wiggle">décalage δ (wiggle)</a> : elle date alors t + δ.</p>
+<p>Employez le mot <b>combine</b> ou <b>combinaison</b>, sans parler d'événement, avec au moins deux datations :</p>
+<ul>
+  <li><a class="ex" data-method="combine">Combine C14 2500 +- 30 BP et C14 2470 +- 35 BP</a></li>
+  <li><a class="ex" data-method="combine">Combinaison de C14 3560 +- 20 BP et TL 3600 +- 150 ans mesuré en 2015, HPD à 90 %</a></li>
+  <li><a class="ex" data-method="combine">Combine ces dates : {"type":"c14","name":"Charbon","age":2500,"error":30,"wiggle":{"type":"range","min":10,"max":40}}, {"type":"gauss","name":"Texte","age":-520,"error":20}</a></li>
+</ul>
+<p>Le graphique montre la <b>densité combinée en haut</b>, puis chaque datation seule, une par ligne (pour une datation à décalage, la densité de t + δ). La fiche donne les HPD de la combinaison au niveau demandé (95 % par défaut), celles de chaque datation et, <b>à titre d'information seulement</b>, le test de Ward et Wilson pour chaque groupe de mesures comparables (âges 14C sur la même courbe, F14C, dates calendaires gaussiennes, inclinaisons, déclinaisons, intensités). Ce test ne conditionne pas la combinaison : il dit seulement si la dispersion des mesures dépasse leurs erreurs annoncées. Les datations à décalage n'y entrent pas.</p>
+<table><tr><td class="note"><b>Combinaison ou événement ?</b> La combinaison suppose que toutes les mesures datent le même instant, sans dispersion propre : une date discordante pèse autant que les autres et peut rendre le produit très étroit, voire nul (SeldonH le signale). Si les échantillons peuvent différer un peu, ou si une date risque d'être aberrante, préférez un <a href="#evenement">événement</a>.</td></tr></table>
+
+<h2 id="inverse">4 quater. Calibration inverse</h2>
+<p>La calibration inverse répond à la question « <b>quelle mesure obtiendrait-on</b> pour un échantillon de telle date ? » : âge 14C (avec son équivalent F14C), F14C post-bombe, inclinaison, déclinaison ou intensité archéomagnétique. Elle aide à préparer une campagne : choisir la méthode, juger si la courbe a un plateau à cette époque, estimer la précision utile.</p>
+<p>La date peut être fixe, gaussienne (± écart-type) ou couvrir une période ; on peut ajouter l'erreur de mesure prévue. SeldonH lit la courbe (valeur ± erreur), en déduit la loi de la mesure attendue et ses HPD, et trace sa densité sur l'axe de la mesure (graphique à part). Demandez-la à l'assistant :</p>
+<ul>
+  <li><a class="ex">Calibration inverse : quel âge 14C attendre pour un échantillon de 450 av. J.-C. avec IntCal20 ?</a></li>
+  <li><a class="ex">Quel âge radiocarbone mesurerait-on pour un bois daté entre 800 et 900, avec une erreur de laboratoire de 25 ans ?</a></li>
+  <li><a class="ex">Quelle inclinaison attendre en France pour l'an 1200 ± 20 ?</a></li>
+</ul>
+
 <h2 id="modele">5. Créer un modèle ChronoModel</h2>
 <p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage prépare une spécification, que SeldonH vérifie : si le modèle est complet, la réponse affiche « 📦 Modèle ChronoModel prêt » et le lien <i>💾 Enregistrer le modèle (.chr)</i> ; s'il manque quelque chose (un événement sans date, une relation peu claire, un nom inconnu), SeldonH le liste et n'enregistre rien tant que ce n'est pas complété. La spécification JSON n'est pas affichée ; demandez-la explicitement (« montre le JSON du modèle ») pour la voir.</p>
 <p>Exemples de demandes :</p>
@@ -343,6 +383,27 @@
   <li><a class="ex">Comment interpréter une HPD à 95 % en plusieurs intervalles ?</a></li>
 </ul>
 <p>Un <code>.chr</code> joint sert à relire le modèle (événements, dates, contraintes), pas ses résultats. Le modèle de langage s'appuie sur les compétences de SeldonH (convergence, remèdes, HPD…) mais reste un assistant : vérifiez toute conclusion importante.</p>
+
+<h2 id="traces">6 bis. Durées et dates à partir des traces MCMC</h2>
+<p>Après un calcul dans ChronoModel, exportez les résultats (<i>Results &gt; Export</i>) et joignez à SeldonH les fichiers de chaînes : <code>Chain_all_Events.csv</code> (un Event par colonne), <code>Chain_all_Phases.csv</code> (début et fin de chaque phase : « Phase Begin », « Phase End ») ou <code>Chain_Phase_&lt;nom&gt;.csv</code>. SeldonH garde ces tirages a posteriori pendant la conversation (plusieurs fichiers peuvent être joints, l'un après l'autre) et calcule, <b>tirage par tirage</b> (la dépendance entre Events, due aux contraintes et aux phases, est donc respectée) :</p>
+<ul>
+  <li>la <b>durée</b> entre deux Events ou deux bornes de phase (B − A), en années, avec la probabilité que B soit postérieur à A ; la durée d'une phase est celle de son début à sa fin ;</li>
+  <li>une <b>date comprise entre deux Events</b> (ou entre la fin d'une phase et le début de la suivante), uniforme entre les deux à chaque tirage ;</li>
+  <li>la densité d'une colonne, par exemple le <b>début ou la fin d'une phase</b>, à un autre niveau de confiance ;</li>
+  <li>un <b>test d'antéro-postérité</b> : P(A antérieur à B) et P(B antérieur à A), proportion des tirages où θ<sub>A</sub> &lt; θ<sub>B</sub> (c'est le signe de la durée B − A) ;</li>
+  <li>un <b>test d'appartenance</b> : P(C compris entre deux bornes), ainsi que P(avant) et P(après). Les bornes peuvent être deux Events, le début et la fin d'une phase, ou deux années fixes. Elles sont prises à chaque tirage, la plus ancienne en premier.</li>
+</ul>
+<p>Ces probabilités sont estimées par la proportion des tirages, avec leur <b>erreur Monte-Carlo</b> √(p(1 − p)/ESS), où ESS est l'effectif efficace de l'indicatrice sur toutes les chaînes. Ce sont des probabilités <b>a posteriori dans le modèle</b> ChronoModel (contraintes et phases comprises), pas des tests de signification. Une contrainte stratigraphique qui impose l'ordre donne 100 % par construction.</p>
+<p>Chaque résultat est une densité lissée (noyau gaussien de Sheather-Jones) avec ses HPD à 95 % par défaut, ou au niveau demandé, et la convergence (R̂, ESS) de la quantité calculée. Une durée est tracée dans un graphique à part (axe en années). Exemples, une fois le fichier joint :</p>
+<ul>
+  <li><a class="ex">Quelle est la durée entre US 12 et US 14 ? HPD à 90 %</a></li>
+  <li><a class="ex">Durée de la phase Bronze final</a></li>
+  <li><a class="ex">Donne la date d'un niveau situé entre la fin de la phase A et le début de la phase B</a></li>
+  <li><a class="ex">US 12 est-il antérieur à US 14 ?</a></li>
+  <li><a class="ex">US 5 appartient-il à la phase Bronze final ?</a></li>
+  <li><a class="ex">US 5 est-il compris entre 800 et 700 av. J.-C. ?</a></li>
+</ul>
+<table><tr><td class="note">Les valeurs sont lues en années calendaires (BC/AD signées), telles que ChronoModel les exporte, quel que soit le format d'affichage choisi. Les traces ne sont pas enregistrées dans l'historique : après avoir rouvert une conversation, joignez à nouveau le fichier.</td></tr></table>
 
 <h2 id="graphiques">7. Graphiques</h2>
 <ul>
@@ -420,7 +481,7 @@ Les règles et connaissances, en Markdown, courtes et précises.
   <tr><td>Appel d'outils (modèle distant)</td><td>Case cochée par défaut. Le modèle distant peut alors <b>demander lui-même</b> un calcul (calibration, HPD, archéomagnétisme…) : SeldonH l'exécute sur votre ordinateur avec les méthodes de ChronoModel, puis lui renvoie les valeurs exactes. Seuls la demande (âge, erreur, courbe) et le résultat sont transmis au serveur. Si le serveur ou le modèle ne gère pas les outils, SeldonH le détecte, vous le dit et utilise à la place un bloc de calcul dans la réponse. Le modèle local fonctionne toujours avec ce bloc.</td></tr>
   <tr><td>Budget des compétences</td><td>Nombre maximal de caractères de fiches de compétences ajoutés à chaque question (6000 par défaut, soit environ 1 700 tokens). Plus grand : l'assistant reçoit plus de connaissances, mais il reste moins de place dans la taille du contexte et la réponse démarre plus lentement.</td></tr>
   <tr><td>Dossier des compétences</td><td>Où SeldonH lit vos fiches personnelles.</td></tr>
-  <tr><td>Format des dates</td><td>Comme dans ChronoModel : BC/AD (défaut), BCE/CE, âge cal. BP (1950 − année), âge cal. B2K, date cal. BP/B2K, ka, Ma. Il s'applique aux fiches de résultat et aux graphiques (l'axe est alors inversé pour garder l'ordre chronologique). Une demande dans la question le remplace pour cette question : <a class="ex" data-method="c14">C14 de 3560 +- 20 BP, donne le résultat en cal BP</a></td></tr>
+  <tr><td>Format des dates</td><td>Comme dans ChronoModel : BC/AD (défaut, années astronomiques signées, l'année 0 existe), années historiques (av./apr. J.-C., sans année 0), BCE/CE, âge cal. BP (1950 − année), âge cal. B2K, date cal. BP/B2K, ka, Ma. Il s'applique aux fiches de résultat et aux graphiques (l'axe est alors inversé pour garder l'ordre chronologique). Une demande dans la question le remplace pour cette question : <a class="ex" data-method="c14">C14 de 3560 +- 20 BP, donne le résultat en cal BP</a></td></tr>
   <tr><td>Enregistrer automatiquement les conversations</td><td>Case cochée par défaut : alimente le volet Historique. Décochée, rien de nouveau n'est conservé ; les conversations déjà enregistrées restent jusqu'à leur suppression.</td></tr>
   <tr><td>Consignes personnelles</td><td>Texte libre ajouté à chaque question : <i>Réponds en trois phrases au maximum</i>, <i>Donne les âges en BP</i>, <i>Tutoie-moi</i>… Il règle la présentation des réponses du modèle ; il ne change pas les résultats de calcul de SeldonH. 1 500 caractères maximum, pris en compte tout de suite, sans relancer le modèle.</td></tr>
 </table>
@@ -429,7 +490,7 @@ Les règles et connaissances, en Markdown, courtes et précises.
 <ul>
   <li>Le modèle de langage peut se tromper ; les <b>valeurs de calcul</b> (intervalles, HPD) sont celles de l'application et font foi sur celles du texte.</li>
   <li>Export <code>.chr</code> : pas encore de densités tabulées ; vérifier le fichier dans ChronoModel.</li>
-  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04, et la combinaison de dates (bouton « Combine »). Le décalage δ (wiggle) est pris en compte pour une <a href="#wiggle">date seule</a> comme dans un <a href="#evenement-wiggle">événement</a>.</li>
+  <li>Non repris de ChronoModel pour l'instant : le plugin « Density » (densité tabulée), la courbe personnalisée de la méthode Gauss, les courbes archéomagnétiques de Mioara, la courbe bomb04. La <a href="#combinaison">combinaison de dates</a> (bouton « Combine ») est reprise, et étendue aux méthodes différentes. Le décalage δ (wiggle) est pris en compte pour une <a href="#wiggle">date seule</a> comme dans un <a href="#evenement-wiggle">événement</a>.</li>
   <li>Une datation isolée, ou un événement seul, n'est pas un modèle : l'effet des contraintes stratigraphiques et des phases se calcule dans ChronoModel.</li>
 </ul>
 

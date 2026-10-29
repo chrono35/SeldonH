@@ -29,6 +29,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "HistoryPanel.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QFont>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -39,9 +40,72 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QPainter>
 #include <QPushButton>
 #include <QShortcut>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
 
 namespace seldon {
+
+namespace {
+
+constexpr int kTitleRole = Qt::UserRole + 1;    // titre de la conversation
+constexpr int kMetaRole  = Qt::UserRole + 2;    // date, heure et nombre d'échanges
+
+// Une conversation par ligne : le titre, puis la date et l'heure en italique ; un trait fin sépare deux conversations.
+class HistoryDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* p, const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem opt(option);
+        initStyleOption(&opt, index);
+        opt.text.clear();                                       // le texte est dessiné ci-dessous, sur deux lignes
+        const QWidget* w = opt.widget;
+        QStyle* style = w ? w->style() : QApplication::style();
+        style->drawControl(QStyle::CE_ItemViewItem, &opt, p, w); // fond et sélection
+
+        const bool selected = opt.state & QStyle::State_Selected;
+        const QColor text = opt.palette.color(selected ? QPalette::HighlightedText : QPalette::Text);
+        const QRect r = opt.rect.adjusted(kPad, kPad, -kPad, -kPad);
+        p->save();
+        const QFont titleFont = opt.font;                       // gras pour la conversation ouverte (Qt::FontRole)
+        const QFontMetrics tf(titleFont);
+        p->setFont(titleFont);
+        p->setPen(text);
+        p->drawText(QPoint(r.left(), r.top() + tf.ascent()),
+                    tf.elidedText(index.data(kTitleRole).toString(), Qt::ElideRight, r.width()));
+        QFont metaFont = opt.font;
+        metaFont.setBold(false);
+        metaFont.setItalic(true);
+        const QFontMetrics mf(metaFont);
+        QColor meta = text;
+        if (!selected) meta.setAlphaF(0.65);
+        p->setFont(metaFont);
+        p->setPen(meta);
+        p->drawText(QPoint(r.left(), r.top() + tf.height() + kGap + mf.ascent()),
+                    mf.elidedText(index.data(kMetaRole).toString(), Qt::ElideRight, r.width()));
+        if (index.row() + 1 < index.model()->rowCount(index.parent())) {
+            p->setPen(QPen(opt.palette.color(QPalette::Mid), 1));
+            p->drawLine(opt.rect.left() + kPad, opt.rect.bottom(), opt.rect.right() - kPad, opt.rect.bottom());
+        }
+        p->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QStyleOptionViewItem opt(option);
+        initStyleOption(&opt, index);
+        QFont metaFont = opt.font;
+        metaFont.setItalic(true);
+        return QSize(opt.rect.width(), QFontMetrics(opt.font).height() + kGap + QFontMetrics(metaFont).height() + 2 * kPad + 1);
+    }
+
+private:
+    static constexpr int kPad = 6;     // marge intérieure
+    static constexpr int kGap = 2;     // entre le titre et la date
+};
+
+} // namespace
 
 CollapseStrip::CollapseStrip(const QString& label, QWidget* parent) : QAbstractButton(parent)
 {
@@ -85,7 +149,8 @@ HistoryPanel::HistoryPanel(QWidget* parent) : QWidget(parent)
     list_->setContextMenuPolicy(Qt::CustomContextMenu);
     list_->setUniformItemSizes(false);
     list_->setWordWrap(true);
-    list_->setAlternatingRowColors(true);
+    list_->setAlternatingRowColors(false);             // les conversations sont séparées par un trait
+    list_->setItemDelegate(new HistoryDelegate(list_));
     list_->setTextElideMode(Qt::ElideRight);
 
     empty_ = new QLabel;
@@ -173,10 +238,13 @@ void HistoryPanel::rebuild()
     list_->clear();
     for (const ConversationInfo& c : items_) {
         if (!needle.isEmpty() && !c.title.contains(needle, Qt::CaseInsensitive)) continue;
-        auto* it = new QListWidgetItem(QStringLiteral("%1\n%2 · %3 %4")
-                                           .arg(c.title, QLocale().toString(c.updated, QStringLiteral("d MMM yyyy HH:mm")))
-                                           .arg(c.exchanges).arg(c.exchanges > 1 ? tr("échanges") : tr("échange")));
+        const QString meta = QStringLiteral("%1 · %2 %3")
+                                 .arg(QLocale().toString(c.updated, QStringLiteral("d MMM yyyy, HH:mm")))
+                                 .arg(c.exchanges).arg(c.exchanges > 1 ? tr("échanges") : tr("échange"));
+        auto* it = new QListWidgetItem(c.title + QLatin1Char('\n') + meta);   // texte lu par l'accessibilité
         it->setData(Qt::UserRole, c.id);
+        it->setData(kTitleRole, c.title);
+        it->setData(kMetaRole, meta);
         it->setToolTip(c.backend.isEmpty() ? c.title : c.title + "\n" + c.backend);
         if (c.id == currentId_) {
             QFont f = it->font();

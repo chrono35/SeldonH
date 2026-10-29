@@ -115,6 +115,9 @@ struct EventMcmcResult {
     double      thetaBandwidth = 0.0;   // largeur de bande h (années) du noyau gaussien qui lisse la densité de θ
     bool        thetaBandwidthSJ = true; // h de Sheather-Jones (faux : repli sur la règle de Silverman)
     std::vector<double>  tiBandwidth;   // h des densités des t_i
+    std::vector<bool>    tiBandwidthSJ; // h des t_i de Sheather-Jones (faux : repli Silverman)
+    std::vector<double>  yiBandwidth;   // h des densités de t_i + δ_i (= tiBandwidth sans décalage)
+    std::vector<bool>    yiBandwidthSJ;
     std::vector<std::vector<double>> thetaTraces;   // traces de θ en acquisition (après thinning), une par chaîne
     std::vector<VarDiagnostic> diagnostics;
     std::vector<ChainReport>   chains;
@@ -144,9 +147,10 @@ RhatEss computeRhatAndEss(const std::vector<std::vector<double>>& chains);
 } // namespace mcmcdiag
 
 // Règle de largeur de bande du noyau gaussien.
-//   SheatherJones : Sheather & Jones (1991) « solve-the-equation » (bw.SJ de R) — défaut ; respecte la multimodalité
-//                   (résultats comparables à ChronoModel). Repli sur Silverman si l'équation n'a pas de solution.
-//   Silverman     : règle « nrd0 » de R, 0.9·min(sd, IQR/1.34)·n^(−1/5) ; sur-lisse les densités multimodales.
+//   SheatherJones : Sheather & Jones (1991) « solve-the-equation » — défaut ; respecte la multimodalité.
+//                   Même algorithme que bw_SJ_ste() de ChronoModel (même h) : équation de bw.SJ de R, fonctionnelles
+//                   estimées par FFT. Repli sur Silverman si l'équation n'a pas de solution.
+//   Silverman     : exactement bw.nrd0 de R, 0.9·min(sd, IQR/1.34)·n^(−1/5) ; sur-lisse les densités multimodales.
 enum class Bandwidth { SheatherJones, Silverman };
 
 // Largeur de bande h pour ces échantillons (n ≥ 2 ; 0 sinon). `used` : règle réellement appliquée (repli possible).

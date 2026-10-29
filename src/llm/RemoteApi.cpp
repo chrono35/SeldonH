@@ -28,6 +28,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "RemoteApi.h"
 
+#include <algorithm>
+#include <limits>
+
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -275,6 +278,23 @@ QHash<QString, ModelLimits> parseModelLimits(const QByteArray& body)
         if (m.context > 0 || m.maxOutput > 0) out.insert(id, m);
     }
     return out;
+}
+
+RateLimits parseRateLimits(const QList<QPair<QByteArray, QByteArray>>& headers)
+{
+    RateLimits r;
+    for (const auto& h : headers) {
+        const QByteArray k = h.first.toLower();
+        bool ok = false;
+        const long long v = h.second.trimmed().toLongLong(&ok);
+        if (!ok || v < 0) continue;
+        const int n = int(std::min<long long>(v, std::numeric_limits<int>::max()));
+        if (k == "x-ratelimit-remaining-tokens" || k == "anthropic-ratelimit-tokens-remaining") r.tokensRemaining = n;
+        else if (k == "x-ratelimit-limit-tokens" || k == "anthropic-ratelimit-tokens-limit") r.tokensLimit = n;
+        else if (k == "x-ratelimit-remaining-requests" || k == "anthropic-ratelimit-requests-remaining") r.requestsRemaining = n;
+        else if (k == "x-ratelimit-limit-requests" || k == "anthropic-ratelimit-requests-limit") r.requestsLimit = n;
+    }
+    return r;
 }
 
 QString textFromFullResponse(const QByteArray& body, int* promptTokens, int* completionTokens, QString* finishReason)

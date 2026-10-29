@@ -104,6 +104,10 @@ struct GenStats {
     int         truncation = NotTruncated;
     int         tokenLimit = 0;          // limite de tokens appliquée à cette réponse
     std::string truncationDetail;        // message d'erreur du flux (StreamCut), sinon vide
+
+    // Quota du fournisseur (modèle distant), lu dans les en-têtes de la réponse ; -1 = non communiqué.
+    int rateTokensRemaining = -1, rateTokensLimit = -1;
+    int rateRequestsRemaining = -1, rateRequestsLimit = -1;
 };
 
 // Caractéristiques du modèle chargé et du périphérique de calcul (pour « Optimiser pour ce modèle »).

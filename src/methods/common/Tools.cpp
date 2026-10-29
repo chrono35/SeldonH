@@ -38,6 +38,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "CurveStore.h"
 #include "MethodRegistry.h"
+#include "TextUtil.h"
 
 namespace seldon {
 namespace tools {
@@ -100,17 +101,17 @@ QVector<ToolDef> build()
 
     v.append({ "densite_gauss",
                QStringLiteral("Densité calendaire et intervalles HPD pour une date donnée directement en années calendaires par une loi "
-                              "normale (moyenne, écart-type), sans calibration. Les années avant J.-C. sont négatives."),
-               schema({ { "age", num(QStringLiteral("Moyenne, en année calendaire signée (négatif = avant J.-C., ex. -500 pour 500 av. J.-C.).")) },
+                              "normale (moyenne, écart-type), sans calibration. Années astronomiques (0 = 1 av. J.-C.)."),
+               schema({ { "age", num(QStringLiteral("Moyenne, en année calendaire. %1").arg(QStringLiteral("Année astronomique (l'année 0 existe : 0 = 1 av. J.-C., -499 = 500 av. J.-C.) ; pour une année av. J.-C., écris-la plutôt en texte, « 500 av. J.-C. » : SeldonH convertit."))) },
                         { "error", num(QStringLiteral("Écart-type, en années, strictement positif.")) } },
                       { "age", "error" }),
                "gauss" });
 
     v.append({ "densite_uniforme",
                QStringLiteral("Densité calendaire uniforme entre deux années (terminus post quem / terminus ante quem) et ses intervalles "
-                              "HPD. Les années avant J.-C. sont négatives."),
-               schema({ { "min", num(QStringLiteral("Borne inférieure, en année calendaire signée.")) },
-                        { "max", num(QStringLiteral("Borne supérieure, en année calendaire signée.")) } },
+                              "HPD. Années astronomiques (0 = 1 av. J.-C.)."),
+               schema({ { "min", num(QStringLiteral("Borne inférieure, en année calendaire. %1").arg(QStringLiteral("Année astronomique (l'année 0 existe : 0 = 1 av. J.-C., -499 = 500 av. J.-C.) ; pour une année av. J.-C., écris-la plutôt en texte, « 500 av. J.-C. » : SeldonH convertit."))) },
+                        { "max", num(QStringLiteral("Borne supérieure, en année calendaire (même convention).")) } },
                       { "min", "max" }),
                "unif" });
 
@@ -137,7 +138,8 @@ QVector<ToolDef> build()
                               "événement, éventuellement de méthodes différentes (14C, F14C, TL/OSL, archéomagnétisme, Gauss, uniforme), "
                               "par MCMC avec le modèle d'événement de ChronoModel (dispersion individuelle σ_i de chaque date). "
                               "Paramètres MCMC par défaut de ChronoModel si l'utilisateur n'en précise pas. Renvoie la densité a posteriori "
-                              "de θ, ses HPD, les valeurs a posteriori de chaque date et les critères de convergence (R̂, ESS)."),
+                              "de θ, ses HPD, les valeurs a posteriori de chaque date et les critères de convergence (R̂, ESS). Ne sert PAS aux traces "
+                              "MCMC jointes (durée ou date entre des Events d'un calcul ChronoModel) : utiliser analyser_traces."),
                schema({ { "name", str(QStringLiteral("Nom de l'événement (ex. « US 12 »).")) },
                         { "dates", QJsonObject{ { "type", "array" },
                                                 { "description", QStringLiteral("Datations : objets avec « method » (c14, f14c, tl, gauss, unif, am) et les "
@@ -148,15 +150,74 @@ QVector<ToolDef> build()
                                                                                 "{\"type\":\"gaussian\",\"mean\":20,\"error\":5}) pour un décalage δ entre "
                                                                                 "l'échantillon et l'événement.") },
                                                 { "items", QJsonObject{ { "type", "object" } } } } },
-                        { "tmin", num(QStringLiteral("Début de la période d'étude (année signée). Facultatif : calculé d'après les datations.")) },
-                        { "tmax", num(QStringLiteral("Fin de la période d'étude (année signée). Facultatif.")) },
+                        { "tmin", num(QStringLiteral("Début de la période d'étude (année astronomique, ou en texte « 500 av. J.-C. »). Facultatif : calculé d'après les datations.")) },
+                        { "tmax", num(QStringLiteral("Fin de la période d'étude (année astronomique, ou en texte « 500 av. J.-C. »). Facultatif.")) },
                         { "mcmc", QJsonObject{ { "type", "object" },
                                                { "description", QStringLiteral("Facultatif, seulement si l'utilisateur le demande : num_iter (100000), num_burn (1000), "
                                                                                "num_proc = nombre de chaînes (4), max_batches (200), iter_per_batch (100), "
                                                                                "thinning_interval (10), mixing_level (0.99), anneal_temp (10), "
-                                                                               "anneal_recurrence (1000), anneal_dwell (1000), seeds (liste d'entiers).") } } } },
+                                                                               "anneal_recurrence (1000), anneal_dwell (1000), seeds (liste d'entiers).") } } },
+                        { "traces", QJsonObject{ { "type", "boolean" },
+                                                 { "description", QStringLiteral("Vrai seulement si l'utilisateur demande explicitement les traces des "
+                                                                                 "chaînes MCMC (graphique long à tracer). Par défaut : pas de traces.") } } } },
                       { "dates" }),
                "event" });
+
+    v.append({ "combiner_dates",
+               QStringLiteral("Combine plusieurs datations d'une MÊME date (bouton « Combine » de ChronoModel) : produit de leurs "
+                              "vraisemblances, même si les méthodes diffèrent (14C, F14C, TL/OSL, archéomagnétisme, Gauss, uniforme), "
+                              "chaque datation pouvant avoir un décalage δ (wiggle). Renvoie la densité combinée, ses HPD, chaque "
+                              "datation seule et, à titre d'information seulement, le test de Ward et Wilson. À distinguer de "
+                              "calculer_evenement (MCMC avec une dispersion propre à chaque date) : utiliser celui-ci quand "
+                              "l'utilisateur dit « combine » / « combinaison », l'autre quand il parle d'événement."),
+               schema({ { "name", str(QStringLiteral("Nom de la combinaison (ex. « Four 3 »). Facultatif.")) },
+                        { "dates", QJsonObject{ { "type", "array" },
+                                                { "description", QStringLiteral("Au moins deux datations : objets avec « method » (c14, f14c, tl, gauss, unif, am) et "
+                                                                                "les paramètres de cette méthode (mêmes noms que les autres outils), et "
+                                                                                "facultativement « name » et « wiggle » ({\"type\":\"fixed\",\"value\":20}, "
+                                                                                "{\"type\":\"range\",\"min\":10,\"max\":30} ou "
+                                                                                "{\"type\":\"gaussian\",\"mean\":20,\"error\":5}) : la datation date alors t + δ.") },
+                                                { "items", QJsonObject{ { "type", "object" } } } } } },
+                      { "dates" }),
+               "combine" });
+
+    v.append({ "analyser_traces",
+               QStringLiteral("Calcule a posteriori, sur les traces MCMC exportées par ChronoModel et jointes par l'utilisateur "
+                              "(Chain_all_Events.csv, Chain_all_Phases.csv…), tirage par tirage : la durée entre deux colonnes "
+                              "(op « duration » : to − from, en années, avec la probabilité que « to » soit postérieur à « from »), "
+                              "une date comprise entre deux colonnes (op « between » : uniforme entre les deux à chaque tirage), ou la "
+                              "densité d'une colonne (op « value », ex. début ou fin d'une phase), l'antéro-postérité de deux colonnes "
+                              "(op « order » : P(from antérieur à to) et l'inverse), ou l'appartenance d'une colonne « of » à l'intervalle "
+                              "[from ; to] (op « inside » : deux Events, début et fin d'une phase, ou années fixes). Renvoie la densité, ses HPD "
+                              "et la convergence, ou les probabilités avec leur erreur Monte-Carlo. Les noms de colonnes sont ceux du fichier joint (ex. « US 12 », « Phase A Begin », "
+                              "« Phase A End ») ; durée d'une phase : from = « X Begin », to = « X End »."),
+               schema({ { "op", str(QStringLiteral("Opération : duration, between, value, order ou inside."),
+                                    { "duration", "between", "value", "order", "inside" }) },
+                        { "from", str(QStringLiteral("Colonne A (duration, between, order) ou borne ancienne de l'intervalle (inside : "
+                                                     "colonne, « X Begin » pour une phase, ou année fixe).")) },
+                        { "to", str(QStringLiteral("Colonne B (duration, between, order) ou borne récente de l'intervalle (inside).")) },
+                        { "of", str(QStringLiteral("Colonne à analyser (value) ou colonne testée (inside).")) },
+                        { "name", str(QStringLiteral("Nom du résultat, repris dans le titre du graphique. Facultatif.")) } },
+                      { "op" }),
+               "traces" });
+
+    v.append({ "calibration_inverse",
+               QStringLiteral("Calibration inverse : mesure attendue (âge 14C en BP, F14C, inclinaison, déclinaison ou intensité) pour un "
+                              "échantillon d'une date calendaire donnée, lue sur une courbe de référence. La date peut être fixe (t), "
+                              "gaussienne (t ± t_error) ou uniforme (t_min, t_max) ; lab_error ajoute l'erreur de mesure prévue. "
+                              "Renvoie la valeur de la courbe, la loi de la mesure attendue et ses HPD."),
+               schema({ { "type", str(QStringLiteral("Courbe : c14 (âge radiocarbone), f14c ou am (archéomagnétisme)."), { "c14", "f14c", "am" }) },
+                        { "t", num(QStringLiteral("Date calendaire. %1").arg(QStringLiteral("Année astronomique (l'année 0 existe : 0 = 1 av. J.-C., -499 = 500 av. J.-C.) ; pour une année av. J.-C., écris-la plutôt en texte, « 500 av. J.-C. » : SeldonH convertit."))) },
+                        { "t_error", num(QStringLiteral("Écart-type de la date, en années, SEULEMENT si l'utilisateur en donne un. Facultatif : "
+                                                        "ne le demande pas et ne l'invente pas (sans lui, la date est prise exacte).")) },
+                        { "t_min", num(QStringLiteral("Début d'une période (année astronomique, ou en texte « 500 av. J.-C. »), avec t_max, à la place de t. Facultatif.")) },
+                        { "t_max", num(QStringLiteral("Fin de la période (année astronomique, ou en texte « 500 av. J.-C. »). Facultatif.")) },
+                        { "curve", str(QStringLiteral("Courbe de référence (défaut : intcal20 pour c14, bomb21nhz1 pour f14c, "
+                                                      "gal2002sph2014_i / _d ou gwh2013uni_f pour am).")) },
+                        { "component", str(QStringLiteral("Composante archéomagnétique (type am) : I, D ou F."), { "I", "D", "F" }) },
+                        { "lab_error", num(QStringLiteral("Erreur de mesure prévue (même unité que la mesure : années BP, F14C, degrés, µT). Facultatif.")) } },
+                      { "type" }),
+               "inverse" });
 
     v.append({ "creer_densite",
                QStringLiteral("Crée un fichier de densité tabulée (CSV) pour le plugin Density de ChronoModel à partir d'une loi classique, "
@@ -204,21 +265,24 @@ QVector<ToolDef> build()
     for (ToolDef& d : v) {
         if (d.methodId.isEmpty() || d.methodId == QLatin1String("density_file")) continue;
         QJsonObject props = d.parameters.value("properties").toObject();
+        // Calculs qui ne sont pas des datations : seulement le niveau de confiance.
+        const bool notDating = d.methodId == QLatin1String("traces") || d.methodId == QLatin1String("inverse");
         props["level"] = num(QStringLiteral("Niveau de confiance des intervalles HPD, en % (défaut 95). À donner seulement si "
                                             "l'utilisateur demande un autre niveau (ex. 99 ou 90) ; les HPD à 95 % et 68 % sont toujours fournies."));
+        if (notDating) { d.parameters["properties"] = props; continue; }
         props["color"] = str(QStringLiteral("Couleur de la courbe (\"#rrggbb\" ou nom de couleur), seulement si l'utilisateur "
                                             "en donne une (ou si la date / l'événement du .chr en a une). Facultatif."));
         props["layout"] = str(QStringLiteral("« overlay » seulement si l'utilisateur demande de superposer les densités sur le même "
                                              "graphe ; sinon (défaut) chaque densité est tracée sur sa propre ligne."), { "rows", "overlay" });
         if (d.methodId != "event") {
-            props["tmin"] = num(QStringLiteral("Début de la période d'étude (année calendaire signée), seulement si l'utilisateur en donne "
+            props["tmin"] = num(QStringLiteral("Début de la période d'étude (année astronomique, ou en texte « 500 av. J.-C. »), seulement si l'utilisateur en donne "
                                                "une : la densité est calculée sur [tmin ; tmax] puis renormalisée. Défaut : toute la courbe."));
-            props["tmax"] = num(QStringLiteral("Fin de la période d'étude (année calendaire signée). Facultatif."));
+            props["tmax"] = num(QStringLiteral("Fin de la période d'étude (année astronomique, ou en texte « 500 av. J.-C. »). Facultatif."));
         }
-        if (d.methodId != "event")
+        if (d.methodId != "event" && d.methodId != "combine")
             props["name"] = str(QStringLiteral("Nom de la datation (ex. « Ly-1234 », ou le « name » de la date dans un fichier .chr), "
                                                "repris dans le titre du graphique. Facultatif."));
-        if (d.methodId != "event")
+        if (d.methodId != "event" && d.methodId != "combine")
             props["wiggle"] = QJsonObject{ { "type", "object" },
                                            { "description", QStringLiteral("Facultatif, seulement si l'utilisateur donne un décalage δ (wiggle-matching) entre "
                                                                            "l'échantillon et ce qu'on veut dater : {\"type\":\"fixed\",\"value\":20}, "
@@ -245,7 +309,11 @@ QString coerce(const ToolDef& def, QJsonObject& args)
                 s.replace(QChar(0x00A0), QString()).replace(' ', QString()).replace(',', '.');
                 if (s.isEmpty()) continue;
                 bool ok = false;
-                const double d = s.toDouble(&ok);
+                double d = s.toDouble(&ok);
+                if (!ok) {                                   // année écrite avec son ère : « 500 av. J.-C. » -> -499
+                    d = text::yearFromText(v.toString());
+                    ok = std::isfinite(d);
+                }
                 if (!ok) return QStringLiteral("la valeur de « %1 » n'est pas un nombre : « %2 »").arg(it.key(), v.toString());
                 v = d;
             } else if (!v.isDouble()) {
@@ -268,6 +336,13 @@ QStringList missing(const ToolDef& def, const QJsonObject& a)
     QStringList m;
     for (const QJsonValue& r : def.parameters.value("required").toArray())
         if (!a.contains(r.toString())) m << r.toString();
+    if (def.methodId == "traces") {
+        const QString op = a.value("op").toString();
+        if ((op == QLatin1String("value") || op == QLatin1String("inside")) && !a.contains("of")) m << "of";
+        if (op != QLatin1String("value")) { if (!a.contains("from")) m << "from"; if (!a.contains("to")) m << "to"; }
+    }
+    if (def.methodId == "inverse" && !a.contains("t") && !(a.contains("t_min") && a.contains("t_max"))) m << "t";
+    if (def.methodId == "inverse" && a.value("type").toString() == QLatin1String("am") && !a.contains("component")) m << "component";
     if (def.methodId == "am") {
         const QString p = a.value("process").toString();
         if ((p.contains('I') || p.contains('D')) && !a.contains("alpha95")) m << "alpha95";
@@ -354,7 +429,7 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
         return r;
     }
 
-    if (def->methodId == "event") {
+    if (def->methodId == "event" || def->methodId == "combine") {
         // Datations normalisées (alias de méthode, format .chr, nombres en texte) avant la vérification.
         QJsonArray ds;
         for (const QJsonValue& v : args.value("dates").toArray())

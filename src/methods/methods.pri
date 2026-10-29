@@ -5,15 +5,18 @@ METHODS_DIR = $$PWD
 INCLUDEPATH += $$METHODS_DIR
 
 SOURCES += \
+    $$METHODS_DIR/common/Combination.cpp \
     $$METHODS_DIR/common/Density.cpp \
     $$METHODS_DIR/common/DensityFile.cpp \
     $$METHODS_DIR/common/EventMcmc.cpp \
+    $$METHODS_DIR/common/InverseCalibration.cpp \
     $$METHODS_DIR/common/RefCurve.cpp \
     $$METHODS_DIR/common/CurveStore.cpp \
     $$METHODS_DIR/common/Method.cpp \
     $$METHODS_DIR/common/MethodRegistry.cpp \
     $$METHODS_DIR/common/MethodRunner.cpp \
     $$METHODS_DIR/common/Tools.cpp \
+    $$METHODS_DIR/common/Traces.cpp \
     $$METHODS_DIR/c14/C14Method.cpp \
     $$METHODS_DIR/f14c/F14cMethod.cpp \
     $$METHODS_DIR/gauss/GaussMethod.cpp \
@@ -22,15 +25,18 @@ SOURCES += \
     $$METHODS_DIR/am/AmMethod.cpp
 
 HEADERS += \
+    $$METHODS_DIR/common/Combination.h \
     $$METHODS_DIR/common/Density.h \
     $$METHODS_DIR/common/DensityFile.h \
     $$METHODS_DIR/common/EventMcmc.h \
+    $$METHODS_DIR/common/InverseCalibration.h \
     $$METHODS_DIR/common/RefCurve.h \
     $$METHODS_DIR/common/CurveStore.h \
     $$METHODS_DIR/common/Method.h \
     $$METHODS_DIR/common/MethodRegistry.h \
     $$METHODS_DIR/common/MethodRunner.h \
     $$METHODS_DIR/common/Tools.h \
+    $$METHODS_DIR/common/Traces.h \
     $$METHODS_DIR/common/TextUtil.h \
     $$METHODS_DIR/common/DateFormat.h \
     $$METHODS_DIR/c14/C14Method.h \

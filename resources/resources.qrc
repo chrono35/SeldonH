@@ -10,6 +10,8 @@
         <file alias="16_date_tl.md">skills/16_date_tl.md</file>
         <file alias="17_date_am.md">skills/17_date_am.md</file>
         <file alias="18_date_densite.md">skills/18_date_densite.md</file>
+        <file alias="19_chronomodel_phases_events.md">skills/19_chronomodel_phases_events.md</file>
+        <file alias="20_combinaison_traces_inverse.md">skills/20_combinaison_traces_inverse.md</file>
         <file alias="04_chronomodel_interpreter.md">skills/04_chronomodel_interpreter.md</file>
         <file alias="05_radiocarbone.md">skills/05_radiocarbone.md</file>
         <file alias="06_archeomagnetisme.md">skills/06_archeomagnetisme.md</file>
@@ -19,6 +21,9 @@
         <file alias="10_aide_utilisation.md">skills/10_aide_utilisation.md</file>
         <file alias="11_chronomodel_logs.md">skills/11_chronomodel_logs.md</file>
         <file alias="12_chronomodel_logs_remedes.md">skills/12_chronomodel_logs_remedes.md</file>
+    </qresource>
+    <qresource prefix="/lexicon">
+        <file alias="lexique.txt">lexique.txt</file>
     </qresource>
     <qresource prefix="/help">
         <file alias="aide.html">help/aide.html</file>

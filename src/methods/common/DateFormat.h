@@ -58,7 +58,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 namespace seldon {
 
-enum class DateFormat { BcAd, BceCe, CalBP, CalB2K, DatBP, DatB2K, Ka, Ma, Numeric };
+// BcAd : années astronomiques signées (l'année 0 existe), format de ChronoModel et des .chr, par défaut.
+// Historic : les mêmes années écrites av./apr. J.-C. (sans année 0 : -499 = 500 av. J.-C.), sur demande.
+enum class DateFormat { BcAd, Historic, BceCe, CalBP, CalB2K, DatBP, DatB2K, Ka, Ma, Numeric };
 
 namespace dateformat {
 
@@ -66,6 +68,7 @@ inline const char* id(DateFormat f)
 {
     switch (f) {
     case DateFormat::BcAd:   return "bcad";
+    case DateFormat::Historic: return "historic";
     case DateFormat::BceCe:  return "bcece";
     case DateFormat::CalBP:  return "calbp";
     case DateFormat::CalB2K: return "calb2k";
@@ -79,9 +82,9 @@ inline const char* id(DateFormat f)
 }
 
 // Tous les formats, dans l'ordre des menus.
-inline const std::array<DateFormat, 9>& all()
+inline const std::array<DateFormat, 10>& all()
 {
-    static const std::array<DateFormat, 9> l = { DateFormat::BcAd, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
+    static const std::array<DateFormat, 10> l = { DateFormat::BcAd, DateFormat::Historic, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
                                                          DateFormat::DatBP, DateFormat::DatB2K, DateFormat::Ka, DateFormat::Ma,
                                                          DateFormat::Numeric };
     return l;
@@ -98,7 +101,8 @@ inline DateFormat fromId(const QString& s)
 inline QString title(DateFormat f)
 {
     switch (f) {
-    case DateFormat::BcAd:   return QStringLiteral("BC/AD (années signées, av./apr. J.-C.)");
+    case DateFormat::BcAd:   return QStringLiteral("BC/AD (années astronomiques signées, comme ChronoModel : 0 = 1 av. J.-C.)");
+    case DateFormat::Historic: return QStringLiteral("Années historiques (av./apr. J.-C., sans année 0)");
     case DateFormat::BceCe:  return QStringLiteral("BCE/CE (années signées)");
     case DateFormat::CalBP:  return QStringLiteral("Âge cal. BP (1950 − année)");
     case DateFormat::CalB2K: return QStringLiteral("Âge cal. B2K (2000 − année)");
@@ -115,7 +119,8 @@ inline QString title(DateFormat f)
 inline QString axisLabel(DateFormat f)
 {
     switch (f) {
-    case DateFormat::BcAd:   return QStringLiteral("Année calendaire (négatif = avant J.-C.)");
+    case DateFormat::BcAd:   return QStringLiteral("Année calendaire (astronomique, 0 = 1 av. J.-C.)");
+    case DateFormat::Historic: return QStringLiteral("Année calendaire (négatif = avant J.-C.)");
     case DateFormat::BceCe:  return QStringLiteral("Année calendaire BCE/CE (négatif = BCE)");
     case DateFormat::CalBP:  return QStringLiteral("Âge cal. BP");
     case DateFormat::CalB2K: return QStringLiteral("Âge cal. B2K");
@@ -219,7 +224,9 @@ inline QString format(double year, DateFormat f)
     const int d = decimals(f);
     const double v = convert(year, f);
     switch (f) {
-    case DateFormat::BcAd: {                     // année astronomique 0 = 1 av. J.-C.
+    case DateFormat::BcAd:                       // année astronomique signée, comme ChronoModel et les .chr
+        return number(year, d);
+    case DateFormat::Historic: {                 // année astronomique 0 = 1 av. J.-C.
         if (d == 0) return text::yearLabel(year);
         return year >= 0.5 ? QStringLiteral("%1 apr. J.-C.").arg(number(year, d)) : QStringLiteral("%1 av. J.-C.").arg(number(1.0 - year, d));
     }
@@ -272,28 +279,38 @@ inline DateFormat detect(const QString& question, DateFormat fallback)
     if (has(R"(\bcal\.?\s*b2k\b|\bb2k\b)"))              return DateFormat::CalB2K;
     if (has(R"(\bcal\.?\s*bp\b|\bbp\s+cal\w*\b|\bage\s+cal)")) return DateFormat::CalBP;
     if (has(R"(\bbce\b)"))                               return DateFormat::BceCe;
-    if (has(R"(\bbc/ad\b|\ben\s+annees\s+calendaires\b|\bin\s+calendar\s+years\b|\bav\.?\s*j\.?-?c\b.*\bapr\.?\s*j)")) return DateFormat::BcAd;
+    // Années historiques demandées : « donne les dates en av. J.-C. », « en années historiques », « in BC/AD years (historical) ».
+    if (has(R"(\bannees?\s+historiques?\b|\bnumerotation\s+historique\b|\bhistorical\s+years?\b|\bav\.?\s*j\.?-?c\b.*\bapr\.?\s*j)")
+        || after(QStringLiteral(R"((?:av\.?\s*j\.?\s*-?\s*c|avant\s+j\.?\s*-?\s*c))")))
+        return DateFormat::Historic;
+    if (has(R"(\bbc/ad\b|\ben\s+annees\s+calendaires\b|\bin\s+calendar\s+years\b|\bannees?\s+astronomiques?\b)")) return DateFormat::BcAd;
     if (after(QStringLiteral("bp")))                     return DateFormat::CalBP;
     if (after(QStringLiteral("ka")))                     return DateFormat::Ka;
     if (after(QStringLiteral("ma")))                     return DateFormat::Ma;
     return fallback;
 }
 
-// Rappel pour le message système quand l'utilisateur a choisi un format autre que BC/AD.
+// Rappel pour le message système : format des dates choisi par l'utilisateur.
 inline std::string systemHint(DateFormat f)
 {
     const int d = decimalsSetting();
-    if (f == DateFormat::BcAd && d < 0) return {};
     std::string h = "\n\n## Format des dates\n";
-    if (f == DateFormat::Numeric)
+    if (f == DateFormat::BcAd)
+        h += "Les années sont des années astronomiques signées, comme dans ChronoModel et les fichiers .chr : l'année 0 "
+             "existe (0 = 1 av. J.-C., -499 = 500 av. J.-C.). Écris-les ainsi, signées (« -499 », « 1200 »), en reprenant "
+             "les valeurs des blocs de résultat de SeldonH ; ne les convertis PAS en « av. J.-C. » sauf si l'utilisateur le demande.";
+    else if (f == DateFormat::Historic)
+        h += "L'utilisateur a choisi les années historiques : les blocs de résultat de SeldonH les donnent déjà en "
+             "« av. J.-C. » / « apr. J.-C. » (sans année 0) ; reprends-les telles quelles.";
+    else if (f == DateFormat::Numeric)
         h += "L'utilisateur a choisi le mode « sans unité » : donne les valeurs signées telles quelles, sans unité ni "
              "mention av./apr. J.-C., BP ou ka, en reprenant les valeurs des blocs de résultat de SeldonH.";
-    else if (f != DateFormat::BcAd)
+    else
         h += std::string("L'utilisateur a choisi le format « ") + title(f).toStdString() +
              "». Exprime les dates dans ce format, en reprenant les valeurs des blocs de résultat de SeldonH (déjà converties). "
              "Si tu dois convertir toi-même une année calendaire signée A : "
              "cal BP = 1950 − A ; cal B2K = 2000 − A ; ka = −A / 1000.";
-    if (d >= 0) h += (f != DateFormat::BcAd ? " " : "") + std::string("Garde ") + std::to_string(d) +
+    if (d >= 0) h += std::string(" Garde ") + std::to_string(d) +
                      (d > 1 ? " décimales" : " décimale") + " pour les valeurs, comme dans les blocs de résultat.";
     return h;
 }

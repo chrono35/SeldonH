@@ -4,7 +4,7 @@ description: Dates gaussienne et uniforme ; dendrochronologie, TPQ/TAQ, typologi
 keywords: gauss, gaussienne, loi normale, uniforme, unif, intervalle, dendrochronologie, dendro, tpq, taq, terminus, typologie, ceramique, monnaie, numismatique, texte, source ecrite, uranium, thorium, datation simple, type de date, dendrochronology, terminus post quem, terminus ante quem, typology, pottery, ceramic, coin, numismatics, written source, uniform, gaussian
 priority: 4
 ---
-- Gaussienne (âge calendaire signé ± σ, négatif = avant J.-C.) : modèle `{"type":"gauss","name":"<référence>","age":<année>,"error":<σ>}`, calcul `{"method":"gauss","age":<année>,"error":<σ>}`.
+- Gaussienne (âge calendaire ± σ, en année astronomique : 0 = 1 av. J.-C., −499 = 500 av. J.-C. ; une année av. J.-C. peut s'écrire en texte, `"age":"500 av. J.-C."`) : modèle `{"type":"gauss","name":"<référence>","age":<année>,"error":<σ>}`, calcul `{"method":"gauss","age":<année>,"error":<σ>}`.
 - Uniforme (intervalle) : modèle `{"type":"unif","name":"<référence>","min":<début>,"max":<fin>}` avec min < max, calcul `{"method":"unif","min":<début>,"max":<fin>}`.
 - Résultat avec âge ± σ en années calendaires (dendrochronologie, U/Th…) → `gauss`.
 - Terminus post quem / ante quem, monnaie, typologie, texte daté → `unif` [min ; max]. Un TPQ seul (« après 150 ») demande une borne supérieure plausible ou une contrainte d'ordre avec un autre événement.

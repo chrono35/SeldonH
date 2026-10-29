@@ -109,6 +109,10 @@ MethodResult GaussMethod::compute(const QJsonObject& p) const
     const double error = p.value("error").toDouble();
     const QString mode = p.value("mode").toString("none");
     if (!(error > 0.0)) return MethodResult::failure("l'erreur doit être strictement positive");
+    // Combinaison (« untruncated ») : vraisemblance entière, sur ±12σ, pour que le produit avec une autre datation
+    // ne s'annule pas dans les queues.
+    const bool untruncated = p.value("untruncated").toBool();
+    const double kS = untruncated ? 12.0 : kSigma;
 
     double tmin, tmax, step;
     std::function<double(double)> g;
@@ -117,8 +121,8 @@ MethodResult GaussMethod::compute(const QJsonObject& p) const
         const double a = p.value("a").toDouble(), b = p.value("b").toDouble(), c = p.value("c").toDouble();
         g = [=](double t) { return a * std::abs(t) * std::abs(t) + b * t + c; };
 
-        const auto s1 = solveQuadratic(age - kSigma * error, a, b, c);
-        const auto s2 = solveQuadratic(age + kSigma * error, a, b, c);
+        const auto s1 = solveQuadratic(age - kS * error, a, b, c);
+        const auto s2 = solveQuadratic(age + kS * error, a, b, c);
         if (std::isinf(s1.first) || std::isinf(s2.first))
             return MethodResult::failure("équation de calibration constante : domaine indéterminé");
         tmin = std::min(s1.first, s2.first);
@@ -128,8 +132,8 @@ MethodResult GaussMethod::compute(const QJsonObject& p) const
         if (!(tmax > tmin)) return MethodResult::failure("l'équation de calibration n'a pas de solution réelle dans la plage de la mesure");
     } else {
         g = [](double t) { return t; };
-        tmin = age - kSigma * error;
-        tmax = age + kSigma * error;
+        tmin = age - kS * error;
+        tmax = age + kS * error;
         step = 2.0 * error / 1001.0;
     }
 
@@ -138,7 +142,7 @@ MethodResult GaussMethod::compute(const QJsonObject& p) const
         const long double d = age - g(t);
         return expl(-0.5L * d * d / var) / sqrtl(var);
     };
-    return MethodResult::fromDensity(buildDensity(tmin, tmax, step, L, true), {}, false);
+    return MethodResult::fromDensity(buildDensity(tmin, tmax, step, L, !untruncated), {}, false);
 }
 
 QString GaussMethod::describe(const QJsonObject& p) const

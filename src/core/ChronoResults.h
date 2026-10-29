@@ -33,6 +33,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // Lecture : blocs « Event : nom », « Data : nom », sous-blocs « Posterior Event Date », « Posterior Shrinkage param. »,
 // « Posterior calib. date », « Posterior Std ti » ; critères « R̂ = … · ESS bulk = … · ESS tail = … ✅ » (une ligne) ou
 // une ligne par critère avec ✅ / ⚠️ ; statistiques de densité « MAP = … ; Mean = … ; Std = … ».
+// Phases (avant les Events) : « Phase: nom », « Number of Events: n », densités « Begin / End / Duration (posterior
+// distrib.) », « Phase Time Range ( 95 %) : [ a ; b ] » ; puis « Succession : from A to B », « Min Hiatus … »,
+// « Transition Range ( 95 %) : [ a ; b ] », « Gap Range ( 95 %) : [ a ; b ] » ou « No Gap ».
 #pragma once
 
 #include <QString>
@@ -40,6 +43,40 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 namespace seldon {
 namespace chronoresults {
+
+struct Interval {
+    double a = 0.0, b = 0.0;   // bornes, dans l'ordre du fichier (a < b)
+    double p = 0.0;            // probabilité de ce morceau de HPD (%)
+};
+
+// Statistiques d'une densité a posteriori telles que ChronoModel les écrit (valeurs exactes du fichier).
+struct Density {
+    bool    has = false;                       // ligne « MAP = … ; Mean = … ; Std = … » lue
+    double  map = 0.0, mean = 0.0, stdev = 0.0;
+    double  q1 = 0.0, q2 = 0.0, q3 = 0.0;      // quartiles de la densité (ligne qui suit le MAP)
+    double  min = 0.0, max = 0.0;              // extrêmes de l'échantillon (Trace Stat.)
+    bool    hasMinMax = false;
+    double  ciLevel = 0.0;   Interval ci;      // intervalle de crédibilité
+    double  hpdLevel = 0.0;  QVector<Interval> hpd;   // région HPD, éventuellement en plusieurs morceaux
+    QString unit;                              // « Age Cal. BP », « Years »…
+    bool    sparse = false;                    // « Warning: Sample is too sparse »
+};
+
+struct Phase {
+    QString  name;
+    int      events = 0;
+    Density  begin, end, duration;
+    double   rangeLevel = 0.0;  Interval range;     // Phase Time Range
+    bool     hasRange = false;
+};
+
+struct Succession {
+    QString  from, to;          // phase la plus ancienne -> la plus récente
+    QString  hiatus;            // hiatus minimal a priori (« unknown » s'il n'est pas fixé)
+    double   level = 0.0;  Interval transition;  bool hasTransition = false;
+    bool     gap = false;  Interval gapRange;    // « No Gap » : gap = false
+    QString  unit;
+};
 
 struct Variable {
     QString kind;              // « date de l'événement », « σ de l'événement (shrinkage) », « date calibrée », « σ de la date (Std ti) »
@@ -50,6 +87,7 @@ struct Variable {
     bool    rhatOk = true, bulkOk = true, tailOk = true;
     double  map = 0.0, stdev = 0.0;    // statistiques de la densité (MAP, écart-type)
     bool    hasStats = false;
+    Density d;                         // densité complète
     bool ok() const { return rhatOk && bulkOk && tailOk; }
 };
 
@@ -58,7 +96,12 @@ struct Report {
     QVector<Variable> vars;
     int essThreshold = 1500;   // lu dans « (< 1500) » s'il est présent
     int events = 0, data = 0;
+    QVector<Phase> phases;
+    QVector<Succession> successions;
 };
+
+// Ce que demande une question sur des résultats déjà lus (drapeaux combinables).
+enum Focus { FocusPhases = 1, FocusSuccessions = 2, FocusEvents = 4, FocusTable = 8 };
 
 // HTML -> texte (balises de bloc -> retours à la ligne, entités décodées).
 QString htmlToText(const QString& html);
@@ -68,6 +111,15 @@ Report parse(const QString& text);
 // Résumé pour le modèle (français) : critère global, variables hors critères de la pire à la meilleure, facteur
 // d'itérations suggéré, dates au σ grand (outliers possibles), Events dont toutes les dates ont un σ grand.
 QString summarize(const Report& r, const QString& fileName, int maxListed = 30);
+
+// Drapeaux Focus de la question (0 : question de convergence ou sans rapport avec les phases et les Events).
+int focusOf(const QString& question);
+// Tableaux exacts (HTML) affichés par SeldonH : phases (ordre chronologique), successions, Events.
+QString tablesHtml(const Report& r, int focus);
+// Valeurs exactes pour le modèle, dans un budget de caractères : remarques calculées (phases à un seul Event,
+// bornes de la période d'étude atteintes, HPD en plusieurs morceaux, gaps), puis une ligne par phase / succession /
+// Event, en commençant par ceux que la question nomme. tableShown : le tableau complet est déjà affiché.
+QString digest(const Report& r, int focus, const QString& question, int maxChars, bool tableShown);
 
 } // namespace chronoresults
 } // namespace seldon

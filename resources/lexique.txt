@@ -1,0 +1,103 @@
+# Lexique multilingue de SeldonH : repérage des mots-clés d'une question posée en anglais, espagnol, italien ou
+# allemand. Avant de choisir les fiches et de lancer les détecteurs (phases, modèle, dessin, méthodes de datation…),
+# SeldonH remplace dans la question chaque terme listé à droite par le terme français de gauche. Le modèle de langage
+# reçoit toujours la question d'origine et répond dans sa langue.
+#
+# Format : terme français = équivalent, équivalent, …   (minuscules ou non, accents indifférents)
+# « mot* » : tout mot qui commence par « mot » (utile pour l'allemand : Phasen*, Kalibrier*…).
+# Une expression de plusieurs mots est reconnue telle quelle. L'utilisateur peut compléter ce lexique avec un fichier
+# « lexique.txt » dans son dossier de compétences (même format, lu après celui-ci).
+
+# --- phases, successions, Events
+phase = fase
+phases = fases, fasi, phasen*
+duree de phase = phasendauer, duracion de la fase, durata della fase
+debut de phase = phasenbeginn, phasenanfang
+fin de phase = phasenende
+evenement = evento, acontecimiento, ereignis
+evenements = eventos, eventi, ereignisse, ereignissen
+debut = inicio, comienzo, principio, inizio, beginn, anfang
+fin = final, finale, ende, la fine, fine della, fine fase
+duree = duracion, durata, dauer
+succession = sucesion, successione, abfolge, aufeinanderfolge
+hiatus = hiato, iato
+lacune = laguna, lacuna, lucke, lucken
+transition = transicion, transizione, ubergang, ubergange
+contrainte = restriccion, vincolo, randbedingung, einschrankung
+contraintes = restricciones, vincoli, randbedingungen, einschrankungen
+stratigraphie = estratigrafia, stratigrafia, schichtenfolge
+
+# --- tableaux, synthèse
+tableau = tabla, tabella, tabelle, ubersicht*, ergebnistabelle
+synthese = resumen, sintesis, sintesi, riassunto, riepilogo, zusammenfassung
+liste = lista, elenco, auflistung
+toutes les = todas las, todos los, tutte le, tutti i, alle
+
+# --- modèle, création
+modele = modelo, modello, modell
+modeles = modelos, modelli, modelle
+cree = crea, crear, creare, erstelle, erstellen, erzeuge, erzeugen
+construis = construye, construir, costruisci, costruire, baue, bauen
+genere = genera, generar, generare, generiere, generieren
+fais = haz, hacer, fai, mache, machen
+projet = proyecto, progetto, projekt
+
+# --- dessin, courbes
+dessine = dibuja, dibujar, disegna, disegnare, zeichne, zeichnen
+affiche = muestrame, mostrar, mostra, mostrami, mostrare, zeige, zeigen, anzeigen
+trace = traza, grafica, graficar, traccia, tracciare, plotte, plotten
+courbe = curva, curve, kurve, kurven
+diagramme = diagrama, diagramma
+courbe age-profondeur = curva edad-profundidad, curva de edad-profundidad, curva eta-profondita, alters-tiefen-modell, alter-tiefen-modell, alter-tiefen-kurve, tiefen-alters-modell
+profondeur = profundidad, profondita, tiefe
+
+# --- datation, méthodes
+datation = datacion, datazione, datierung
+datations = datierungen
+datations = dataciones, datazioni
+date = fecha, fechas, datum
+age = edad, eta, alter
+calibration = calibracion, calibrazione, kalibrier*, kalibration
+calibre = calibra, calibrar, calibrare, kalibriere, kalibrieren
+radiocarbone = radiocarbono, radiocarbonio, radiokarbon, radiokohlenstoff
+carbone 14 = carbono 14, carbonio 14, kohlenstoff 14
+archeomagnetisme = arqueomagnetismo, archeomagnetismo, archaomagnetismus, archaomagnetik
+paleomagnetisme = paleomagnetismo, palaomagnetismus, palaomagnetik
+inclinaison = inclinacion, inclinazione, inklination
+declinaison = declinacion, declinazione, deklination
+intensite = intensidad, intensita, intensitat
+luminescence = luminiscencia, luminescenza, lumineszenz
+thermoluminescence = termoluminiscencia, termoluminescenza, thermolumineszenz
+dendrochronologie = dendrocronologia
+monnaie = moneda, moneta, munze
+monnaies = monedas, monete, munzen
+typologie = tipologia
+donnees = datos, dati, daten
+
+# --- statistiques, résultats
+resultats = resultados, risultati, ergebnisse
+resultat = resultado, risultato, ergebnis
+intervalle = intervalo, intervallo, intervall
+intervalles = intervalos, intervalli
+niveau = nivel, livello
+probabilite = probabilidad, probabilita, wahrscheinlichkeit
+credibilite = credibilidad, credibilita, glaubwurdigkeit
+confiance = confianza, fiducia, konfidenz, vertrauen
+moyenne = media, mittelwert, durchschnitt
+mediane = mediana, median
+ecart-type = desviacion estandar, desviacion tipica, deviazione standard, standardabweichung
+densite = densidad, densita, dichte
+convergence = convergencia, convergenza, konvergenz*
+converge = convergio, convergente, konvergiert, konvergieren
+iterations = iteraciones, iterazioni, iterationen
+chaines = cadenas, catene, ketten
+recuit = recocido, ricottura
+aberrante = atipica, atipico, anomala, anomalo, ausreisser
+interprete = interpreta, interpretar, interpretare, interpretiere, interpretieren
+interpretation = interpretacion, interpretazione, deutung
+explique = explica, explicar, spiega, spiegare, erklare, erklaren
+pourquoi = por que, porque, perche, warum, wieso
+compare = compara, comparar, confronta, confrontare, vergleiche, vergleichen
+verifie = comprueba, verifica, verificar, verificare, prufe, prufen, uberprufe
+calcule = calcula, calcular, calcola, calcolare, berechne, berechnen
+aide = ayuda, aiuto, hilfe

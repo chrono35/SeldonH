@@ -35,6 +35,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QList>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QUrl>
@@ -154,6 +156,11 @@ QStringList parseModelList(const QByteArray& body);
 // top_provider.max_completion_tokens ; Mistral : max_context_length ; vLLM : max_model_len…). 0 = inconnu.
 struct ModelLimits { int context = 0; int maxOutput = 0; };
 QHash<QString, ModelLimits> parseModelLimits(const QByteArray& body);
+
+// Quota restant annoncé dans les en-têtes HTTP d'une réponse : x-ratelimit-remaining-tokens / -requests et
+// x-ratelimit-limit-* (OpenAI, Groq, DeepSeek, Together…), anthropic-ratelimit-tokens-remaining… -1 = absent.
+struct RateLimits { int tokensRemaining = -1, tokensLimit = -1, requestsRemaining = -1, requestsLimit = -1; };
+RateLimits parseRateLimits(const QList<QPair<QByteArray, QByteArray>>& headers);
 
 } // namespace remote
 } // namespace seldon

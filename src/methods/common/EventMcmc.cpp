@@ -268,6 +268,7 @@ Density wiggleDensity(const Density& calib, const Wiggle& w)
     if (w.type == Wiggle::None || !calib.valid()) return calib;
     const Calib c = wiggleCalib(Calib::from(calib), w);
     Density d;
+    d.step = c.step;
     for (size_t i = 0; i < c.v.size(); ++i) { d.t.push_back(c.tmin + double(i) * c.step); d.v.push_back(c.v[i]); }
     return d;
 }
@@ -1012,114 +1013,235 @@ RhatEss computeRhatAndEss(const std::vector<std::vector<double>>& chains)
 
 // ---------------------------------------------------------------- largeur de bande du noyau gaussien
 //
-// Sheather & Jones (1991), « solve-the-equation » : portage de bw.SJ(method = "ste") de R (stats/bandwidths.c).
-// Les dérivées de la densité (φ4, φ6) sont estimées à partir des distances entre paires d'échantillons, comptées
-// sur nb = 1000 classes (comptage exact des paires si n ≤ nb/2, sinon binné : O(nb²) au lieu de O(n²)).
-// Contrairement à la règle de Silverman (nrd0), qui suppose une loi proche de la normale et sur-lisse les
-// densités multimodales, SJ s'adapte à la forme : les modes séparés ne sont pas fusionnés.
+// Sheather & Jones (1991), « solve-the-equation » : portage de bw_SJ_ste() de ChronoModel (utilities/StdUtilities.cpp),
+// pour que SeldonH et ChronoModel lissent les densités avec le même h.
+// Même équation et mêmes constantes que bw.SJ(method = "ste") de R ; seule l'estimation des fonctionnelles ψ4, ψ6
+// diffère : convolution dans le domaine de Fourier (binning linéaire sur M ≥ 1024 points, correction sinc⁴) au lieu
+// des 1000 classes de distances entre paires de R. Plus proche de l'estimateur exact, et sans la dérive de R sur
+// les échantillons à longue queue (h jusqu'à ×40 trop petit avec nb = 1000).
+// Différence avec ChronoModel : FFT radix-2 locale au lieu de FFTW (M est une puissance de 2) ; résultats égaux à
+// l'arrondi près.
+// Repli (pas de racine) : règle de Silverman, exactement bw.nrd0 de R (IQR/1.34), comme bw_nrd0() de ChronoModel.
 namespace {
 
 constexpr double kSjPi = 3.14159265358979323846;
 
-struct PairCounts { double d = 0.0; std::vector<double> cnt; };
-
-PairCounts pairCounts(const std::vector<double>& x, int nb)
+// sd (n−1), algorithme de Welford/Knuth (std_unbiais_Knuth de ChronoModel)
+double sdKnuth(const std::vector<double>& x)
 {
-    PairCounts P;
-    const size_t n = x.size();
-    const auto [mn, mx] = std::minmax_element(x.begin(), x.end());
-    P.d = (*mx - *mn) * 1.01 / double(nb);
-    P.cnt.assign(size_t(nb), 0.0);
-    if (!(P.d > 0.0)) return P;
-    if (n > size_t(nb / 2)) {                                   // bw_pair_cnts(binned = TRUE) + bw_den_binned
-        std::vector<long long> xx(n);
-        long long lo = std::numeric_limits<long long>::max();
-        for (size_t i = 0; i < n; ++i) {
-            const double v = std::trunc(std::abs(x[i]) / P.d);
-            xx[i] = (long long)(x[i] < 0.0 ? -v : v);
-            lo = std::min(lo, xx[i]);
-        }
-        std::vector<double> w(size_t(nb), 0.0);
-        for (long long v : xx) { const long long k = v - lo; if (k >= 0 && k < nb) w[size_t(k)] += 1.0; }  // tabulate
-        for (int ii = 0; ii < nb; ++ii) {
-            const double wi = w[size_t(ii)];
-            if (wi == 0.0) continue;
-            P.cnt[0] += wi * (wi - 1.0);                           // pas de distance à soi-même
-            for (int jj = 0; jj < ii; ++jj) P.cnt[size_t(ii - jj)] += wi * w[size_t(jj)];
-        }
-        P.cnt[0] *= 0.5;                                            // paires d'une même classe comptées deux fois
-    } else {                                                        // bw_den : comptage exact des paires
-        for (size_t i = 1; i < n; ++i) {
-            const int ii = int(x[i] / P.d);
-            for (size_t j = 0; j < i; ++j) {
-                const int k = std::abs(ii - int(x[j] / P.d));
-                if (k < nb) P.cnt[size_t(k)] += 1.0;
+    double n = 0.0, mean = 0.0, var = 0.0;
+    for (double v : x) { n += 1.0; const double pm = mean; mean += (v - pm) / n; var += (v - pm) * (v - mean); }
+    return std::sqrt(var / (n - 1.0));
+}
+
+// Quantile de type 7 (R, IQR()) sur un échantillon TRIÉ — même forme que quantilesType() de ChronoModel
+double quantile7(const std::vector<double>& s, double p)
+{
+    const int n = int(s.size());
+    const double k = p * double(n - 1) + 1.0;
+    const int j = int(std::floor(k));
+    const double g = k - std::floor(k);
+    if (j <= 0) return s.front();
+    if (j < n) return (1.0 - g) * s[size_t(j - 1)] + g * s[size_t(j)];
+    return s.back();
+}
+
+// Échelle de bw.SJ : min(sd, IQR/1.349) (scale_factor de ChronoModel). s trié.
+double sjScale(const std::vector<double>& s)
+{
+    const double sd = sdKnuth(s);
+    const double iqr = (quantile7(s, 0.75) - quantile7(s, 0.25)) / 1.349;
+    return iqr > 0.0 ? std::min(sd, iqr) : sd;
+}
+
+// M = première puissance de 2 ≥ max(1024, n/100), plafonnée à 65536 (chooseFFtSize de ChronoModel)
+int sjFftSize(int n)
+{
+    int M = 1024;
+    while (M < n / 100 && M < 65536) M <<= 1;
+    return M;
+}
+
+// FFT complexe radix-2 en place, signe −1 (convention FFTW_FORWARD). a.size() puissance de 2.
+void fftRadix2(std::vector<double>& re, std::vector<double>& im)
+{
+    const size_t N = re.size();
+    for (size_t i = 1, j = 0; i < N; ++i) {                       // permutation bit-reverse
+        size_t bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
+    }
+    for (size_t len = 2; len <= N; len <<= 1) {
+        const double ang = -2.0 * kSjPi / double(len);
+        const size_t half = len / 2;
+        for (size_t i = 0; i < N; i += len) {
+            for (size_t k = 0; k < half; ++k) {
+                const double c = std::cos(ang * double(k)), sn = std::sin(ang * double(k));
+                const size_t a = i + k, b = a + half;
+                const double tr = re[b] * c - im[b] * sn, ti = re[b] * sn + im[b] * c;
+                re[b] = re[a] - tr; im[b] = im[a] - ti;
+                re[a] += tr;        im[a] += ti;
             }
         }
     }
-    return P;
 }
 
-double sjPhi4(const PairCounts& P, double n, double h)        // bw_phi4
+// Spectre binné de x, indépendant de h (Sn_spectrum de ChronoModel) : ω_k, w_k·ω_k^power, |X̂_k|²/sinc⁴(k/M)
+struct SjSpectrum { double n = 0.0, dOmega = 0.0; std::vector<double> omega, wpow, mod2; };
+
+SjSpectrum sjSpectrum(const std::vector<double>& x, int M, int power, double padding)
 {
-    constexpr double kDelMax = 1000.0;
+    SjSpectrum S;
+    S.n = double(x.size());
+    const auto [mnIt, mxIt] = std::minmax_element(x.begin(), x.end());
+    const double a = *mnIt - padding, b = *mxIt + padding;
+    const double delta = (b - a) / double(M);
+
+    std::vector<double> re(size_t(M), 0.0), im(size_t(M), 0.0);
+    for (double v : x) {                                          // binning linéaire
+        const double z = (v - a) / delta;
+        const int k = int(std::floor(z));
+        const double frac = z - double(k);
+        if (k < 0 || k >= M) continue;
+        if (k < M - 1) { re[size_t(k)] += 1.0 - frac; re[size_t(k + 1)] += frac; }
+        else re[size_t(k)] += 1.0;
+    }
+    fftRadix2(re, im);
+
+    const int K = M / 2 + 1;
+    S.dOmega = 2.0 * kSjPi / (b - a);
+    S.omega.resize(size_t(K)); S.wpow.resize(size_t(K)); S.mod2.resize(size_t(K));
+    for (int k = 0; k < K; ++k) {
+        const double omega = double(k) * S.dOmega;
+        double mod2 = re[size_t(k)] * re[size_t(k)] + im[size_t(k)] * im[size_t(k)];
+        if (k > 0) {
+            const double arg = double(k) / double(M);
+            const double sincv = std::sin(kSjPi * arg) / (kSjPi * arg);
+            mod2 /= sincv * sincv * sincv * sincv;
+        }
+        S.omega[size_t(k)] = omega;
+        S.wpow[size_t(k)]  = ((k == 0 || k == M / 2) ? 1.0 : 2.0) * std::pow(omega, power);
+        S.mod2[size_t(k)]  = mod2;
+    }
+    return S;
+}
+
+// (1/n²) Σ_ij φ_h^(power)(x_i − x_j) au signe près : S4 = +sjSum, S6 = −sjSum
+double sjSum(const SjSpectrum& S, double h)
+{
     double sum = 0.0;
-    for (size_t i = 0; i < P.cnt.size(); ++i) {
-        double del = double(i) * P.d / h; del *= del;
-        if (del >= kDelMax) break;
-        sum += std::exp(-del / 2.0) * (del * del - 6.0 * del + 3.0) * P.cnt[i];
+    for (size_t k = 0; k < S.omega.size(); ++k) {
+        const double omega = S.omega[k];
+        sum += S.wpow[k] * std::exp(-0.5 * omega * omega * h * h) * S.mod2[k];
     }
-    sum = 2.0 * sum + n * 3.0;
-    return sum / (n * (n - 1.0) * std::pow(h, 5.0) * std::sqrt(2.0 * kSjPi));
+    return sum * S.dOmega / (2.0 * kSjPi * S.n * S.n);
 }
 
-double sjPhi6(const PairCounts& P, double n, double h)        // bw_phi6
+// Bissection (bisect de ChronoModel)
+template <typename F>
+double sjBisect(F f, double a, double b, double tol, int maxIter)
 {
-    constexpr double kDelMax = 1000.0;
-    double sum = 0.0;
-    for (size_t i = 0; i < P.cnt.size(); ++i) {
-        double del = double(i) * P.d / h; del *= del;
-        if (del >= kDelMax) break;
-        sum += std::exp(-del / 2.0) * (del * del * del - 15.0 * del * del + 45.0 * del - 15.0) * P.cnt[i];
+    double fa = f(a);
+    const double fb = f(b);
+    if (std::isnan(fa) || std::isnan(fb) || fa * fb > 0.0) return std::numeric_limits<double>::quiet_NaN();
+    for (int i = 0; i < maxIter; ++i) {
+        const double m = 0.5 * (a + b), fm = f(m);
+        if (std::isnan(fm)) { if (fa > 0.0) b = m; else a = m; continue; }
+        if (std::abs(b - a) < tol || std::abs(fm) < tol * 1e-3) return m;
+        if (fa * fm < 0.0) b = m; else { a = m; fa = fm; }
     }
-    sum = 2.0 * sum - 15.0 * n;
-    return sum / (n * (n - 1.0) * std::pow(h, 7.0) * std::sqrt(2.0 * kSjPi));
+    return 0.5 * (a + b);
 }
 
-// x trié, n ≥ 2. Renvoie 0 si l'équation n'a pas de solution (échantillon trop épars) : l'appelant se rabat sur nrd0.
-double bandwidthSJ(const std::vector<double>& x, double sd, double iqr)
+// s trié, n ≥ 2. Renvoie 0 si pas de solution : l'appelant se rabat sur nrd0 (comme bw_SJ_ste).
+double bandwidthSJ(const std::vector<double>& s)
 {
-    const double n = double(x.size());
-    const double scale = std::min(sd, iqr / 1.349);
-    if (!(scale > 0.0)) return 0.0;
-    const PairCounts P = pairCounts(x, 1000);
-    if (!(P.d > 0.0)) return 0.0;
-    const double a = 1.24 * scale * std::pow(n, -1.0 / 7.0);
-    const double b = 1.23 * scale * std::pow(n, -1.0 / 9.0);
-    const double c1 = 1.0 / (2.0 * std::sqrt(kSjPi) * n);
-    const double TD = -sjPhi6(P, n, b);
-    if (!std::isfinite(TD) || TD <= 0.0) return 0.0;
-    const double alph2 = 1.357 * std::pow(sjPhi4(P, n, a) / TD, 1.0 / 7.0);
-    if (!std::isfinite(alph2)) return 0.0;
-    auto fSD = [&](double h) { return std::pow(c1 / sjPhi4(P, n, alph2 * std::pow(h, 5.0 / 7.0)), 0.2) - h; };
+    constexpr double tol = 1e-6;
+    constexpr int maxIter = 100;
+    const double nd = double(s.size());
+    const double sigma = sjScale(s);
+    if (!(sigma > 0.0) || !std::isfinite(sigma)) return 0.0;
 
-    const double hmax = 1.144 * scale * std::pow(n, -0.2);
-    double lower = 0.1 * hmax, upper = hmax;
-    double fl = fSD(lower), fu = fSD(upper);
-    for (int itry = 1; std::isfinite(fl) && std::isfinite(fu) && fl * fu > 0.0; ++itry) {
-        if (itry > 99) return 0.0;
-        if (itry % 2) { upper *= 1.2; fu = fSD(upper); } else { lower /= 1.2; fl = fSD(lower); }
+    // Normalisation : SJ est invariant d'échelle, h(x) = σ·h(x/σ)
+    std::vector<double> xn(s.size());
+    for (size_t i = 0; i < s.size(); ++i) xn[i] = s[i] / sigma;
+    const double sigmaN = sjScale(xn);
+    const double hRefN = 0.9 * sigmaN * std::pow(nd, -0.2);     // référence pour choisir parmi plusieurs racines
+
+    const int M = sjFftSize(int(s.size()));
+    const double g1 = 1.24 * sigmaN * std::pow(nd, -1.0 / 7.0);
+    const double g2 = 1.23 * sigmaN * std::pow(nd, -1.0 / 9.0);
+
+    const SjSpectrum spec4 = sjSpectrum(xn, M, 4, 6.0);
+    const double t44 = sjSum(spec4, g1);
+    const double t24 = -sjSum(sjSpectrum(xn, M, 6, 10.0), g2);
+    if (std::abs(t44) < 1e-15 || std::abs(t24) < 1e-15) return 0.0;
+
+    const double alpha2 = 1.357 * std::pow(t44 / (-t24), 1.0 / 7.0);
+    const double c1 = (1.0 / (2.0 * std::sqrt(kSjPi))) / nd;
+    auto eq = [&](double h) {
+        const double s4 = sjSum(spec4, alpha2 * std::pow(h, 5.0 / 7.0));
+        if (s4 <= 0.0) return std::numeric_limits<double>::quiet_NaN();
+        return h - std::pow(c1 / s4, 0.2);
+    };
+
+    // Balayage log de [0.1·hmax, hmax], élargi alternativement ×1.2 / ÷1.2 comme R
+    const double hmax = 1.144 * sigmaN * std::pow(nd, -0.2);
+    double lo = 0.1 * hmax, hi = hmax;
+    const double loFloor = 1e-20 * hmax, hiCeil = 50.0 * hmax;
+    constexpr int nScan = 50, maxExpand = 50;
+    std::vector<std::pair<double, double>> brackets;
+    for (int itry = 0;; ++itry) {
+        const double llo = std::log(lo), lhi = std::log(hi);
+        std::vector<double> grid(nScan + 1), ev(nScan + 1);
+        for (int k = 0; k <= nScan; ++k) grid[size_t(k)] = std::exp(llo + k * (lhi - llo) / nScan);
+        for (int k = 0; k <= nScan; ++k) ev[size_t(k)] = eq(grid[size_t(k)]);
+        brackets.clear();
+        for (int k = 0; k < nScan; ++k) {
+            if (std::isnan(ev[size_t(k)]) || std::isnan(ev[size_t(k + 1)])) continue;
+            if (ev[size_t(k)] * ev[size_t(k + 1)] < 0.0) brackets.push_back({grid[size_t(k)], grid[size_t(k + 1)]});
+        }
+        if (!brackets.empty() || itry >= maxExpand) break;
+        if (itry % 2 == 0) hi = std::min(hi * 1.2, hiCeil); else lo = std::max(lo / 1.2, loFloor);
+        if (lo <= loFloor && hi >= hiCeil) break;
     }
-    if (!std::isfinite(fl) || !std::isfinite(fu)) return 0.0;
-    // Bissection (R : uniroot avec tol = 0.1·lower ; ici plus serré, la fonction est peu coûteuse)
-    const double tol = 1e-6 * hmax;
-    for (int it = 0; it < 200 && upper - lower > tol; ++it) {
-        const double m = 0.5 * (lower + upper), fm = fSD(m);
-        if (!std::isfinite(fm)) return 0.0;
-        if ((fm < 0.0) == (fl < 0.0)) { lower = m; fl = fm; } else { upper = m; }
+    if (brackets.empty()) return 0.0;
+
+    // Raffinement de chaque intervalle, bissection, racine la plus proche de hRefN (échelle log)
+    std::vector<std::pair<double, double>> fine;
+    for (const auto& [a, b] : brackets) {
+        constexpr int nFine = 10;
+        double fg[nFine + 1], fe[nFine + 1];
+        const double la = std::log(a), lb = std::log(b);
+        for (int k = 0; k <= nFine; ++k) fg[k] = std::exp(la + k * (lb - la) / nFine);
+        for (int k = 0; k <= nFine; ++k) fe[k] = eq(fg[k]);
+        for (int k = 0; k < nFine; ++k) {
+            if (std::isnan(fe[k]) || std::isnan(fe[k + 1])) continue;
+            if (fe[k] * fe[k + 1] < 0.0) fine.push_back({fg[k], fg[k + 1]});
+        }
     }
-    const double h = 0.5 * (lower + upper);
+    double best = std::numeric_limits<double>::quiet_NaN(), bestDist = std::numeric_limits<double>::max();
+    for (const auto& [a, b] : fine) {
+        const double root = sjBisect(eq, a, b, tol, maxIter);
+        if (std::isnan(root) || root <= 0.0) continue;
+        const double dist = std::abs(std::log(root / hRefN));
+        if (dist < bestDist) { bestDist = dist; best = root; }
+    }
+    if (std::isnan(best)) return 0.0;
+    const double h = sigma * best;                                 // dénormalisation
     return std::isfinite(h) && h > 0.0 ? h : 0.0;
+}
+
+// Règle de Silverman, exactement bw.nrd0 de R (bw_nrd0 de ChronoModel). `s` trié, `first` = premier tirage.
+double bandwidthNrd0(const std::vector<double>& s, double first)
+{
+    const double hi = sdKnuth(s);
+    double lo = std::min(hi, (quantile7(s, 0.75) - quantile7(s, 0.25)) / 1.34);
+    if (!(lo > 0.0)) lo = hi;
+    if (!(lo > 0.0)) lo = std::abs(first);
+    if (!(lo > 0.0)) lo = 1.0;
+    return 0.9 * lo * std::pow(double(s.size()), -0.2);
 }
 
 } // namespace
@@ -1131,19 +1253,11 @@ double kernelBandwidth(const std::vector<double>& samples, Bandwidth rule, Bandw
     if (n < 2) return 0.0;
     std::vector<double> s = samples;
     std::sort(s.begin(), s.end());
-    const double mean = std::accumulate(s.begin(), s.end(), 0.0) / double(n);
-    double ss = 0.0;
-    for (double x : s) ss += (x - mean) * (x - mean);
-    const double sd = std::sqrt(ss / double(n - 1));
-    auto quant = [&](double p) { const double i = p * double(n - 1); const size_t a = size_t(i); const size_t b = std::min(n - 1, a + 1); return s[a] + (i - double(a)) * (s[b] - s[a]); };
-    const double iqr = quant(0.75) - quant(0.25);
     if (rule == Bandwidth::SheatherJones) {
-        const double h = bandwidthSJ(s, sd, iqr);
+        const double h = bandwidthSJ(s);
         if (h > 0.0) { if (used) *used = Bandwidth::SheatherJones; return h; }
     }
-    double h = 0.9 * std::min(sd, iqr / 1.34) * std::pow(double(n), -0.2);          // bw.nrd0 de R (Silverman)
-    if (!(h > 0.0)) h = sd > 0.0 ? 0.9 * sd * std::pow(double(n), -0.2) : 1.0;
-    return h;
+    return bandwidthNrd0(s, samples.front());
 }
 
 Density kernelDensity(const std::vector<double>& samples, double lo, double hi, Bandwidth rule, double* bandwidth, Bandwidth* used)
@@ -1273,9 +1387,21 @@ EventMcmcResult runEventMcmc(const std::vector<EventDateInput>& dates, const Mcm
     if (!R.theta.valid()) { R.error = "densité a posteriori de θ vide"; return R; }
     for (size_t k = 0; k < n; ++k) {
         double hk = 0.0;
-        R.ti.push_back(kernelDensity(allTi[k], -kInf, kInf, Bandwidth::SheatherJones, &hk));
+        Bandwidth rk = Bandwidth::SheatherJones;
+        R.ti.push_back(kernelDensity(allTi[k], -kInf, kInf, Bandwidth::SheatherJones, &hk, &rk));
         R.tiBandwidth.push_back(hk);
-        R.yi.push_back(dates[k].wiggle.type == Wiggle::None ? R.ti.back() : kernelDensity(allYi[k], -kInf, kInf));
+        R.tiBandwidthSJ.push_back(rk == Bandwidth::SheatherJones);
+        if (dates[k].wiggle.type == Wiggle::None) {
+            R.yi.push_back(R.ti.back());
+            R.yiBandwidth.push_back(hk);
+            R.yiBandwidthSJ.push_back(rk == Bandwidth::SheatherJones);
+        } else {
+            double hy = 0.0;
+            Bandwidth ry = Bandwidth::SheatherJones;
+            R.yi.push_back(kernelDensity(allYi[k], -kInf, kInf, Bandwidth::SheatherJones, &hy, &ry));
+            R.yiBandwidth.push_back(hy);
+            R.yiBandwidthSJ.push_back(ry == Bandwidth::SheatherJones);
+        }
         std::vector<double> sg = allSigma[k];
         std::nth_element(sg.begin(), sg.begin() + long(sg.size() / 2), sg.end());
         R.sigmaMedian.push_back(sg.empty() ? kNaN : sg[sg.size() / 2]);
