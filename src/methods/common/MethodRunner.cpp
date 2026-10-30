@@ -281,6 +281,7 @@ struct EventRun {
     QString name;                    // nom donné à l'événement (vide sinon) : titre du graphique
     bool curves = false;             // au moins une datation utilise une courbe de référence
     double level = MethodRunner::kDefaultLevel;
+    Density theta;                   // θ a posteriori (comparaison de deux événements : runOrder)
 };
 
 EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
@@ -391,6 +392,7 @@ EventRun runEvent(const QJsonObject& rq, DateFormat fmt)
     // 4. θ a posteriori
     const std::vector<Interval> t95 = hpdIntervals(R.theta, 95.0), t68 = hpdIntervals(R.theta, 68.0);
     const DensityStats ts = densityStats(R.theta);
+    E.theta = R.theta;
     E.html += QStringLiteral("<p><b>θ a posteriori</b> (date de l'événement)</p>");
     E.prompt += QStringLiteral("Date de l'événement θ (densité a posteriori) :\n");
     appendSummary(E.html, E.prompt, R.theta, t95, t68, ts, E.level, fmt);
@@ -603,6 +605,7 @@ struct CombineRun {
     QString name;                    // nom donné à la combinaison (vide sinon) : titre du graphique
     bool curves = false;
     double level = MethodRunner::kDefaultLevel;
+    Density combined;                // densité combinée (comparaison : runOrder)
 };
 
 CombineRun runCombine(const QJsonObject& rq, DateFormat fmt)
@@ -636,7 +639,7 @@ CombineRun runCombine(const QJsonObject& rq, DateFormat fmt)
     for (int k = 0; k < dates.size(); ++k) {
         QJsonObject d = MethodRunner::normalizeRequest(dates[k].toObject());
         const QString method = d.value("method").toString().toLower();
-        if (method.isEmpty() || method == "event" || method == "combine" || method == "traces" || method == "inverse"
+        if (method.isEmpty() || method == "event" || method == "combine" || method == "traces" || method == "inverse" || method == "order"
             || method == "density_file")
             return fail(QStringLiteral("la datation %1 n'a pas de « method » de datation valide (c14, f14c, tl, gauss, unif, am)").arg(k + 1));
         d["method"] = method;
@@ -761,6 +764,7 @@ CombineRun runCombine(const QJsonObject& rq, DateFormat fmt)
         if (!colors[k].isEmpty()) s["color"] = colors[k];
         C.series.append(s);
     }
+    C.combined = comb;
     C.ok = true;
     return C;
 }
@@ -1221,6 +1225,257 @@ InverseRun runInverse(const QJsonObject& rq, DateFormat fmt)
     return V;
 }
 
+// ------------------------------------------------------------------ ordre de deux datations (antéro-postérité)
+
+// Densité d'une des deux datations comparées : datation seule (avec décalage et période d'étude), combinaison ou
+// événement (θ a posteriori). `html` / `prompt` : description courte (datation seule) ou fiche complète (événement,
+// combinaison) ; `error` non vide si le calcul est impossible.
+struct OrderItem {
+    Density d;
+    QString label, html, prompt, error;
+    bool curves = false;
+};
+
+OrderItem orderItem(const QJsonObject& in, const QJsonObject& parent, const QString& fallback, DateFormat fmt)
+{
+    OrderItem I;
+    const MethodRegistry& reg = MethodRegistry::instance();
+    QJsonObject d = MethodRunner::normalizeRequest(in);
+    for (const char* k : { "tmin", "tmax" })                 // période d'étude commune, si la datation n'en a pas
+        if (!d.contains(k) && parent.contains(k)) d[k] = parent.value(k);
+    d.remove("level");
+    const QString m = d.value("method").toString().toLower();
+    if (m == QLatin1String("event")) {
+        if (d.value("name").toString().trimmed().isEmpty()) d["name"] = fallback;
+        const EventRun E = runEvent(d, fmt);
+        I.html = E.html; I.prompt = E.prompt; I.curves = E.curves;
+        I.label = d.value("name").toString().trimmed();
+        if (!E.ok || !E.theta.valid()) I.error = QStringLiteral("l'événement « %1 » n'a pas pu être calculé").arg(I.label);
+        else I.d = E.theta;
+        return I;
+    }
+    if (m == QLatin1String("combine")) {
+        if (d.value("name").toString().trimmed().isEmpty()) d["name"] = fallback;
+        const CombineRun C = runCombine(d, fmt);
+        I.html = C.html; I.prompt = C.prompt; I.curves = C.curves;
+        I.label = d.value("name").toString().trimmed();
+        if (!C.ok || !C.combined.valid()) I.error = QStringLiteral("la combinaison « %1 » n'a pas pu être calculée").arg(I.label);
+        else I.d = C.combined;
+        return I;
+    }
+    if (m.isEmpty() || !reg.byId(m)) {
+        I.label = fallback;
+        I.error = QStringLiteral("« %1 » n'a pas de « method » de datation valide (c14, f14c, tl, gauss, unif, am, event ou combine)").arg(fallback);
+        return I;
+    }
+    d["method"] = m;
+    if (m == QLatin1String("am")) { d["process"] = d.value("process").toString("I").toUpper(); if (!d.contains("integration_steps")) d["integration_steps"] = 500; }
+    if (d.contains("curve")) d["curve"] = d.value("curve").toString().toLower();
+    if (m == QLatin1String("c14") && d.contains("delta_r")) d["has_delta_r"] = true;
+    const QString desc = reg.describe(d);
+    const QString name = d.value("name").toString().trimmed();
+    I.label = name.isEmpty() ? fallback : name;
+    MethodResult r = reg.compute(d);
+    if (!r.ok) { I.error = QStringLiteral("%1 : %2").arg(I.label, r.error); return I; }
+    Wiggle w;
+    QString werr;
+    if (!wiggleFromJson(d.value("wiggle"), w, werr)) { I.error = QStringLiteral("%1 : %2").arg(I.label, werr); return I; }
+    QString head = QStringLiteral("%1 — %2").arg(I.label, desc);
+    if (w.type != Wiggle::None) { r.density = wiggleDensity(r.density, w); head += QStringLiteral(" — avec %1 (densité de t + δ)").arg(wiggleText(w)); }
+    QString note;
+    double kept = 1.0;
+    I.d = restrictToPeriod(r.density, d, fmt, note, kept);
+    if (!I.d.valid()) { I.error = QStringLiteral("%1 : aucune probabilité sur la %2").arg(I.label, note); return I; }
+    if (!note.isEmpty()) head += QStringLiteral(" — %1").arg(note);
+    if (const QStringList cl = curveLabels(reg.referenceCurves(d)); !cl.isEmpty()) {
+        head += QStringLiteral(" (courbe : %1)").arg(cl.join(QStringLiteral(" ; ")));
+        I.curves = true;
+    }
+    const dateformat::PrecisionScope precision(densityStats(I.d).sd);
+    const QString hpd = intervalsText(hpdIntervals(I.d, 95.0), fmt);
+    I.html = QStringLiteral("<p><b>%1</b><br><small>HPD 95 % : %2</small></p>")
+                 .arg(head.toHtmlEscaped(), hpd.toHtmlEscaped().replace('\n', QStringLiteral(" ; ")));
+    I.prompt = QStringLiteral("%1. HPD à 95 % : %2.\n").arg(head, QString(hpd).replace('\n', QStringLiteral(" ; ")));
+    for (const QString& wr : r.warnings) {
+        I.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(wr.toHtmlEscaped());
+        I.prompt += QStringLiteral("Avertissement : %1.\n").arg(wr);
+    }
+    return I;
+}
+
+// Valeur d'une densité en x (interpolation linéaire, 0 hors du domaine).
+double densityAt(const Density& d, double x)
+{
+    if (!d.valid() || x < d.t.front() || x > d.t.back()) return 0.0;
+    const double h = d.t[1] - d.t[0];
+    const double u = (x - d.t.front()) / h;
+    const size_t i = std::min(d.t.size() - 2, size_t(std::floor(u)));
+    const double f = u - double(i);
+    return d.v[i] * (1.0 - f) + d.v[i + 1] * f;
+}
+
+} // namespace
+
+// D = B − A pour deux dates indépendantes : f_D(x) = ∫ f_A(a) f_B(a + x) da (convolution discrète sur une grille
+// commune au plus petit des deux pas, élargi si le calcul dépasse ~4·10⁷ produits).
+Density differenceDensity(const Density& A, const Density& B)
+{
+    Density D;
+    if (!A.valid() || !B.valid()) return D;
+    double h = std::min(A.t[1] - A.t[0], B.t[1] - B.t[0]);
+    if (!(h > 0.0)) h = 1.0;
+    auto count = [&](const Density& X) { return std::floor((X.t.back() - X.t.front()) / h) + 1.0; };
+    while (count(A) * count(B) > 4e7) h *= 2.0;
+    auto grid = [&](const Density& X) {
+        std::vector<double> g(size_t(count(X)));
+        for (size_t i = 0; i < g.size(); ++i) g[i] = densityAt(X, X.t.front() + double(i) * h);
+        return g;
+    };
+    const std::vector<double> ga = grid(A), gb = grid(B);
+    const size_t na = ga.size(), nb = gb.size();
+    std::vector<double> f(na + nb - 1, 0.0);
+    for (size_t i = 0; i < na; ++i) {
+        if (ga[i] == 0.0) continue;
+        for (size_t j = 0; j < nb; ++j) f[j + na - 1 - i] += ga[i] * gb[j];
+    }
+    const double x0 = (B.t.front() - A.t.front()) - double(na - 1) * h;
+    // Queues nulles retirées (marge de 2 pas)
+    const double mx = *std::max_element(f.begin(), f.end());
+    if (!(mx > 0.0)) return D;
+    size_t k0 = 0, k1 = f.size() - 1;
+    while (k0 < k1 && f[k0] < mx * 1e-12) ++k0;
+    while (k1 > k0 && f[k1] < mx * 1e-12) --k1;
+    k0 = k0 >= 2 ? k0 - 2 : 0;
+    k1 = std::min(f.size() - 1, k1 + 2);
+    for (size_t k = k0; k <= k1; ++k) { D.t.push_back(x0 + double(k) * h); D.v.push_back(f[k]); }
+    D.step = h;
+    if (D.t.size() < 2) { D.t.push_back(D.t.back() + h); D.v.push_back(0.0); }
+    const double area = densityArea(D);
+    if (area > 0.0) for (double& y : D.v) y /= area;
+    return D;
+}
+
+double probabilityBefore(const Density& A, const Density& B)
+{
+    const Density D = differenceDensity(A, B);
+    if (!D.valid()) return std::nan("");
+    return std::clamp(1.0 - densityCdf(D, 0.0), 0.0, 1.0);
+}
+
+namespace {
+
+struct OrderRun {
+    bool ok = false;
+    QString html, prompt;
+    QJsonArray series;
+    QJsonObject gapPlot;             // écart B − A : graphique à part (axe en années)
+    QString name;
+    bool curves = false;
+    double level = MethodRunner::kDefaultLevel;
+};
+
+// « 97,3 % », « > 99,9 % », « < 0,1 % »
+QString percentText(double p)
+{
+    if (p > 0.9995) return QStringLiteral("> 99,9 %");
+    if (p < 0.0005) return QStringLiteral("< 0,1 %");
+    return text::num(100.0 * p, 1) + QStringLiteral(" %");
+}
+
+OrderRun runOrder(const QJsonObject& rq, DateFormat fmt)
+{
+    OrderRun O;
+    QJsonValue va = rq.value("a"), vb = rq.value("b");
+    if ((!va.isObject() || !vb.isObject()) && rq.value("dates").isArray() && rq.value("dates").toArray().size() == 2) {
+        va = rq.value("dates").toArray().at(0);
+        vb = rq.value("dates").toArray().at(1);
+    }
+    QString levelWarning;
+    O.level = readLevel(rq, levelWarning);
+    auto fail = [&](const QString& why) {
+        O.html += QStringLiteral("<p><b>Ordre de deux datations</b></p><p><i>Calcul impossible : %1.</i></p>").arg(why.toHtmlEscaped());
+        O.prompt += QStringLiteral("\nOrdre de deux datations — calcul impossible : %1.\n").arg(why);
+        return O;
+    };
+    if (!va.isObject() || !vb.isObject())
+        return fail(QStringLiteral("il faut deux datations, « a » et « b » (objets avec « method » et leurs valeurs)"));
+    const OrderItem A = orderItem(va.toObject(), rq, QStringLiteral("A"), fmt);
+    const OrderItem B = orderItem(vb.toObject(), rq, QStringLiteral("B"), fmt);
+    O.curves = A.curves || B.curves;
+    const QString an = A.label, bn = B.label == A.label ? B.label + QStringLiteral(" (2)") : B.label;
+    O.name = rq.value("name").toString().trimmed().isEmpty() ? QStringLiteral("%1 / %2").arg(an, bn) : rq.value("name").toString().trimmed();
+    const QString head = QStringLiteral("Ordre de « %1 » et « %2 » (datations indépendantes)").arg(an, bn);
+    O.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
+    O.prompt += QStringLiteral("\n%1\n").arg(head);
+    O.html += A.html + B.html;
+    O.prompt += A.prompt + B.prompt;
+    if (!A.error.isEmpty()) return fail(A.error);
+    if (!B.error.isEmpty()) return fail(B.error);
+
+    const Density D = differenceDensity(A.d, B.d);
+    if (!D.valid()) return fail(QStringLiteral("écart B − A impossible à calculer"));
+    const double pAB = std::clamp(1.0 - densityCdf(D, 0.0), 0.0, 1.0), pBA = 1.0 - pAB;
+    const DensityStats st = densityStats(D);
+    const dateformat::PrecisionScope precision(st.sd);
+
+    QString rows, promptHpd;
+    rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td><b>%3</b></td></tr>")
+                .arg(an.toHtmlEscaped(), bn.toHtmlEscaped(), percentText(pAB));
+    rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td><b>%3</b></td></tr>")
+                .arg(bn.toHtmlEscaped(), an.toHtmlEscaped(), percentText(pBA));
+    for (double l : displayLevels(O.level)) {
+        const QString t = durationIntervalsText(hpdIntervals(D, l), fmt), lt = levelText(l);
+        rows += QStringLiteral("<tr><td valign='top'>Écart « %1 » − « %2 », HPD %3 %</td><td>%4</td></tr>")
+                    .arg(bn.toHtmlEscaped(), an.toHtmlEscaped(), lt, t.toHtmlEscaped().replace('\n', QStringLiteral("<br>")));
+        promptHpd += QStringLiteral("Écart « %1 » − « %2 » (années), intervalles HPD à %3 % :\n- %4\n")
+                         .arg(bn, an, lt, QString(t).replace("\n", "\n- "));
+    }
+    rows += QStringLiteral("<tr><td>Écart : médiane ; moyenne ± écart-type</td><td>%1 ; %2 ± %3</td></tr>")
+                .arg(dateformat::spread(st.median, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt));
+    O.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+    O.html += QStringLiteral("<p><small>Calcul exact sur les deux densités (convolution, pas %1) en les supposant <b>indépendantes</b> : "
+                             "aucune contrainte stratigraphique ni phase. Un écart positif signifie « %2 » plus récent que « %3 ». "
+                             "Dans un modèle ChronoModel, l'ordre se lit sur les traces exportées (calcul tirage par tirage).</small></p>")
+                  .arg(dateformat::spread(D.step, fmt).toHtmlEscaped(), bn.toHtmlEscaped(), an.toHtmlEscaped());
+    O.prompt += QStringLiteral("P(« %1 » antérieur à « %2 ») = %3 ; P(« %2 » antérieur à « %1 ») = %4.\n")
+                    .arg(an, bn, percentText(pAB), percentText(pBA));
+    O.prompt += promptHpd;
+    O.prompt += QStringLiteral("Écart « %1 » − « %2 » : médiane %3, moyenne %4, écart-type %5 (écart positif = « %1 » plus récent).\n")
+                    .arg(bn, an, dateformat::spread(st.median, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt));
+    O.prompt += QStringLiteral("Méthode : calcul exact sur les densités calibrées, les deux datations étant supposées indépendantes "
+                               "(P(A antérieur à B) = ∫ f_A(a) · P(B > a) da ; écart = densité de B − A). Consigne : donne les deux "
+                               "probabilités telles quelles. C'est une probabilité a posteriori, pas un test de signification ni une "
+                               "p-value : ne fixe pas de seuil à la place de l'utilisateur. Explique que des intervalles HPD qui se "
+                               "recouvrent n'empêchent pas une probabilité nette, et que des intervalles séparés la rendent proche de "
+                               "100 %. Rappelle que l'indépendance suppose qu'aucune autre information ne relie les deux datations : si "
+                               "une stratigraphie, une phase ou d'autres dates les relient, il faut un modèle ChronoModel (avec ou sans "
+                               "la contrainte) et le calcul sur ses traces exportées ; une contrainte imposée donne 100 % par "
+                               "construction. Une calibration multimodale (plateau de la courbe) peut rendre l'ordre incertain même "
+                               "avec des mesures précises.\n");
+    if (!levelWarning.isEmpty()) {
+        O.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(levelWarning.toHtmlEscaped());
+        O.prompt += QStringLiteral("Avertissement : %1.\n").arg(levelWarning);
+    }
+
+    // Figures : les deux densités (une par ligne) ; l'écart B − A à part.
+    QJsonObject sa = plotSeries(an, A.d, fmt), sb = plotSeries(bn, B.d, fmt);
+    if (const QString c = MethodRunner::colorOf(va.toObject()); !c.isEmpty()) sa["color"] = c;
+    if (const QString c = MethodRunner::colorOf(vb.toObject()); !c.isEmpty()) sb["color"] = c;
+    O.series.append(sa);
+    O.series.append(sb);
+    QJsonArray xs, ys;
+    const size_t step = std::max<size_t>(1, D.t.size() / 400);
+    for (size_t k = 0; k < D.t.size(); k += step) { xs.append(D.t[k] / dateformat::unitYears(fmt)); ys.append(D.v[k]); }
+    O.gapPlot = QJsonObject{ { "title", QStringLiteral("Écart %1 − %2").arg(bn, an) },
+                             { "xlabel", fmt == DateFormat::Ka ? QStringLiteral("Écart (ka)") : fmt == DateFormat::Ma ? QStringLiteral("Écart (Ma)")
+                                                                                                  : QStringLiteral("Écart (années)") },
+                             { "ylabel", QStringLiteral("Densité de probabilité") }, { "fill", true }, { "yaxis", false },
+                             { "hpd", O.level }, { "layout", QStringLiteral("rows") },
+                             { "series", QJsonArray{ QJsonObject{ { "name", QStringLiteral("%1 − %2").arg(bn, an) }, { "x", xs }, { "y", ys } } } } };
+    O.ok = true;
+    return O;
+}
+
 } // namespace
 
 void MethodRunner::setProgressHandler(std::function<bool(const QString&, double)> handler)
@@ -1241,6 +1496,23 @@ bool MethodRunner::asksCombine(const QString& question)
     static const QRegularExpression re(QStringLiteral(
         R"(\b(combine|combiner|combinaisons?|combinees?|combines|combined|combining|combination)\b)"));
     return !asksEvent(question) && re.match(text::fold(question)).hasMatch();
+}
+
+bool MethodRunner::asksOrder(const QString& question)
+{
+    // « avant » seul ne suffit pas (« 500 avant J.-C. ») : il faut une tournure de comparaison.
+    static const QRegularExpression re(QStringLiteral(
+        R"(\b(?:avant|apres) l['’ ]\s*autre\b)"
+        R"(|\b(?:laquelle|lequel|quelle|quel)\b[^?.!;]{0,60}\b(?:plus ancien(?:ne)?s?|plus recent(?:e)?s?|plus vieu(?:x|ille)|plus jeune|anterieure?s?|posterieure?s?|en premier|d['’ ]\s*abord|precede\w*)\b)"
+        R"(|\b(?:est|sont|serait|seraient)[- ](?:(?:elle|il|elles|ils)s?\s+)?(?:bien\s+|vraiment\s+)?(?:anterieure?s?|posterieure?s?|plus ancien(?:ne)?s?|plus recent(?:e)?s?)\b)"
+        R"(|\b(?:anteriorite|posteriorite|antero-?posteriorite)\b)"
+        R"(|\bordre\s+(?:chronologique\s+|relatif\s+)?(?:des|de ces|de mes|entre|de deux|de la|du)\b)"
+        R"(|\bplus (?:ancien(?:ne)?s?|recent(?:e)?s?|vieu(?:x|ille)|jeune) que\b)"
+        R"(|\bprobabilite (?:que|qu['’ ])[^?.!;]{0,60}\b(?:avant|apres|anterieure?|posterieure?|precede|plus ancien\w*|plus recent\w*)\b)"
+        R"(|\bwhich (?:one|date|sample|event)?\s*(?:is|was|came)\s+(?:older|earlier|younger|later|first)\b)"
+        R"(|\b(?:older|earlier|younger|later) than\b|\bbefore or after\b|\b(?:chronological|relative) order\b)"
+        R"(|\bprobability (?:that )?[^?.!;]{0,60}\b(?:before|after|older|earlier|younger|later|precedes)\b)"));
+    return re.match(text::fold(question)).hasMatch();
 }
 
 bool MethodRunner::asksTraces(const QString& question)
@@ -1445,6 +1717,19 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
                 for (const QJsonValue& s : T.series) series.append(s);
                 if (!T.series.isEmpty() && !plotNames.contains(T.name)) plotNames << T.name;
                 if (!T.durationPlot.isEmpty()) out.extraPlots << T.durationPlot;
+            }
+            continue;
+        }
+        if (rq.value("method").toString() == "order") {
+            const OrderRun O = runOrder(rq, fmt);
+            html += O.html;
+            prompt += O.prompt;
+            if (O.ok) {
+                anyCurve = anyCurve || O.curves;
+                levelsUsed << O.level;
+                for (const QJsonValue& s : O.series) series.append(s);
+                if (!plotNames.contains(O.name)) plotNames << O.name;
+                out.extraPlots << O.gapPlot;
             }
             continue;
         }
@@ -2015,6 +2300,13 @@ QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question)
         }
     }
     const double level = requestedLevel(question);
+    // « Laquelle de ces deux dates est la plus ancienne ? » : une seule demande « order » (P(A antérieure à B), écart).
+    if (rq.size() == 2 && asksOrder(question) && !asksEvent(question) && !asksCombine(question)) {
+        QJsonObject a = rq[0], b = rq[1];
+        a.remove("level"); b.remove("level");
+        QJsonObject od{ { "method", "order" }, { "a", a }, { "b", b } };
+        rq = { od };
+    }
     // « Combine ces datations » : une seule demande « combine » (produit des vraisemblances, « Combine » de ChronoModel).
     if (rq.size() >= 2 && asksCombine(question)) {
         QJsonObject cb{ { "method", "combine" } };
@@ -2208,6 +2500,7 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
         { "evenement", "event" }, { "events", "event" },
         { "combinaison", "combine" }, { "combination", "combine" }, { "combiner", "combine" }, { "combined", "combine" },
         { "trace", "traces" }, { "chaines", "traces" }, { "chains", "traces" },
+        { "ordre", "order" }, { "anteriorite", "order" }, { "comparer", "order" }, { "comparaison", "order" }, { "compare", "order" },
         { "calibration inverse", "inverse" }, { "inverse calibration", "inverse" }, { "inverse_calibration", "inverse" } };
     if (alias.contains(m)) m = alias.value(m);
     if (!m.isEmpty()) o["method"] = m;
@@ -2223,11 +2516,14 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
             if (std::isfinite(d)) o[k] = d;
         }
 
-    if ((m == "event" || m == "combine") && o.value("dates").isArray()) {
+    if ((m == "event" || m == "combine" || m == "order") && o.value("dates").isArray()) {
         QJsonArray ds;
         for (const QJsonValue& v : o.value("dates").toArray()) ds.append(v.isObject() ? QJsonValue(normalizeRequest(v.toObject())) : v);
         o["dates"] = ds;
     }
+    if (m == "order")
+        for (const char* k : { "a", "b" })
+            if (o.value(k).isObject()) o[k] = normalizeRequest(o.value(k).toObject());
     return o;
 }
 
@@ -2274,7 +2570,7 @@ QVector<QJsonObject> MethodRunner::jsonRequests(const QString& text)
     for (const QJsonObject& raw : topLevelObjects(text)) {
         const QJsonObject o = normalizeRequest(raw);
         const QString m = o.value("method").toString();
-        static const QStringList extra = { "event", "combine", "traces", "inverse", "density_file" };
+        static const QStringList extra = { "event", "combine", "order", "traces", "inverse", "density_file" };
         if (!m.isEmpty() && (extra.contains(m) || MethodRegistry::instance().byId(m)) && out.size() < 12) out << o;
     }
     return out;
@@ -2312,7 +2608,7 @@ QVector<JsonSpan> jsonSpans(const QString& t)
 bool isCalcRequest(const QJsonObject& raw)
 {
     const QString m = MethodRunner::normalizeRequest(raw).value("method").toString();
-    static const QStringList extra = { "event", "combine", "traces", "inverse", "density_file" };
+    static const QStringList extra = { "event", "combine", "order", "traces", "inverse", "density_file" };
     return !m.isEmpty() && (extra.contains(m) || MethodRegistry::instance().byId(m));
 }
 
@@ -2369,7 +2665,7 @@ QVector<QJsonObject> MethodRunner::extractCalcBlocks(const QString& answer)
             if (raw.value("method").toString().isEmpty() && !(calcFence && raw.contains("plugin_id"))) continue;
             const QJsonObject o = normalizeRequest(raw);
             const QString m = o.value("method").toString();
-            static const QStringList extra = { "event", "combine", "traces", "inverse", "density_file" };
+            static const QStringList extra = { "event", "combine", "order", "traces", "inverse", "density_file" };
             if (!calcFence && !extra.contains(m) && !MethodRegistry::instance().byId(m)) continue;
             out << o;
         }

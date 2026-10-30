@@ -89,6 +89,25 @@ Le LLM ne produit **jamais** le `.chr` complet : il remplit un JSON de ~10 champ
 200 champs obligatoires (identifiants, UUID, MCMC, plage tmin/tmax, positions…). C'est ce qui rend le résultat
 fiable avec un petit modèle.
 
+### Appel d'outils du modèle distant : détection automatique
+Préférences → *Appel d'outils* : **Automatique** (défaut), *Toujours*, *Jamais*. En automatique, `ToolsProbe`
+(`src/llm/ToolsProbe.*`) envoie au premier usage une requête minimale qui déclare un outil factice (`verifier_outil`)
+et classe la réponse : appel natif (`tool_calls`), appel écrit dans le texte, aucun appel, ou champ `tools` refusé. Le
+résultat est mémorisé par serveur et par modèle (QSettings `remote/toolsProbe`, refait après 30 jours ; bouton
+*Tester*). Les outils ne sont déclarés que si l'appel natif marche ; sinon le bloc ```` ```calcul ```` prend le relais.
+Un refus constaté pendant une conversation est mémorisé de même.
+
+### Ordre de deux dates
+« Laquelle est la plus ancienne ? » : demande `order` (outil `comparer_dates`) : P(A antérieure à B) calculée exactement
+sur les densités (B − A par convolution), densité de l'écart B − A et ses HPD, en supposant les datations
+indépendantes. Chaque date peut être une datation, une combinaison ou un événement. Fiche `21_ordre_des_dates`
+(imposée par `MethodRunner::asksOrder`) : indépendance, traces ChronoModel (`analyser_traces`, op `order`) et
+contraintes stratigraphiques.
+
+### Serveur MCP (`seldonh-mcp`)
+`mcp/` : les mêmes outils pour d'autres assistants (Claude Desktop, Jan, Gemini CLI) par le Model Context Protocol,
+transport stdio (pas de réseau). Voir `mcp/LISEZMOI.md`.
+
 ### Historique des conversations
 - Une conversation = un fichier `<identifiant>.json` dans `<dossier de données>/history` (macOS : `~/Library/Application Support/SeldonH/SeldonH/history`).
   Il contient les **tours** (question, texte vu par le modèle, réponse, appels d'outils réécrits en blocs `calcul`) pour **reprendre** le

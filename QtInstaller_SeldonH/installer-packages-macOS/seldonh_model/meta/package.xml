@@ -3,7 +3,7 @@
     <DisplayName>Modèle de langage local (.gguf, environ 2,7 Go)</DisplayName>
     <Description>Modèle utilisé hors ligne par SeldonH (rien n'est envoyé sur Internet). Décocher si vous utilisez un modèle distant (API) ou votre propre fichier .gguf.</Description>
     <Version>1.0.0</Version>
-    <ReleaseDate>2026-10-28</ReleaseDate>
+    <ReleaseDate>2026-10-30</ReleaseDate>
     <Default>true</Default>
     <SortingPriority>50</SortingPriority>
     <Dependencies>seldonh_app</Dependencies>

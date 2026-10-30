@@ -68,8 +68,10 @@ QVector<ToolDef> build()
 
     v.append({ "calibrer_radiocarbone",
                QStringLiteral("Calibre une date radiocarbone (14C) avec les courbes de ChronoModel et renvoie la densité calendaire, "
-                              "les intervalles HPD à 95 % et 68 %, le MAP, la moyenne et les quartiles. À utiliser pour toute date 14C "
-                              "(âge conventionnel en BP avec son erreur) : ne calibre jamais de tête."),
+                              "les intervalles HPD à 95 % et 68 %, le MAP, la moyenne et les quartiles. À utiliser pour TOUTE date 14C "
+                              "(âge conventionnel en BP avec son erreur), même écrite brièvement : « date 14c 3548 +- 25 », "
+                              "« C14 3548 ± 25 BP », « 3548±25 BP », « âge radiocarbone de 3548 ans, erreur 25 », « date-moi 3548 ± 25 BP ». "
+                              "Ne calibre jamais de tête et n'estime jamais une date calendaire sans cet outil : un âge BP n'est pas une date calendaire."),
                schema({ { "age", num(QStringLiteral("Âge radiocarbone conventionnel, en années BP (ex. 2500).")) },
                         { "error", num(QStringLiteral("Erreur (écart-type) de la mesure, en années, strictement positive (ex. 30).")) },
                         { "curve", str(QStringLiteral("Courbe de calibration. Défaut : intcal20 (atmosphère, hémisphère nord) ; shcal20 pour le sud ; "
@@ -92,7 +94,7 @@ QVector<ToolDef> build()
 
     v.append({ "dater_luminescence",
                QStringLiteral("Densité calendaire et intervalles HPD pour une datation par luminescence (TL/OSL) : un âge en années "
-                              "avant l'année de mesure, avec son erreur. L'année de mesure est obligatoire : demande-la à l'utilisateur si elle manque."),
+                              "avant l'année de mesure, avec son erreur (« TL 800 ± 60 ans, mesuré en 2015 », « OSL 12,3 ± 0,8 ka »). L'année de mesure est obligatoire : demande-la à l'utilisateur si elle manque."),
                schema({ { "age", num(QStringLiteral("Âge de luminescence, en années avant l'année de mesure.")) },
                         { "error", num(QStringLiteral("Erreur (écart-type) de l'âge, en années, strictement positive.")) },
                         { "ref_year", num(QStringLiteral("Année de la mesure (ex. 2015).")) } },
@@ -181,6 +183,25 @@ QVector<ToolDef> build()
                                                 { "items", QJsonObject{ { "type", "object" } } } } } },
                       { "dates" }),
                "combine" });
+
+    {
+        const QString item = QStringLiteral("Datation : objet avec « method » (c14, f14c, tl, gauss, unif, am) et les paramètres de cette "
+                                            "méthode (mêmes noms que les autres outils, ex. {\"method\":\"c14\",\"age\":2500,\"error\":30}), "
+                                            "et facultativement « name » (ex. « US 12 », « Ly-1234 ») et « wiggle ». Peut aussi être un "
+                                            "événement {\"method\":\"event\",\"name\":…,\"dates\":[…]} ou une combinaison "
+                                            "{\"method\":\"combine\",\"dates\":[…]}.");
+        v.append({ "comparer_dates",
+                   QStringLiteral("Ordre chronologique de DEUX datations indépendantes : probabilité que A soit antérieure à B (et "
+                                  "l'inverse), calculée exactement sur leurs densités calibrées, et densité de l'écart B − A en années "
+                                  "avec ses HPD. À utiliser quand l'utilisateur demande laquelle est la plus ancienne, si A est avant "
+                                  "B, ou l'écart entre deux dates. Ne PAS l'utiliser pour des colonnes de traces MCMC jointes (Events "
+                                  "d'un modèle ChronoModel, liés par des contraintes) : utiliser analyser_traces avec op « order »."),
+                   schema({ { "a", QJsonObject{ { "type", "object" }, { "description", QStringLiteral("Première datation (A). %1").arg(item) } } },
+                            { "b", QJsonObject{ { "type", "object" }, { "description", QStringLiteral("Seconde datation (B). %1").arg(item) } } },
+                            { "name", str(QStringLiteral("Nom de la comparaison, repris dans le titre du graphique. Facultatif.")) } },
+                          { "a", "b" }),
+                   "order" });
+    }
 
     v.append({ "analyser_traces",
                QStringLiteral("Calcule a posteriori, sur les traces MCMC exportées par ChronoModel et jointes par l'utilisateur "
@@ -280,10 +301,10 @@ QVector<ToolDef> build()
                                                "une : la densité est calculée sur [tmin ; tmax] puis renormalisée. Défaut : toute la courbe."));
             props["tmax"] = num(QStringLiteral("Fin de la période d'étude (année astronomique, ou en texte « 500 av. J.-C. »). Facultatif."));
         }
-        if (d.methodId != "event" && d.methodId != "combine")
+        if (d.methodId != "event" && d.methodId != "combine" && d.methodId != "order")
             props["name"] = str(QStringLiteral("Nom de la datation (ex. « Ly-1234 », ou le « name » de la date dans un fichier .chr), "
                                                "repris dans le titre du graphique. Facultatif."));
-        if (d.methodId != "event" && d.methodId != "combine")
+        if (d.methodId != "event" && d.methodId != "combine" && d.methodId != "order")
             props["wiggle"] = QJsonObject{ { "type", "object" },
                                            { "description", QStringLiteral("Facultatif, seulement si l'utilisateur donne un décalage δ (wiggle-matching) entre "
                                                                            "l'échantillon et ce qu'on veut dater : {\"type\":\"fixed\",\"value\":20}, "
@@ -443,6 +464,22 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
         for (int i = 0; i < ds.size(); ++i)
             if (!ds[i].isObject() || ds[i].toObject().value("method").toString().isEmpty()) {
                 r.content = QStringLiteral("Calcul non lancé : la datation %1 n'a pas de « method » (c14, f14c, tl, gauss, unif ou am).").arg(i + 1);
+                return r;
+            }
+    }
+    if (def->methodId == "order") {
+        for (const char* k : { "a", "b" }) {
+            const QJsonValue v = args.value(k);
+            if (v.isString()) {                       // objet écrit comme une chaîne JSON
+                const QJsonDocument d = QJsonDocument::fromJson(v.toString().toUtf8());
+                if (d.isObject()) args[k] = d.object();
+            }
+            if (args.value(k).isObject()) args[k] = MethodRunner::normalizeRequest(args.value(k).toObject());
+        }
+        for (const char* k : { "a", "b" })
+            if (args.contains(k) && (!args.value(k).isObject() || args.value(k).toObject().value("method").toString().isEmpty())) {
+                r.content = QStringLiteral("Calcul non lancé : « %1 » doit être une datation avec « method » (c14, f14c, tl, gauss, unif, am, "
+                                           "event ou combine) et ses valeurs.").arg(QString::fromLatin1(k));
                 return r;
             }
     }

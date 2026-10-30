@@ -1,0 +1,46 @@
+SeldonH - utiliser ses calculs depuis un autre assistant (serveur MCP)
+=====================================================================
+
+seldonh-mcp met les outils de calcul de SeldonH (calibration 14C et F14C, TL/OSL,
+archéomagnétisme, Event MCMC, combinaison, ordre de deux dates, traces ChronoModel,
+calibration inverse, fichiers de densité) à disposition d'autres assistants par le
+protocole MCP (Model Context Protocol).
+
+L'assistant lance le programme sur cet ordinateur et lui parle par l'entrée et la
+sortie standard : pas de réseau, pas de port ouvert, et les calculs restent faits ici,
+avec les mêmes méthodes et les mêmes réglages (courbes, format des dates) que SeldonH.
+
+Chemin du programme sur cet ordinateur :
+
+    {{SELDONH_MCP}}
+
+Vérification (dans un terminal) :  "{{SELDONH_MCP}}" --list
+
+
+Claude Desktop
+--------------
+Réglages > Développeur > Modifier la configuration (fichier claude_desktop_config.json :
+~/Library/Application Support/Claude/ sur macOS, %APPDATA%\Claude\ sous Windows),
+ajouter, puis relancer Claude Desktop :
+
+{
+  "mcpServers": {
+    "seldonh": { "command": "{{SELDONH_MCP}}", "args": [] }
+  }
+}
+
+Jan
+---
+Settings > MCP Servers > + Add MCP Server : nom « seldonh », commande :
+{{SELDONH_MCP}} (sans argument), puis activer le serveur. Le modèle choisi doit savoir
+faire de l'appel d'outils (option à activer dans les paramètres d'un modèle local).
+
+Gemini CLI
+----------
+    gemini mcp add seldonh "{{SELDONH_MCP}}"
+
+ChatGPT (mode développeur) et l'application web de Gemini n'acceptent que des serveurs
+MCP distants (adresse https) : seldonh-mcp ne s'y branche pas.
+
+Format des dates : celui des Préférences de SeldonH, ou l'argument
+--date-format (bcad, calbp, ka…) à ajouter dans « args ».

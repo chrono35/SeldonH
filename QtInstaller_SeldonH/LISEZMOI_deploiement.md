@@ -2,7 +2,7 @@
 
 **Un installeur par système**, valable pour toutes les machines (avec ou sans GPU) : l'utilisateur n'a rien à compiler.
 Même organisation que `ChronoModel/QtInstaller_ChronoModel`, mais chaque script fait tout :
-llama.cpp et QtKeychain (si besoin) → compilation Release de SeldonH → bibliothèques Qt → modèle `.gguf` → `binarycreator`.
+llama.cpp et QtKeychain (si besoin) → compilation Release de SeldonH et de `seldonh-mcp` → bibliothèques Qt → modèle `.gguf` → `binarycreator`.
 
 | Système | Script | Résultat |
 |---|---|---|
@@ -61,7 +61,7 @@ SeldonH est sous **GPL-3.0-or-later** (comme ChronoModel). Les scripts copient d
 ## Contenu de l'installeur
 
 * `seldonh_app` (obligatoire) : exécutable, Qt, llama.cpp, QtKeychain, `LICENSE` + `COPYING`, raccourcis (menu Démarrer + Bureau sous Windows,
-  entrée de menu `~/.local/share/applications` sous Linux).
+  entrée de menu `~/.local/share/applications` sous Linux), serveur MCP `seldonh-mcp` et `LISEZMOI_MCP.txt` (voir ci-dessous).
 * `seldonh_model` (coché par défaut, décochable) : `Qwen3.5-4B-Q4_K_M.gguf` dans `models/`.
   Autre modèle : `MODEL=Qwen3.5-4B-Q3_K_M.gguf`.
 * Dossier d'installation : `C:\Program Files\SeldonH` ; Linux `~/SeldonH` (pas de root, lanceur `SeldonH.sh`) ;
@@ -69,6 +69,22 @@ SeldonH est sous **GPL-3.0-or-later** (comme ChronoModel). Les scripts copient d
   (hors du bundle pour ne pas invalider la signature).
 * Modèle distant par défaut (Préférences, API compatible OpenAI, sans clé) :
   `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1`, modèle `Mistral-Small-3.2-24B-Instruct-2506`.
+
+## Serveur MCP `seldonh-mcp`
+
+Les calculs de SeldonH pour d'autres assistants (Claude Desktop, Jan, Gemini CLI), voir `mcp/LISEZMOI.md`.
+Compilé par chaque script (étape 3b, `mcp/seldonh-mcp.pro`, QtCore seul) dans `build/<os>-Release-mcp`, puis installé
+dans le composant `seldonh_app` :
+
+| Système | Emplacement installé | Bibliothèques Qt |
+|---|---|---|
+| Windows | `C:\Program Files\SeldonH\seldonh-mcp.exe` | celles de `SeldonH.exe` (même dossier) |
+| Linux | `~/SeldonH/seldonh-mcp` | `lib/` (rpath `$ORIGIN/lib` posé par patchelf : lancé sans `SeldonH.sh`) |
+| macOS | `/Applications/SeldonH/SeldonH.app/Contents/MacOS/seldonh-mcp` | frameworks du bundle (`macdeployqt -executable=`), signé avant le bundle |
+
+Chaque script vérifie qu'il démarre une fois déployé (`--version`, `--list`). `mcp/LISEZMOI_MCP.txt` est installé à la
+racine du dossier d'installation ; `installscript.qs` y remplace `{{SELDONH_MCP}}` par le chemin réel (opération
+`Replace`), avec la configuration prête à copier pour Claude Desktop, Jan et Gemini CLI.
 
 ## macOS : copie des bibliothèques et signature
 

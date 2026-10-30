@@ -27,6 +27,7 @@ SOURCES += \
     src/llm/LlmEngine.cpp \
     src/llm/RemoteApi.cpp \
     src/llm/RemoteEngine.cpp \
+    src/llm/ToolsProbe.cpp \
     src/skills/Lexicon.cpp \
     src/skills/SkillManager.cpp \
     src/ui/ChatView.cpp \
@@ -51,6 +52,7 @@ HEADERS += \
     src/llm/LlmEngine.h \
     src/llm/RemoteApi.h \
     src/llm/RemoteEngine.h \
+    src/llm/ToolsProbe.h \
     src/skills/Lexicon.h \
     src/skills/SkillManager.h \
     src/ui/ChatView.h \

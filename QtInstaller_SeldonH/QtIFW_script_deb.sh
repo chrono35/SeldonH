@@ -1,7 +1,7 @@
 #!/bin/bash
 # ===========================================================================
 #  SeldonH - QtIFW_script_deb.sh   (Linux Debian / Ubuntu, x86_64)
-#  Compile SeldonH (Release), rassemble les bibliothèques et plugins Qt, embarque
+#  Compile SeldonH et le serveur MCP seldonh-mcp (Release), rassemble les bibliothèques et plugins Qt, embarque
 #  le modèle .gguf et construit l'installeur Qt Installer Framework (.run).
 #
 #  Usage :
@@ -52,6 +52,7 @@ PKGS="$INST/installer-packages-deb"
 DATA="$PKGS/seldonh_app/data"
 MODEL_DIR="$PKGS/seldonh_model/data/models"
 BUILD_DIR="$ROOT/build/linux64-Release"
+MCP_BUILD_DIR="$ROOT/build/linux64-Release-mcp"
 LLAMA="$ROOT/third_party/llama-install"
 KEYCHAIN="$ROOT/third_party/qtkeychain-install"
 NPROC=$(nproc)
@@ -95,10 +96,19 @@ rm -f "$BUILD_DIR/SeldonH"
 EXE="$BUILD_DIR/SeldonH"
 [ -x "$EXE" ] || { echo "❌ exécutable introuvable : $EXE"; exit 1; }
 
+echo "➡️  3b - Compilation de seldonh-mcp (serveur MCP, QtCore seul) dans $MCP_BUILD_DIR"
+mkdir -p "$MCP_BUILD_DIR"
+rm -f "$MCP_BUILD_DIR/seldonh-mcp"
+( cd "$MCP_BUILD_DIR" && "$QTDIR/bin/qmake" "$ROOT/mcp/seldonh-mcp.pro" "CONFIG+=release" && make -j"$NPROC" )
+MCP_EXE="$MCP_BUILD_DIR/seldonh-mcp"
+[ -x "$MCP_EXE" ] || { echo "❌ seldonh-mcp introuvable : $MCP_EXE"; exit 1; }
+
 echo "➡️  4 - Préparation du composant seldonh_app"
 rm -rf "$DATA"
 mkdir -p "$DATA/lib" "$DATA/plugins"
 cp "$EXE" "$DATA/"
+cp "$MCP_EXE" "$DATA/"
+cp "$ROOT/mcp/LISEZMOI_MCP.txt" "$DATA/"         # chemin de seldonh-mcp écrit par installscript.qs
 cp "$ROOT/resources/icons/seldonh_256.png" "$DATA/seldonh.png"
 cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh_app/meta/llama.cpp-LICENSE.txt"
 cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh_app/meta/qtkeychain-LICENSE.txt"
@@ -143,6 +153,7 @@ collect() {
     fi
 }
 collect "$DATA/SeldonH"
+collect "$DATA/seldonh-mcp"
 while IFS= read -r -d '' so; do collect "$so"; done < <(find "$DATA/plugins" "$DATA/lib" -name 'lib*.so*' -type f -print0)
 
 cat > "$DATA/qt.conf" <<'QTCONF'
@@ -160,13 +171,19 @@ export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 exec "$HERE/SeldonH" "$@"
 LAUNCH
-chmod +x "$DATA/SeldonH.sh" "$DATA/SeldonH"
+chmod +x "$DATA/SeldonH.sh" "$DATA/SeldonH" "$DATA/seldonh-mcp"
 
 if command -v patchelf >/dev/null; then
     patchelf --set-rpath '$ORIGIN/lib' "$DATA/SeldonH"
+    patchelf --set-rpath '$ORIGIN/lib' "$DATA/seldonh-mcp"     # lancé directement par l'assistant (pas de SeldonH.sh)
     find "$DATA/lib" -name '*.so*' -type f -exec patchelf --set-rpath '$ORIGIN' {} \;
 fi
 echo "   $(ls "$DATA/lib" | wc -l) bibliothèques, $(du -sh "$DATA" | cut -f1) au total"
+if command -v patchelf >/dev/null; then
+    echo "   seldonh-mcp : $(env -u LD_LIBRARY_PATH "$DATA/seldonh-mcp" --list | grep -c '"inputSchema"') outils"
+else
+    echo "⚠️  sans patchelf, seldonh-mcp ne trouvera pas ./lib : l'assistant devra définir LD_LIBRARY_PATH"
+fi
 
 echo "➡️  7 - Composant seldonh_model"
 EXCLUDE=()

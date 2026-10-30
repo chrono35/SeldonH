@@ -44,6 +44,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QVector>
 
 #include "DateFormat.h"
+#include "Density.h"
 
 namespace seldon {
 
@@ -55,6 +56,11 @@ struct RunOutcome {
     QJsonObject plot;               // bloc « plot » (vide si rien à tracer)
     QVector<QJsonObject> extraPlots; // figures supplémentaires dans leur propre onglet (traces MCMC d'un événement)
 };
+
+// Ordre de deux dates INDÉPENDANTES (densités calibrées) : densité de l'écart B − A, f(x) = ∫ f_A(a) f_B(a + x) da,
+// et P(A antérieure à B) = P(B − A > 0). Pour des dates liées par un modèle ChronoModel, voir les traces (op « order »).
+Density differenceDensity(const Density& a, const Density& b);
+double probabilityBefore(const Density& a, const Density& b);
 
 class MethodRunner {
 public:
@@ -104,6 +110,12 @@ public:
     // Vrai si la question demande de combiner ses datations (« combine », « combinaison ») sans parler d'événement
     // (« événement » → MCMC, voir asksEvent).
     static bool asksCombine(const QString& question);
+    // Ordre de deux datations (« laquelle est la plus ancienne ? », « A est-elle antérieure à B ? », « quelle date est
+    // avant l'autre ? ») : avec exactement deux datations dans la question, une seule demande
+    //   {"method":"order", "a":{"method":"c14",…}, "b":{"method":"c14",…}}
+    // qui donne P(A antérieure à B), P(B antérieure à A) et la densité de l'écart B − A (datations indépendantes ; chacune
+    // peut être une datation, un « combine » ou un « event »). Sert aussi à imposer la fiche « Ordre de deux dates ».
+    static bool asksOrder(const QString& question);
     // Traces MCMC chargées (traces::loaded) et colonnes citées dans la question : demande « traces » (durée, date entre
     // deux colonnes, densité d'une colonne). Vide si aucune trace chargée ou rien de reconnu.
     //   « durée entre N(500) et N(200) » -> {"method":"traces","op":"duration","from":"N(500)","to":"N(200)"}

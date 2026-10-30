@@ -66,7 +66,9 @@ struct AppSettings {
     QString remoteUrl   = defaultRemoteUrl();    // Base URL, ex. https://api.openai.com/v1
     QString remoteKey;               // clé API, rangée dans le trousseau du système (SecretStore) ; vide = sans clé
     QString remoteModel = defaultRemoteModel();  // nom du modèle chez le fournisseur
-    bool    remoteTools = true;      // appel d'outils natif (les calculs de SeldonH sont appelés par le modèle)
+    // Appel d'outils natif (le modèle demande lui-même les calculs de SeldonH) : « auto » = selon le test du serveur et du
+    // modèle (ToolsProbe, mémorisé), « on » = toujours, « off » = jamais (bloc ```calcul).
+    QString remoteToolsMode = QStringLiteral("auto");
     QString userPrompt;              // consignes personnelles ajoutées à chaque question (ex. « réponses courtes »)
     bool    keepHistory = true;      // enregistre automatiquement les conversations (volet Historique), sur cet ordinateur
 
@@ -167,7 +169,10 @@ struct AppSettings {
         a.remoteKey   = secrets::read(QStringLiteral("remote/key"));        // trousseau (repli : réglages, en clair)
         a.remoteModel = s.value("remote/model").toString().trimmed();
         if (a.remoteModel.isEmpty()) a.remoteModel = defaultRemoteModel();
-        a.remoteTools = s.value("remote/tools", true).toBool();
+        // Ancien réglage (case à cocher « remote/tools ») : cochée -> automatique, décochée -> jamais.
+        a.remoteToolsMode = s.contains("remote/toolsMode") ? s.value("remote/toolsMode").toString()
+                                                            : (s.value("remote/tools", true).toBool() ? QStringLiteral("auto") : QStringLiteral("off"));
+        if (a.remoteToolsMode != QLatin1String("on") && a.remoteToolsMode != QLatin1String("off")) a.remoteToolsMode = QStringLiteral("auto");
         a.dateFormat  = s.value("display/dateFormat", a.dateFormat).toString();
         a.decimals    = std::clamp(s.value("display/decimals", a.decimals).toInt(), -1, 6);
         a.keepHistory = s.value("history/keep", true).toBool();
@@ -193,7 +198,8 @@ struct AppSettings {
         s.setValue("remote/url", remoteUrl);
         secrets::write(QStringLiteral("remote/key"), remoteKey);           // sans effet si la clé n'a pas changé
         s.setValue("remote/model", remoteModel);
-        s.setValue("remote/tools", remoteTools);
+        s.setValue("remote/toolsMode", remoteToolsMode);
+        s.remove("remote/tools");
         s.setValue("display/dateFormat", dateFormat);
         s.setValue("display/decimals", decimals);
         s.setValue("history/keep", keepHistory);

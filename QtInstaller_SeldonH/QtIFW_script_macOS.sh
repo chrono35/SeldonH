@@ -1,7 +1,7 @@
 #!/bin/bash
 # ===========================================================================
 #  SeldonH - QtIFW_script_macOS.sh   (macOS, binaire universel x86_64 + arm64)
-#  Compile SeldonH (Release universel), copie les bibliothèques Qt (macdeployqt),
+#  Compile SeldonH et le serveur MCP seldonh-mcp (Release universel), copie les bibliothèques Qt (macdeployqt),
 #  signe le bundle (ad hoc), embarque le modèle .gguf, construit l'installeur
 #  Qt Installer Framework et le met dans un .dmg avec un LISEZMOI.
 #  Reprend Ch_copy_library_and_signature.sh + QtIFW_script_macOS.sh + Ch_make_dmg_macOS.sh de ChronoModel.
@@ -66,6 +66,8 @@ KEYCHAIN="$ROOT/third_party/qtkeychain-install"
 STAGING="$INST/staging"
 BUNDLE="$STAGING/SeldonH.app"
 EXE="$BUNDLE/Contents/MacOS/SeldonH"
+MCP_BUILD_DIR="$ROOT/build/macOS-Release-mcp"
+MCP_EXE="$BUNDLE/Contents/MacOS/seldonh-mcp"      # dans le bundle : mêmes frameworks Qt, même signature
 NPROC=$(sysctl -n hw.ncpu)
 
 QT_VER_STR="Qt${QT_VERSION//./_}"
@@ -114,14 +116,23 @@ rm -rf "$BUILD_DIR/SeldonH.app"
 echo "   Architectures : $(lipo -archs "$BUILD_DIR/SeldonH.app/Contents/MacOS/SeldonH")"
 is_universal "$BUILD_DIR/SeldonH.app/Contents/MacOS/SeldonH" || { echo "❌ L'exécutable n'est pas universel"; exit 1; }
 
+echo "➡️  3b - Compilation de seldonh-mcp (serveur MCP, QtCore seul, universel) dans $MCP_BUILD_DIR"
+mkdir -p "$MCP_BUILD_DIR"
+rm -f "$MCP_BUILD_DIR/seldonh-mcp"
+( cd "$MCP_BUILD_DIR" && "$QT_ROOT/bin/qmake" "$ROOT/mcp/seldonh-mcp.pro" "CONFIG+=release" "QMAKE_APPLE_DEVICE_ARCHS=$ARCHS" \
+  && make -j"$NPROC" )
+[ -x "$MCP_BUILD_DIR/seldonh-mcp" ] || { echo "❌ seldonh-mcp introuvable : $MCP_BUILD_DIR"; exit 1; }
+is_universal "$MCP_BUILD_DIR/seldonh-mcp" || { echo "❌ seldonh-mcp n'est pas universel"; exit 1; }
+
 echo "➡️  4 - Copie du bundle dans $STAGING"
 rm -rf "$STAGING"
 mkdir -p "$STAGING"
 ditto "$BUILD_DIR/SeldonH.app" "$BUNDLE"      # ditto conserve liens symboliques et attributs étendus
+cp "$MCP_BUILD_DIR/seldonh-mcp" "$MCP_EXE"
 
-echo "➡️  5 - macdeployqt (frameworks et plugins Qt, dont tls pour le modèle distant)"
+echo "➡️  5 - macdeployqt (frameworks et plugins Qt, dont tls pour le modèle distant ; seldonh-mcp aussi)"
 # macdeployqt signe en "ad hoc" par défaut ; on re-signe tout à l'étape 7.
-"$QT_ROOT/bin/macdeployqt" "$BUNDLE"
+"$QT_ROOT/bin/macdeployqt" "$BUNDLE" "-executable=$MCP_EXE"
 find "$BUNDLE" -name "*.cstemp" -delete
 
 echo "➡️  6 - Info.plist (version)"
@@ -148,6 +159,7 @@ if [ -d "$BUNDLE/Contents/Frameworks" ]; then
         "${SIGN[@]}" "$f"
     done
 fi
+"${SIGN[@]}" "$MCP_EXE"                         # exécutable secondaire : signé avant le bundle
 "${SIGN[@]}" "$BUNDLE"
 
 echo "➡️  8 - Vérifications"
@@ -157,6 +169,8 @@ echo "   Dépendances restées en chemin absolu (doit être vide) :"
 find "$BUNDLE/Contents" -type f \( -perm -u+x -o -name "*.dylib" \) -print0 \
     | xargs -0 otool -L 2>/dev/null \
     | grep -E "/usr/local/|/opt/homebrew/|/Users/" || echo "   (aucune)"
+echo "   seldonh-mcp : $(lipo -archs "$MCP_EXE"), $("$MCP_EXE" --list | grep -c '"inputSchema"') outils"
+"$MCP_EXE" --version >/dev/null || { echo "❌ seldonh-mcp ne démarre pas depuis le bundle"; exit 1; }
 MACOS_MIN=$(otool -l "$EXE" 2>/dev/null | awk '/minos/{print $2; exit}')
 if [ -n "${MACOS_MIN:-}" ]; then MACOS_TAG="macOS${MACOS_MIN%%.*}"; else MACOS_TAG="macOS"; fi
 echo "   Cible macOS : $MACOS_TAG (minos $MACOS_MIN)"
@@ -166,6 +180,7 @@ rm -rf "$DATA"
 mkdir -p "$DATA"
 ditto "$BUNDLE" "$DATA/SeldonH.app"
 cp "$ROOT/LICENSE" "$ROOT/COPYING" "$DATA/"      # à côté du bundle (/Applications/SeldonH), hors signature
+cp "$ROOT/mcp/LISEZMOI_MCP.txt" "$DATA/"         # chemin de seldonh-mcp écrit par installscript.qs
 cp "$ROOT/third_party/llama.cpp/LICENSE" "$PKGS/seldonh_app/meta/llama.cpp-LICENSE.txt"
 cp "$ROOT/third_party/qtkeychain/COPYING" "$PKGS/seldonh_app/meta/qtkeychain-LICENSE.txt"
 cp "$ROOT/LICENSE" "$PKGS/seldonh_app/meta/SeldonH-LICENSE.txt"
@@ -233,6 +248,10 @@ Sur macOS 14 et antérieur, clic droit sur l'installeur > Ouvrir suffit généra
 
 SeldonH est installé dans /Applications/SeldonH (avec le modèle de langage dans le
 sous-dossier models). Si macOS refuse aussi d'ouvrir SeldonH, utilisez la même procédure.
+
+Serveur MCP (calculs de SeldonH dans Claude Desktop, Jan, Gemini CLI…) :
+/Applications/SeldonH/SeldonH.app/Contents/MacOS/seldonh-mcp ; voir
+/Applications/SeldonH/LISEZMOI_MCP.txt après l'installation.
 
 Clé API d'un modèle distant : SeldonH la range dans le trousseau de macOS. À la première
 utilisation, et après chaque mise à jour de SeldonH, macOS peut demander si SeldonH peut

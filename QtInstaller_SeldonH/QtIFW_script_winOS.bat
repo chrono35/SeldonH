@@ -1,7 +1,7 @@
 @echo off
 rem ===========================================================================
 rem  SeldonH - QtIFW_script_winOS.bat
-rem  Compile SeldonH (Release, MinGW), rassemble les DLL Qt (windeployqt),
+rem  Compile SeldonH et le serveur MCP seldonh-mcp (Release, MinGW), rassemble les DLL Qt (windeployqt),
 rem  embarque le modele .gguf et construit l'installeur Qt Installer Framework.
 rem
 rem  Usage (depuis n'importe quel dossier) :
@@ -48,6 +48,7 @@ set PKGS=%INST%\installer-packages-winOS
 set APPDATA_DIR=%PKGS%\seldonh_app\data
 set MODEL_DIR=%PKGS%\seldonh_model\data\models
 set BUILD_DIR=%ROOT%\build\win64-Release
+set MCP_BUILD_DIR=%ROOT%\build\win64-Release-mcp
 set LLAMA=%ROOT%\third_party\llama-install
 set KEYCHAIN=%ROOT%\third_party\qtkeychain-install
 set PATH=%QTDIR%\bin;%MINGW%\bin;%PATH%
@@ -110,10 +111,27 @@ set EXE=%BUILD_DIR%\SeldonH.exe
 if not exist "%EXE%" set EXE=%BUILD_DIR%\release\SeldonH.exe
 if not exist "%EXE%" ( echo ERREUR : SeldonH.exe introuvable dans %BUILD_DIR% & goto :fail )
 
+echo  3b - Compilation de seldonh-mcp (serveur MCP, QtCore seul) dans %MCP_BUILD_DIR%
+if not exist "%MCP_BUILD_DIR%" mkdir "%MCP_BUILD_DIR%"
+pushd "%MCP_BUILD_DIR%"
+if exist seldonh-mcp.exe del /q seldonh-mcp.exe
+if exist release\seldonh-mcp.exe del /q release\seldonh-mcp.exe
+"%QTDIR%\bin\qmake.exe" "%ROOT%\mcp\seldonh-mcp.pro" -spec win32-g++ "CONFIG+=release" "CONFIG-=debug_and_release"
+if errorlevel 1 ( popd & echo ERREUR : qmake seldonh-mcp & goto :fail )
+mingw32-make -j%NUMBER_OF_PROCESSORS%
+if errorlevel 1 ( popd & echo ERREUR : compilation de seldonh-mcp & goto :fail )
+popd
+set MCP_EXE=%MCP_BUILD_DIR%\seldonh-mcp.exe
+if not exist "%MCP_EXE%" set MCP_EXE=%MCP_BUILD_DIR%\release\seldonh-mcp.exe
+if not exist "%MCP_EXE%" ( echo ERREUR : seldonh-mcp.exe introuvable dans %MCP_BUILD_DIR% & goto :fail )
+
 echo  4 - Preparation du composant seldonh_app
 if exist "%APPDATA_DIR%" rmdir /s /q "%APPDATA_DIR%"
 mkdir "%APPDATA_DIR%"
 copy /y "%EXE%" "%APPDATA_DIR%\" >nul
+rem seldonh-mcp.exe a cote de SeldonH.exe : memes DLL Qt (Qt6Core) et memes runtimes MinGW
+copy /y "%MCP_EXE%" "%APPDATA_DIR%\" >nul
+copy /y "%ROOT%\mcp\LISEZMOI_MCP.txt" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\resources\icons\SeldonH.ico" "%APPDATA_DIR%\" >nul
 copy /y "%ROOT%\third_party\llama.cpp\LICENSE" "%PKGS%\seldonh_app\meta\llama.cpp-LICENSE.txt" >nul
 copy /y "%ROOT%\third_party\qtkeychain\COPYING" "%PKGS%\seldonh_app\meta\qtkeychain-LICENSE.txt" >nul
@@ -137,6 +155,10 @@ rem Runtime GCC : copie explicite, au cas ou windeployqt ne trouverait pas la to
 for %%L in (libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll) do (
     if not exist "%APPDATA_DIR%\%%L" copy /y "%MINGW%\bin\%%L" "%APPDATA_DIR%\" >nul
 )
+
+rem Verification : seldonh-mcp demarre avec les DLL deployees
+"%APPDATA_DIR%\seldonh-mcp.exe" --version
+if errorlevel 1 ( echo ERREUR : seldonh-mcp.exe ne demarre pas dans %APPDATA_DIR% & goto :fail )
 
 echo  6 - Composant seldonh_model
 set EXCLUDE=

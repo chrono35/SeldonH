@@ -45,6 +45,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "src/core/ConversationStore.h"
 #include "src/llm/LlmEngine.h"
 #include "src/llm/RemoteApi.h"
+#include "src/llm/ToolsProbe.h"
 #include "src/methods/common/DateFormat.h"
 #include "src/skills/Lexicon.h"
 #include "src/skills/SkillManager.h"
@@ -176,6 +177,9 @@ private:
     void addSceneFigure(const QJsonObject& fig);
     void applyPlotBlocks(const QString& answer);
     void activateRemote();                     // configure et active le modèle distant (Préférences)
+    // Déclare ou non les outils au modèle distant (mode des Préférences + test mémorisé) ; `probeIfNeeded` : lance le test
+    // automatique si le mode est « auto » et qu'aucun test récent n'existe pour ce serveur et ce modèle.
+    void applyRemoteTools(bool probeIfNeeded);
     bool remoteActive() const { return settings_.useRemote; }
     void startGeneration();                    // lance la génération pour les tours en cours
     seldon::DateFormat displayFormat() const;  // Préférences, ou format demandé dans la dernière vraie question
@@ -204,6 +208,8 @@ private:
     QThread*             thread_ = nullptr;
     seldon::LlmEngine*   engine_ = nullptr;
     seldon::RemoteEngine* remote_ = nullptr;     // modèle distant (API compatible OpenAI), dans le thread de l'interface
+    seldon::ToolsProbe*  toolsProbe_ = nullptr;   // test automatique de l'appel d'outils du serveur distant
+    bool                 toolsApplyPending_ = false;   // résultat du test arrivé pendant une réponse : appliqué à la fin
 
     seldon::ChatView*    chat_ = nullptr;
     seldon::FigurePanel* figures_ = nullptr;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Package>
     <DisplayName>SeldonH</DisplayName>
-    <Description>Assistant d'aide à la datation : datations simples, création et interprétation de modèles ChronoModel</Description>
+    <Description>Assistant d'aide à la datation : datations simples, création et interprétation de modèles ChronoModel ; serveur MCP seldonh-mcp (calculs de SeldonH dans Claude Desktop, Jan…)</Description>
     <Version>1.0.0</Version>
     <ReleaseDate>2026-10-26</ReleaseDate>
     <Default>true</Default>

@@ -41,6 +41,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "../src/ui/ChrScene.h"
 #include "../src/ui/SettingsDialog.h"
 #include "../src/llm/RemoteEngine.h"
+#include "../src/llm/RemoteApi.h"
 #include <QHash>
 #include <QSignalSpy>
 #include <functional>
@@ -63,14 +64,20 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QFile>
+#include "../src/skills/Lexicon.h"
 #include "../src/skills/SkillManager.h"
 #include "../src/methods/common/CurveStore.h"
 #include "../src/methods/common/DateFormat.h"
 #include "../src/methods/common/EventMcmc.h"
+#include "../src/methods/common/Combination.h"
+#include "../src/methods/common/InverseCalibration.h"
+#include "../src/methods/common/Traces.h"
 #include "../src/methods/common/DensityFile.h"
 #include "../src/methods/common/MethodRegistry.h"
 #include "../src/methods/common/MethodRunner.h"
 #include "../src/methods/common/Tools.h"
+#include "../src/llm/ToolsProbe.h"
+#include "../mcp/McpServer.h"
 
 using namespace seldon;
 
@@ -1098,7 +1105,8 @@ private slots:
         QCOMPARE(tmax, 500.0);
         QCOMPARE(MethodRunner::requestedLevel("14C 2500 ± 30 BP at 99 %"), 99.0);
         QCOMPARE(MethodRunner::requestedLevel("with a confidence level of 90 %"), 90.0);
-        QVERIFY(MethodRunner::asksEvent("combine these two dates"));
+        QVERIFY(MethodRunner::asksCombine("combine these two dates"));
+        QVERIFY(!MethodRunner::asksEvent("combine these two dates"));
         QVERIFY(MethodRunner::asksOverlay("show them on the same graph"));
         const QJsonObject w = MethodRunner::wiggleFromQuestion("14C 2500 ± 30 BP with an offset between 10 and 30 years");
         QCOMPARE(w["type"].toString(), QString("range"));
@@ -1290,7 +1298,7 @@ private slots:
         using namespace seldon;
         double a = 0, b = 0;
         QVERIFY(MethodRunner::periodFromQuestion("refait la datation entre 0 et 2000", a, b) && a == 0 && b == 2000);
-        QVERIFY(MethodRunner::periodFromQuestion("période d'étude de 500 av. J.-C. à 500", a, b) && a == -500 && b == 500);
+        QVERIFY(MethodRunner::periodFromQuestion("période d'étude de 500 av. J.-C. à 500", a, b) && a == -499 && b == 500);
         QVERIFY(MethodRunner::periodFromQuestion("redo it between -1000 and 1000", a, b) && a == -1000 && b == 1000);
         QVERIFY(!MethodRunner::periodFromQuestion("loi uniforme entre 1100 et 1500", a, b));
         QVERIFY(!MethodRunner::periodFromQuestion("C14 2500 ± 30 BP avec un décalage entre 10 et 30 ans", a, b));
@@ -1378,6 +1386,135 @@ private slots:
         for (int i = 0; i < 200; ++i) { chronoresults::Variable v; v.kind = "date de l'événement"; v.event = QString("E%1").arg(i); v.rhat = 1.0; v.essBulk = v.essTail = 9000; big.vars << v; }
         QVERIFY(chronoresults::summarize(big, "Log.html").contains("presque atteinte"));
         QVERIFY(s.size() < 6000);
+    }
+
+    // Phases et successions de l'export HTML : valeurs exactes, remarques calculées, tableau, question qui nomme une phase.
+    void chronoModelResultsPhases()
+    {
+        using namespace seldon;
+        const char* page = R"HTML(<html><body><p>ChronoModel 4.0.0</p><p>Satisfactory convergence (max R&#770; = 1.0009, min ESS = 4745)</p>
+<h3>Phase: Uluzzian</h3><p>Number of Events: 3</p>
+<h4>Begin (posterior distrib.)</h4><p>Trace Stat.</p><p>Mean = 43753,0 ; Std = 405,0</p><p>Q1 = 43454,0 ; Q2 (Median) = 43730,0 ; Q3 = 44017,0</p>
+<p>min = 42000,0 ; max = 46000,0</p><p>MAP = 43706,2 ; Mean = 43753,1 ; Std = 406,0</p><p>Q1 = 43454,1 ; Q2 = 43731,0 ; Q3 = 44017,2</p>
+<p>Credibility Interval ( 95,000 %) : [ 43000,0 ; 44530,0 ] Age Cal. BP</p><p>HPD Region ( 95,002 %) : [ 43002,0 ; 44537,0 ] (95,002 %) Age Cal. BP</p>
+<h4>End (posterior distrib.)</h4><p>min = 40000,0 ; max = 42000,0</p><p>MAP = 41310,0 ; Mean = 41310,0 ; Std = 211,0</p><p>Q1 = 41168,0 ; Q2 = 41300,0 ; Q3 = 41449,0</p>
+<p>Credibility Interval ( 95,000 %) : [ 40900,0 ; 41730,0 ] Age Cal. BP</p><p>HPD Region ( 95,002 %) : [ 40899,0 ; 41734,0 ] (95,002 %) Age Cal. BP</p>
+<p>Phase Time Range ( 95,000 %) : [ 40843,199 ; 44520,273 ] Age Cal. BP</p>
+<h4>Duration (posterior distrib.)</h4><p>min = 500,0 ; max = 5000,0</p><p>MAP = 2366,0 ; Mean = 2443,0 ; Std = 446,0</p><p>Q1 = 2125,0 ; Q2 = 2400,0 ; Q3 = 2735,0</p>
+<p>Credibility Interval ( 95,000 %) : [ 1600,0 ; 3320,0 ] Years</p><p>HPD Region ( 95,005 %) : [ 1600,0 ; 3323,0 ] (95,005 %) Years</p>
+<h3>Phase: Mousterian</h3><p>Number of Events: 2</p>
+<h4>Begin (posterior distrib.)</h4><p>min = 62424,0 ; max = 76950,0</p><p>MAP = 76943,3 ; Mean = 73099,0 ; Std = 2528,8</p><p>Q1 = 71258,0 ; Q2 = 73233,6 ; Q3 = 75103,8</p>
+<p>Credibility Interval ( 95,000 %) : [ 68690,3 ; 76950,0 ] Age Cal. BP</p>
+<p>HPD Region ( 95,004 %) : [ 68583,4 ; 68594,6 ] (0,046 %) [ 68795,1 ; 76950,0 ] (94,958 %) Age Cal. BP</p>
+<h4>End (posterior distrib.)</h4><p>MAP = 43842,7 ; Mean = 43927,4 ; Std = 438,2</p><p>HPD Region ( 95,002 %) : [ 43106,9 ; 44782,9 ] (95,002 %) Age Cal. BP</p>
+<h4>Duration (posterior distrib.)</h4><p>MAP = 10,0 ; Mean = 900,0 ; Std = 800,0</p><p>HPD Region ( 95,0 %) : [ 0,000 ; 2400,0 ] (95,0 %) Years</p>
+<h3>Phase: Mochi Layer G</h3><p>Number of Events: 1</p>
+<h4>Begin (posterior distrib.)</h4><p>MAP = 41000,0 ; Mean = 41000,0 ; Std = 200,0</p><p>HPD Region ( 95,0 %) : [ 40620,0 ; 41370,0 ] (95,0 %) Age Cal. BP</p>
+<p>Succession : from Mousterian to Uluzzian</p><p>Min Hiatus unknown</p><p>Transition Range ( 95,000 %) : [ 43000,448 ; 44759,803 ] Age Cal. BP</p><p>No Gap</p>
+<p>Succession : from Uluzzian to Mochi Layer G</p><p>Min Hiatus unknown</p><p>Transition Range ( 95,000 %) : [ 40818,7 ; 41725,4 ] Age Cal. BP</p>
+<p>Gap Range ( 95,000 %) : [ 41296,704 ; 42325,679 ] Age Cal. BP</p>
+<h3>Event : A</h3><h4>Posterior Event Date</h4><p>R&#770; = 1.0000 &middot; ESS bulk = 12971 &middot; ESS tail = 11377 &#9989;</p>
+<p>MAP = 1000,00 ; Mean = 1001,00 ; Std = 20,00</p><p>HPD Region ( 95,0 %) : [ 960,0 ; 1040,0 ] (95,0 %) Age Cal. BP</p>
+</body></html>)HTML";
+        const QString text = chronoresults::htmlToText(QString::fromUtf8(page));
+        const chronoresults::Report r = chronoresults::parse(text);
+        QCOMPARE(r.phases.size(), 3);
+        QCOMPARE(r.successions.size(), 2);
+        QCOMPARE(r.events, 1);
+        QVERIFY(r.header.contains("Satisfactory convergence (max R̂ = 1.0009, min ESS = 4745)"));
+        const chronoresults::Phase& u = r.phases[0];
+        QCOMPARE(u.name, QString("Uluzzian"));
+        QCOMPARE(u.events, 3);
+        QCOMPARE(u.begin.map, 43706.2);
+        QCOMPARE(u.begin.q3, 44017.2);                    // quartiles de la densité, pas ceux du Trace Stat.
+        QCOMPARE(u.begin.unit, QString("Age Cal. BP"));
+        QCOMPARE(u.duration.unit, QString("Years"));
+        QVERIFY(u.hasRange && u.range.a == 40843.199);
+        QCOMPARE(r.phases[1].begin.hpd.size(), 2);
+        QCOMPARE(r.successions[0].from, QString("Mousterian"));
+        QCOMPARE(r.successions[0].to, QString("Uluzzian"));
+        QVERIFY(!r.successions[0].gap && r.successions[0].hasTransition);
+        QVERIFY(r.successions[1].gap && r.successions[1].gapRange.b == 42325.679);
+        QCOMPARE(r.vars.first().d.hpd.size(), 1);
+
+        const QString question = "Fais le tableau synthétique des phases";
+        const int f = chronoresults::focusOf(question);
+        QVERIFY((f & chronoresults::FocusPhases) && (f & chronoresults::FocusTable));
+        QCOMPARE(chronoresults::focusOf("le modèle a-t-il convergé ?"), 0);
+        QVERIFY(chronoresults::focusOf("quel est le gap entre A et B ?") & chronoresults::FocusSuccessions);
+        QVERIFY(!(chronoresults::focusOf("durée de l'Uluzzian ?") & chronoresults::FocusTable));
+
+        const QString html = chronoresults::tablesHtml(r, f);
+        QVERIFY(html.contains("<b>Mousterian</b>") && html.contains("0 (un seul Event)"));
+        QVERIFY(html.indexOf("<b>Mousterian</b>") < html.indexOf("<b>Uluzzian</b>"));     // BP : le plus ancien en tête
+        QVERIFY(html.contains("Gap Range") == false && html.contains("[41297 ; 42326]"));
+
+        const QString d = chronoresults::digest(r, f, question, 6000, true);
+        QVERIFY2(d.contains("DÉJÀ affiché"), qPrintable(d));
+        QVERIFY(d.contains("phase(s) à un seul Event") && d.contains("« Mochi Layer G »"));
+        QVERIFY(d.contains("« Mousterian » (début, 76950)"));
+        QVERIFY(!d.contains("plusieurs morceaux"));        // un morceau de 0,05 % n'est pas une multimodalité
+        QVERIFY(d.contains("HPD part de 0") && d.contains("« Mousterian »"));
+        QVERIFY(d.contains("gap (hiatus démontré au niveau indiqué) pour 1"));
+        QVERIFY(d.contains("[68795 ; 76950] (95.0 %) + morceaux < 1 %"));
+        QVERIFY(d.contains("durée nulle (un seul Event)"));
+        // la phase nommée passe en tête du détail ; un budget serré coupe le reste, en le disant
+        const QString d2 = chronoresults::digest(r, chronoresults::focusOf("durée de l'Uluzzian ?"), "durée de l'Uluzzian ?", 900, false);
+        QVERIFY2(d2.indexOf("- « Uluzzian » (3 Events)") > 0 && d2.contains("non transmises faute de place"), qPrintable(d2));
+        QVERIFY(d2.contains("durée MAP 2366, moy. 2443 ± 446, Q1–Q3 2125–2735, HPD 95 % [1600 ; 3323]"));
+        const QString e = chronoresults::tablesHtml(r, chronoresults::FocusEvents);
+        QVERIFY(e.contains("Events (1)") && e.contains("[960 ; 1040]"));
+    }
+
+    // Lexique multilingue : une question en espagnol, italien, allemand ou anglais déclenche les mêmes fiches et
+    // détecteurs qu'en français.
+    void multilingualLexicon()
+    {
+        using namespace seldon;
+        Lexicon lx;
+        QVERIFY(lx.reload() > 100);
+        // remplacement mot à mot, expressions, préfixes allemands, nombres et noms propres conservés
+        QCOMPARE(lx.translate("Haz la tabla resumen de las fases"), QString("fais la tableau synthese de las phases"));
+        QVERIFY(lx.translate("Phasenende von Fumane A2 bei 95 %").startsWith("fin de phase von fumane a2 bei 95 %"));
+        QVERIFY(lx.translate("Ich brauche die Kalibrierungen").contains("calibration"));
+        QVERIFY(lx.translate("Erstelle ein Alter-Tiefen-Modell").contains("courbe age-profondeur"));
+        QVERIFY(lx.translate("¿Por qué no converge?").contains("pourquoi"));
+        QCOMPARE(lx.translate("Fais le tableau des phases"), QString("fais le tableau des phases"));    // français inchangé
+
+        const QStringList table = { "Fais le tableau synthétique des phases", "Make a summary table of the phases",
+                                    "Haz una tabla resumen de las fases", "Fai una tabella riassuntiva delle fasi",
+                                    "Erstelle eine Übersichtstabelle aller Phasen" };
+        for (const QString& q : table) {
+            const int f = chronoresults::focusOf(lx.translate(q));
+            QVERIFY2((f & chronoresults::FocusPhases) && (f & chronoresults::FocusTable), qPrintable(q + " -> " + lx.translate(q)));
+        }
+        const QStringList durations = { "¿Cuál es la duración del Uluzzian?", "Qual è la durata dell'Uluzzian?", "Wie lange ist die Dauer des Uluzzian?" };
+        for (const QString& q : durations)
+            QVERIFY2(chronoresults::focusOf(lx.translate(q)) & chronoresults::FocusPhases, qPrintable(q));
+        const QStringList gaps = { "¿Hay un hiato entre las dos fases?", "C'è una lacuna tra le due fasi?", "Gibt es eine Lücke zwischen den Phasen?" };
+        for (const QString& q : gaps)
+            QVERIFY2(chronoresults::focusOf(lx.translate(q)) & chronoresults::FocusSuccessions, qPrintable(q + " -> " + lx.translate(q)));
+
+        const QStringList models = { "Crea un modelo ChronoModel con tres eventos", "Crea un modello ChronoModel con tre eventi",
+                                     "Erstelle ein ChronoModel-Modell mit drei Ereignissen" };
+        for (const QString& q : models) QVERIFY2(MethodRunner::isModelRequest(lx.translate(q)), qPrintable(q + " -> " + lx.translate(q)));
+        QVERIFY(MethodRunner::datingMethodsIn(lx.translate("datación por radiocarbono de un hueso")).contains("c14"));
+        QVERIFY(MethodRunner::datingMethodsIn(lx.translate("datazione archeomagnetica, inclinazione 62")).contains("am"));
+        QVERIFY(MethodRunner::datingMethodsIn(lx.translate("Thermolumineszenz-Datierung einer Scherbe")).contains("tl"));
+        QVERIFY(ChrSceneWidget::asksForDrawing(lx.translate("Zeichne das Modell")));
+        QVERIFY(ChrSceneWidget::asksForDrawing(lx.translate("Dibuja el modelo")));
+        QVERIFY(!ChrSceneWidget::asksForDrawing(lx.translate("La muestra del modelo es un hueso")));   // « muestra » = échantillon
+
+        // fiches : même choix qu'en français
+        SkillManager sm;
+        sm.reload(QString());
+        auto top = [&](const QString& q) { const auto m = sm.select(lx.translate(q), 6000); return m.isEmpty() ? QString() : m.first().skill->id; };
+        QCOMPARE(top("Interpretazione delle fasi: inizio e durata"), top("Interprétation des phases : début et durée"));
+        QCOMPARE(top("Tabla resumen de los hiatos y transiciones entre fases"), QString("19_chronomodel_phases_events"));
+        QCOMPARE(top("Warum konvergiert die Kette nicht? Konvergenzdiagnose"), top("Pourquoi la chaîne ne converge pas ? convergence"));
+        // lexique utilisateur : complète et remplace
+        lx.addText("phase = schicht*\nfin = termine");
+        QCOMPARE(lx.translate("Schichten termine, Schichtenfolge"), QString("phase fin, stratigraphie"));   // mot exact avant préfixe
     }
 
     void levelFollowUp()
@@ -1781,6 +1918,19 @@ private slots:
         QVERIFY(!ChrBuilder::asksForJson("Crée le fichier chr"));
     }
 
+    void stripModelBlocks()
+    {
+        // Datation simple : le modèle de langage a ajouté un modèle non demandé, retiré avec son annonce et le séparateur.
+        const QString answer = "### Résultat\nHPD : 16 → 64\n\n---\n**Modèle ChronoModel** (à exporter) :\n```chronomodel\n"
+                               "{\n  \"type\": \"am\",\n  \"inc\": 65\n}\n```";
+        QCOMPARE(ChrBuilder::stripModelBlocks(answer), QString("### Résultat\nHPD : 16 → 64"));
+        // bloc en cours d'écriture
+        QCOMPARE(ChrBuilder::stripModelBlocks("Texte\n```chronomodel\n{\"type\""), QString("Texte"));
+        // autres blocs inchangés
+        const QString other = "Texte\n```calcul\n{\"method\":\"c14\"}\n```\n```json\n{\"a\":1}\n```";
+        QCOMPARE(ChrBuilder::stripModelBlocks(other), other);
+    }
+
     void extractSpec()
     {
         QJsonObject spec; QString err;
@@ -2101,6 +2251,17 @@ private slots:
                 ++calcExamples;
                 continue;
             }
+            if (e.method == "combine") {                   // combinaison : une seule demande « combine », calculée
+                const QVector<QJsonObject> rq = MethodRunner::requestsFromQuestion(e.text);
+                QVERIFY2(rq.size() == 1 && rq[0].value("method").toString() == "combine", qPrintable("combinaison non reconnue : " + e.text));
+                QVERIFY2(rq[0].value("dates").toArray().size() >= 2, qPrintable("datations de la combinaison non comprises : " + e.text));
+                const RunOutcome o = MethodRunner::run(rq);
+                QVERIFY2(o.promptBlock.contains("Densité combinée") && !o.promptBlock.contains("Calcul impossible"),
+                         qPrintable("combinaison impossible : " + e.text + "\n" + o.promptBlock.left(600)));
+                methods << e.method;
+                ++checked;
+                continue;
+            }
             if (e.method == "event") {                     // événement : au moins deux datations calculables, combinées en MCMC
                 QVERIFY2(MethodRunner::asksEvent(e.text), qPrintable("événement non reconnu : " + e.text));
                 auto d = MethodRegistry::instance().parse(e.text);
@@ -2122,7 +2283,8 @@ private slots:
                 const RunOutcome o = MethodRunner::analyzeQuestion(e.text);
                 QVERIFY2(o.count == 1 && o.promptBlock.contains("densité de t + δ"), qPrintable("wiggle non appliqué : " + e.text));
             }
-            const auto v = MethodRegistry::instance().parse(e.text);
+            // Comme l'application : années av. J.-C. converties en années astronomiques avant la lecture.
+            const auto v = MethodRegistry::instance().parse(seldon::text::erasToAstronomical(e.text));
             QVERIFY2(!v.isEmpty(), qPrintable("exemple non compris : " + e.text));
             QCOMPARE(v[0].value("method").toString(), e.method);
             const auto r = MethodRegistry::instance().compute(v[0]);
@@ -2150,11 +2312,20 @@ private slots:
         QCOMPARE(dateformat::convert(-1898.0, DateFormat::DatBP), -3848.0);
         QCOMPARE(dateformat::convert(-1898.0, DateFormat::Ka), 1.898);
         QCOMPARE(dateformat::convert(1200.0, DateFormat::BcAd), 1200.0);
-        QCOMPARE(dateformat::format(-1898.0, DateFormat::BcAd), QString("1899 av. J.-C."));
+        // BC/AD : année astronomique signée, comme ChronoModel et les .chr ; « av. J.-C. » seulement en format historique
+        QCOMPARE(dateformat::format(-1898.0, DateFormat::BcAd), QString("-1898"));
+        QCOMPARE(dateformat::format(-1898.0, DateFormat::Historic), QString("1899 av. J.-C."));
+        QCOMPARE(dateformat::format(0.0, DateFormat::Historic), QString("1 av. J.-C."));
+        QCOMPARE(dateformat::convert(-1898.0, DateFormat::Historic), -1898.0);
+        QCOMPARE(dateformat::detect("donne les dates en av. J.-C.", DateFormat::BcAd), DateFormat::Historic);
+        QCOMPARE(dateformat::detect("résultats en années historiques", DateFormat::BcAd), DateFormat::Historic);
+        QCOMPARE(dateformat::detect("C14 de 6300 av. J.-C. avec IntCal20", DateFormat::BcAd), DateFormat::BcAd);   // date d'entrée
+        QCOMPARE(dateformat::detect("donne les dates en années astronomiques", DateFormat::Historic), DateFormat::BcAd);
+        QVERIFY(dateformat::systemHint(DateFormat::BcAd).find("astronomiques") != std::string::npos);
         QCOMPARE(dateformat::format(-1898.0, DateFormat::CalBP), QString("3848 cal BP"));
         QCOMPARE(dateformat::format(-1898.0, DateFormat::BceCe), QString("1899 BCE"));
         QVERIFY(dateformat::isAge(DateFormat::CalBP) && !dateformat::isAge(DateFormat::DatBP));
-        for (const char* id : { "bcad", "bcece", "calbp", "calb2k", "datbp", "datb2k", "ka", "ma", "numeric" })
+        for (const char* id : { "bcad", "historic", "bcece", "calbp", "calb2k", "datbp", "datb2k", "ka", "ma", "numeric" })
             QCOMPARE(QString::fromLatin1(dateformat::id(dateformat::fromId(id))), QString(id));
 
         // Sans unité : valeur signée brute, sans suffixe
@@ -2177,10 +2348,12 @@ private slots:
         }
         {
             const dateformat::PrecisionScope p(0.42);                                          // σ < 1 an
-            QCOMPARE(dateformat::format(1515.37, DateFormat::BcAd), QString("1515,37 apr. J.-C."));
-            QCOMPARE(dateformat::format(-0.25, DateFormat::BcAd), QString("1,25 av. J.-C."));
+            QCOMPARE(dateformat::format(1515.37, DateFormat::Historic), QString("1515,37 apr. J.-C."));
+            QCOMPARE(dateformat::format(-0.25, DateFormat::Historic), QString("1,25 av. J.-C."));
+            QCOMPARE(dateformat::format(-0.25, DateFormat::BcAd), QString("-0,25"));
         }
-        QCOMPARE(dateformat::format(-1898.4, DateFormat::BcAd), QString("1899 av. J.-C."));    // contexte rétabli
+        QCOMPARE(dateformat::format(-1898.4, DateFormat::Historic), QString("1899 av. J.-C."));    // contexte rétabli
+        QCOMPARE(dateformat::format(-1898.4, DateFormat::BcAd), QString("-1898"));
 
         // Décimales fixes
         dateformat::setDecimals(2);
@@ -2192,7 +2365,8 @@ private slots:
         dateformat::setDecimals(0);
         QCOMPARE(dateformat::format(-1898.0, DateFormat::Ka), QString("2 ka"));
         dateformat::setDecimals(dateformat::kAutoDecimals);
-        QVERIFY(dateformat::systemHint(DateFormat::BcAd).empty());
+        // Par défaut aussi : le modèle doit écrire les années signées, sans les convertir en av. J.-C.
+        QVERIFY(QString::fromStdString(dateformat::systemHint(DateFormat::BcAd)).contains("ne les convertis PAS"));
 
         // Détection dans la question : un « BP » d'entrée n'est pas une demande de format.
         const DateFormat d = DateFormat::BcAd;
@@ -2209,7 +2383,8 @@ private slots:
         const auto bc = MethodRunner::analyzeQuestion("C14 de 3560 ± 20 BP, courbe IntCal13");
         const auto bp = MethodRunner::analyzeQuestion("C14 de 3560 ± 20 BP, courbe IntCal13, donne le résultat en cal BP");
         QVERIFY(bc.found && bp.found);
-        QVERIFY(bc.noticeHtml.contains("av. J.-C."));
+        QVERIFY(!bc.noticeHtml.contains("av. J.-C.") && bc.noticeHtml.contains(" → -"));   // années signées par défaut
+        QVERIFY(MethodRunner::analyzeQuestion("C14 de 3560 ± 20 BP, courbe IntCal13, donne les dates en av. J.-C.").noticeHtml.contains("av. J.-C."));
         QVERIFY(bp.noticeHtml.contains("cal BP") && !bp.noticeHtml.contains("av. J.-C."));
         QVERIFY(bp.noticeHtml.contains("3912 cal BP → 3826 cal BP") || bp.noticeHtml.contains("cal BP → "));
         QVERIFY(bp.promptBlock.contains("Format des dates"));
@@ -2556,9 +2731,9 @@ private slots:
     void toolsSchema()
     {
         const auto& all = seldon::tools::all();
-        QCOMPARE(all.size(), 9);
+        QCOMPARE(all.size(), 13);
         const QJsonArray api = seldon::tools::schemaForApi();
-        QCOMPARE(api.size(), 9);
+        QCOMPARE(api.size(), 13);
         static const QRegularExpression okName("^[a-z0-9_]{1,64}$");
         QStringList seen;
         for (const QJsonValue& v : api) {
@@ -2572,8 +2747,9 @@ private slots:
         }
         // chaque outil de calcul vise une méthode qui existe
         for (const auto& d : all)
-            // « event » combine les autres méthodes (MCMC) ; « density_file » écrit un fichier pour le plugin Density
-            if (!d.methodId.isEmpty() && d.methodId != "event" && d.methodId != "density_file")
+            // « event » (MCMC) et « combine » (produit) combinent les autres méthodes ; « density_file » écrit un fichier pour
+            // le plugin Density ; « traces » lit les chaînes jointes ; « inverse » lit une courbe de référence ; « order » compare deux datations
+            if (!d.methodId.isEmpty() && !QStringList{ "event", "combine", "order", "density_file", "traces", "inverse" }.contains(d.methodId))
                 QVERIFY2(seldon::MethodRegistry::instance().byId(d.methodId) != nullptr, qPrintable(d.name));
     }
 
@@ -2702,7 +2878,7 @@ private slots:
         const RemoteConfig cfg{ "http://x/v1", "", "m" };
         const QJsonObject b1 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
                                                                            tools::schemaForApi(), QJsonArray{ am, tm })).object();
-        QCOMPARE(b1.value("tools").toArray().size(), 9);
+        QCOMPARE(b1.value("tools").toArray().size(), 13);
         QCOMPARE(b1.value("tool_choice").toString(), QString("auto"));
         QCOMPARE(b1.value("messages").toArray().size(), 3);
         const QJsonObject b2 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
@@ -2745,7 +2921,7 @@ private slots:
 
         // 1re requête : outils déclarés
         const QJsonObject first = QJsonDocument::fromJson(srv.bodies_[0]).object();
-        QCOMPARE(first.value("tools").toArray().size(), 9);
+        QCOMPARE(first.value("tools").toArray().size(), 13);
 
         eng.submitToolResults({ { cs[0].id, cs[0].name, out.content } });
         QTRY_COMPARE_WITH_TIMEOUT(fin.count(), 1, 5000);
@@ -3204,12 +3380,15 @@ private slots:
             for (int i = 0; i < nb; ++i) x.push_back(1150.0 + 60.0 * (u(i) - 0.5));
             return x;
         };
-        // Valeurs de référence R 4.x : bw.SJ(x) et bw.nrd0(x) (tolérance : uniroot de R, tol = 0.1·lower)
-        const std::vector<double> small = bimodal(200, 100);   // n ≤ 500 : comptage exact des paires
-        QVERIFY2(std::abs(kernelBandwidth(small) - 7.9873318) < 0.02, qPrintable(QString::number(kernelBandwidth(small))));
+        // SJ : valeurs de bw_SJ_ste() de ChronoModel (même algorithme), à 1e-6 près en relatif.
+        //      Pour mémoire, R 4.x : bw.SJ = 7.9873318 et 6.2520425 (racine à tol = 0.1·lower près),
+        //      7.968105 et 6.241631 avec une racine serrée ; écart < 0.1 % (fonctionnelles par FFT au lieu des paires binnées).
+        // Silverman : exactement bw.nrd0(x) de R.
+        const std::vector<double> small = bimodal(200, 100);
+        QVERIFY2(std::abs(kernelBandwidth(small) / 7.97480637522 - 1.0) < 1e-6, qPrintable(QString::number(kernelBandwidth(small), 'g', 12)));
         QVERIFY(std::abs(kernelBandwidth(small, Bandwidth::Silverman) - 20.926738) < 1e-4);
-        const std::vector<double> big = bimodal(400, 200);     // n > 500 : comptage binné
-        QVERIFY2(std::abs(kernelBandwidth(big) - 6.2520425) < 0.02, qPrintable(QString::number(kernelBandwidth(big))));
+        const std::vector<double> big = bimodal(400, 200);
+        QVERIFY2(std::abs(kernelBandwidth(big) / 6.24532985806 - 1.0) < 1e-6, qPrintable(QString::number(kernelBandwidth(big), 'g', 12)));
         QVERIFY(std::abs(kernelBandwidth(big, Bandwidth::Silverman) - 18.240028) < 1e-4);
         // Le creux entre les deux modes est conservé (Silverman le comble en partie)
         const Density sj = kernelDensity(big, 0, 2000), sv = kernelDensity(big, 0, 2000, Bandwidth::Silverman);
@@ -3220,7 +3399,10 @@ private slots:
     void eventFromQuestionAndTool()
     {
         QVERIFY(MethodRunner::asksEvent("Calcule l'événement avec ces deux dates"));
-        QVERIFY(MethodRunner::asksEvent("combine ces datations"));
+        QVERIFY(MethodRunner::asksCombine("combine ces datations"));
+        QVERIFY(!MethodRunner::asksEvent("combine ces datations"));
+        QVERIFY(MethodRunner::asksEvent("combine en un événement ces datations"));
+        QVERIFY(!MethodRunner::asksCombine("combine en un événement ces datations"));
         QVERIFY(!MethodRunner::asksEvent("C14 de 2500 ± 30 BP"));
         const QJsonObject m = MethodRunner::mcmcFromQuestion("avec 20 000 itérations, un burn-in de 500, 2 chaînes, graines 11;12");
         QCOMPARE(m["num_iter"].toInt(), 20000);
@@ -3243,10 +3425,27 @@ private slots:
         QVERIFY(calls > 0);
         QCOMPARE(o.plot["series"].toArray().size(), 3);                 // θ + 2 calibrations
         QVERIFY(!o.plot["series"].toArray()[1].toObject()["fill"].toBool(true));
-        QCOMPARE(o.extraPlots.size(), 1);                               // traces des chaînes
-        QCOMPARE(o.extraPlots[0]["series"].toArray().size(), 4);
+        QCOMPARE(o.extraPlots.size(), 0);                               // traces non demandées : pas tracées
+        QVERIFY(!o.promptBlock.contains("dans un autre onglet"));
+
+        // Traces seulement sur demande explicite
+        QVERIFY(MethodRunner::asksTraces("Calcule l'événement avec ces deux dates et affiche les traces"));
+        QVERIFY(MethodRunner::asksTraces("montre la trace de θ"));
+        QVERIFY(MethodRunner::asksTraces("avec les traces des chaînes MCMC"));
+        QVERIFY(MethodRunner::asksTraces("show the trace plot"));
+        QVERIFY(!MethodRunner::asksTraces("trace la courbe de l'événement"));
+        QVERIFY(!MethodRunner::asksTraces("traces d'occupation datées par C14, combine-les"));
+        QVERIFY(!MethodRunner::asksTraces("les traces de feu du foyer : même événement"));
+        const RunOutcome withTraces = MethodRunner::run({ QJsonObject{
+            { "method", "event" }, { "traces", true },
+            { "dates", QJsonArray{ QJsonObject{ { "method", "gauss" }, { "age", 1200 }, { "error", 40 } },
+                                   QJsonObject{ { "method", "gauss" }, { "age", 1230 }, { "error", 40 } } } },
+            { "mcmc", QJsonObject{ { "num_iter", 2000 }, { "seeds", QJsonArray{ 1, 2, 3, 4 } } } } } });
+        QCOMPARE(withTraces.extraPlots.size(), 1);                      // traces des chaînes
+        QCOMPARE(withTraces.extraPlots[0]["series"].toArray().size(), 4);
+        QVERIFY(withTraces.promptBlock.contains("dans un autre onglet"));
         seldon::CurveSpec sp;
-        QVERIFY(seldon::CurveSpec::fromJson(o.extraPlots[0], sp));
+        QVERIFY(seldon::CurveSpec::fromJson(withTraces.extraPlots[0], sp));
         QVERIFY(!sp.yFromZero);
         QVERIFY(o.promptBlock.contains("Convergence"));
         QVERIFY(o.noticeHtml.contains("largeur de bande <b>h = "));
@@ -3269,6 +3468,46 @@ private slots:
 
     // Fragment JSON collé dans la question (bloc chronomodel / .chr) : l'application lance l'événement elle-même ;
     // blocs ```calcul tolérants (nombres en texte, alias, nom d'outil, objets séparés par des virgules, format .chr).
+    // Noms des dates d'un événement : dans le texte avec leur type et leurs valeurs, seuls dans la légende ; une date
+    // nommée comme l'événement (nom recopié par le modèle de langage, cas des dates avec wiggle) n'a pas de nom propre.
+    void eventDateNames()
+    {
+        const QJsonObject ev = QJsonDocument::fromJson(R"({"method":"event","name":"Four",
+            "dates":[{"method":"gauss","name":"Ly-1","age":1200,"error":40},
+                     {"method":"gauss","name":"Four","age":1230,"error":40,"wiggle":{"type":"fixed","value":-10}}],
+            "mcmc":{"num_iter":5000,"seeds":[5,6,7,8]}})").object();
+        const RunOutcome o = MethodRunner::run({ ev });
+        QVERIFY2(o.promptBlock.contains("- Ly-1 — "), qPrintable(o.promptBlock));
+        QVERIFY(!o.promptBlock.contains("- Four"));
+        QStringList legend;
+        for (const QJsonValue& v : o.plot["series"].toArray()) legend << v.toObject()["name"].toString();
+        QVERIFY2(legend.contains("Ly-1"), qPrintable(legend.join(" | ")));
+        QVERIFY2(!legend.join("|").contains("(calibration") && legend.count("Four") == 0, qPrintable(legend.join(" | ")));
+
+        // Noms oubliés par le modèle de langage : repris des dates du .chr (mêmes valeurs ; même décalage de préférence)
+        const QVector<QJsonObject> known = {
+            QJsonDocument::fromJson(R"({"name":"Gor-1","plugin_id":"14c","data":{"age":3292,"error":16},"delta_type":0,"delta_fixed":-190})").object(),
+            QJsonDocument::fromJson(R"({"name":"Gor-2","plugin_id":"14c","data":{"age":3292,"error":16},"delta_type":0,"delta_fixed":-200})").object(),
+            QJsonDocument::fromJson(R"({"name":"Gor-3","plugin_id":"14c","data":{"age":3430,"error":14}})").object() };
+        const QJsonObject filled = MethodRunner::fillDateNames(QJsonDocument::fromJson(R"({"method":"event","name":"Gordion","dates":[
+            {"method":"c14","age":3292,"error":16,"wiggle":{"type":"fixed","value":-200}},
+            {"method":"c14","age":3292,"error":16,"wiggle":{"type":"fixed","value":-190}},
+            {"method":"c14","age":3430,"error":14,"name":"Gordion"},
+            {"method":"c14","age":3000,"error":14},
+            {"method":"c14","age":3430,"error":14,"name":"Mine"}]})").object(), known);
+        const QJsonArray fd = filled["dates"].toArray();
+        QCOMPARE(fd[0].toObject()["name"].toString(), QString("Gor-2"));
+        QCOMPARE(fd[1].toObject()["name"].toString(), QString("Gor-1"));
+        QCOMPARE(fd[2].toObject()["name"].toString(), QString("Gor-3"));
+        QVERIFY(!fd[3].toObject().contains("name"));
+        QCOMPARE(fd[4].toObject()["name"].toString(), QString("Mine"));
+
+        // Résumé d'un .chr : le nom de chaque date est donné au modèle de langage
+        const QJsonObject chr = QJsonDocument::fromJson(R"({"events":[{"name":"E","dates":[{"name":"Gor-1","plugin_id":"14c",
+            "data":{"age":3430,"error":14}}]}]})").object();
+        QVERIFY2(ChrBuilder::summarize(chr).contains("E : « Gor-1 » 14C 3430±14"), qPrintable(ChrBuilder::summarize(chr)));
+    }
+
     void eventFromJsonFragment()
     {
         const QString q = "calcul Event avec ces deux dates, 10000 itérations\n"
@@ -3578,6 +3817,638 @@ private slots:
         QVERIFY(panel.saveCurrentTo(dir.filePath("courbe.png")));
         QVERIFY(!QImage(dir.filePath("courbe.png")).isNull());
 
+    }
+
+    // Combinaison de datations (produit des vraisemblances, « Combine » de ChronoModel) et test de Ward et Wilson.
+    // ---- Ordre de deux datations (P(A antérieure à B), écart B − A)
+
+    void orderOfDates()
+    {
+        const seldon::MethodRegistry& reg = seldon::MethodRegistry::instance();
+        const seldon::MethodResult a = reg.compute(QJsonObject{ { "method", "gauss" }, { "age", 0 }, { "error", 30 } });
+        const seldon::MethodResult b = reg.compute(QJsonObject{ { "method", "gauss" }, { "age", 50 }, { "error", 40 } });
+        QVERIFY(a.ok && b.ok);
+        // Deux gaussiennes : B − A ~ N(50 ; 50), P(A < B) = Φ(1) = 0,8413.
+        const double p = seldon::probabilityBefore(a.density, b.density);
+        QVERIFY2(std::abs(p - 0.841345) < 0.004, qPrintable(QString::number(p)));
+        QVERIFY(std::abs(seldon::probabilityBefore(b.density, a.density) - (1.0 - p)) < 0.004);
+        const seldon::Density d = seldon::differenceDensity(a.density, b.density);
+        QVERIFY(d.valid());
+        const seldon::DensityStats st = seldon::densityStats(d);
+        QVERIFY2(std::abs(st.mean - 50.0) < 1.0, qPrintable(QString::number(st.mean)));
+        QVERIFY2(std::abs(st.sd - 50.0) < 1.5, qPrintable(QString::number(st.sd)));
+        QVERIFY(std::abs(seldon::probabilityBefore(a.density, a.density) - 0.5) < 0.01);      // même date : 50 %
+
+        // Demande « order » exécutée par MethodRunner : fiche, texte pour le modèle, densités et écart à part.
+        const QJsonObject rq{ { "method", "order" },
+                              { "a", QJsonObject{ { "method", "gauss" }, { "name", "US 12" }, { "age", 0 }, { "error", 30 } } },
+                              { "b", QJsonObject{ { "method", "gauss" }, { "name", "US 10" }, { "age", 50 }, { "error", 40 } } } };
+        const seldon::RunOutcome out = seldon::MethodRunner::run({ rq });
+        QVERIFY(out.found);
+        QVERIFY2(out.promptBlock.contains(QStringLiteral("P(« US 12 » antérieur à « US 10 ») = 84,1 %")), qPrintable(out.promptBlock));
+        QVERIFY(out.promptBlock.contains(QStringLiteral("P(« US 10 » antérieur à « US 12 ») = 15,9 %")));
+        QVERIFY(out.promptBlock.contains(QStringLiteral("indépendantes")));
+        QVERIFY(out.noticeHtml.contains(QStringLiteral("Écart")));
+        QCOMPARE(out.plot.value("series").toArray().size(), 2);
+        QCOMPARE(out.extraPlots.size(), 1);
+        QVERIFY(out.extraPlots[0].value("title").toString().contains(QStringLiteral("US 10 − US 12")));
+        // « dates » à deux éléments accepté aussi ; datation sans méthode : message clair.
+        const seldon::RunOutcome o2 = seldon::MethodRunner::run({ QJsonObject{ { "method", "ordre" },
+            { "dates", QJsonArray{ QJsonObject{ { "method", "gauss" }, { "age", 0 }, { "error", 30 } },
+                                   QJsonObject{ { "method", "gauss" }, { "age", 50 }, { "error", 40 } } } } } });
+        QVERIFY(o2.promptBlock.contains(QStringLiteral("P(« A » antérieur à « B ») = 84,1 %")));
+        const seldon::RunOutcome o3 = seldon::MethodRunner::run({ QJsonObject{ { "method", "order" },
+            { "a", QJsonObject{ { "age", 0 }, { "error", 30 } } }, { "b", QJsonObject{ { "method", "gauss" }, { "age", 5 }, { "error", 3 } } } } });
+        QVERIFY(o3.promptBlock.contains(QStringLiteral("calcul impossible")));
+        // Radiocarbone : deux âges très séparés -> ordre net.
+        const seldon::RunOutcome o4 = seldon::MethodRunner::run({ QJsonObject{ { "method", "order" },
+            { "a", QJsonObject{ { "method", "c14" }, { "age", 3000 }, { "error", 30 } } },
+            { "b", QJsonObject{ { "method", "c14" }, { "age", 2000 }, { "error", 30 } } } } });
+        QVERIFY2(o4.promptBlock.contains(QStringLiteral("P(« A » antérieur à « B ») = > 99,9 %")), qPrintable(o4.promptBlock.left(600)));
+
+        // Détection dans la question
+        for (const char* q : { "Comment faire pour savoir quelle date est avant l'autre, A ou B ?",
+                               "Ly-1 2500 ± 30 BP et Ly-2 2450 ± 30 BP : laquelle est la plus ancienne ?",
+                               "A est-elle antérieure à B ?", "is A older than B?", "Which date is earlier?",
+                               "quelle est la probabilité que A soit avant B ?", "ordre chronologique de ces deux dates" })
+            QVERIFY2(seldon::MethodRunner::asksOrder(QString::fromUtf8(q)), q);
+        for (const char* q : { "calibre 2500 ± 30 BP", "uniforme entre 500 avant J.-C. et 200 avant J.-C.",
+                               "quel âge 14C attendre pour 500 av. J.-C. ?", "Calcule l'événement à partir de ces deux dates" })
+            QVERIFY2(!seldon::MethodRunner::asksOrder(QString::fromUtf8(q)), q);
+        const QVector<QJsonObject> rqs = seldon::MethodRunner::requestsFromQuestion(
+            QStringLiteral("C14 2500 ± 30 BP et C14 2450 ± 30 BP : laquelle est la plus ancienne ?"));
+        QCOMPARE(rqs.size(), 1);
+        QCOMPARE(rqs[0].value("method").toString(), QString("order"));
+        QCOMPARE(rqs[0].value("a").toObject().value("age").toDouble(), 2500.0);
+        QCOMPARE(rqs[0].value("b").toObject().value("age").toDouble(), 2450.0);
+        // Événement demandé : pas d'ordre.
+        QCOMPARE(seldon::MethodRunner::requestsFromQuestion(
+                     QStringLiteral("Calcule l'événement : C14 2500 ± 30 BP et C14 2450 ± 30 BP, laquelle est la plus ancienne ?"))
+                     .first().value("method").toString(), QString("event"));
+
+        // Outil comparer_dates (modèle distant), arguments en texte compris.
+        const seldon::tools::ToolOutcome t = seldon::tools::execute("comparer_dates",
+            "{\"a\":{\"method\":\"gauss\",\"age\":\"0\",\"error\":30},\"b\":\"{\\\"method\\\":\\\"gauss\\\",\\\"age\\\":50,\\\"error\\\":40}\"}", seldon::DateFormat::BcAd);
+        QVERIFY(t.executed);
+        QVERIFY2(t.content.contains(QStringLiteral("84,1 %")), qPrintable(t.content.left(400)));
+        QCOMPARE(t.request.value("method").toString(), QString("order"));
+        const seldon::tools::ToolOutcome t2 = seldon::tools::execute("comparer_dates", R"({"a":{"age":1}})", seldon::DateFormat::BcAd);
+        QVERIFY(!t2.executed);
+        QVERIFY(t2.content.contains(QStringLiteral("Calcul non lancé")));
+        // Bloc ```calcul d'un modèle local
+        const QVector<QJsonObject> blocks = seldon::MethodRunner::extractCalcBlocks(
+            "```calcul\n{\"method\":\"order\",\"a\":{\"method\":\"14C\",\"age\":2500,\"error\":30},\"b\":{\"method\":\"c14\",\"age\":2450,\"error\":30}}\n```\n");
+        QCOMPARE(blocks.size(), 1);
+        QCOMPARE(blocks[0].value("a").toObject().value("method").toString(), QString("c14"));
+    }
+
+    // ---- Test d'appel d'outils du serveur distant (Préférences : mode automatique)
+
+    void toolsProbe()
+    {
+        using namespace seldon;
+        auto ok = [](const QByteArray& b) { return toolprobe::classify(200, b); };
+        QCOMPARE(ok("{\"choices\":[{\"message\":{\"content\":null,\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"verifier_outil\",\"arguments\":\"{\\\"valeur\\\":42}\"}}]}}]}").support,
+                 ToolSupport::Native);
+        QCOMPARE(ok("{\"choices\":[{\"message\":{\"content\":\"{\\\"name\\\": \\\"verifier_outil\\\", \\\"arguments\\\": {\\\"valeur\\\": 42}}\"}}]}").support,
+                 ToolSupport::TextOnly);
+        QCOMPARE(ok(R"({"choices":[{"message":{"content":"<tool_call>{...}</tool_call>"}}]})").support, ToolSupport::TextOnly);
+        QCOMPARE(ok(R"({"choices":[{"message":{"content":"Bonjour, 42."}}]})").support, ToolSupport::Ignored);
+        // Serveur qui diffuse malgré stream:false
+        QCOMPARE(ok("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c\",\"type\":\"function\",\"function\":{\"name\":\"verifier_outil\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n").support,
+                 ToolSupport::Native);
+        QCOMPARE(toolprobe::classify(400, R"({"error":{"message":"registry.ollama.ai/library/x does not support tools"}})").support, ToolSupport::Refused);
+        QCOMPARE(toolprobe::classify(400, "{\"error\":{\"message\":\"\\\"auto\\\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\"}}").support,
+                 ToolSupport::Refused);
+        QCOMPARE(toolprobe::classify(401, R"({"error":{"message":"Incorrect API key"}})").support, ToolSupport::Unknown);
+        QCOMPARE(toolprobe::classify(0, {}, "Connection refused").support, ToolSupport::Unknown);
+
+        ToolProbeResult nat; nat.support = ToolSupport::Native;
+        ToolProbeResult no; no.support = ToolSupport::Ignored;
+        QVERIFY(toolprobe::wantTools("auto", nullptr));        // pas encore testé : on essaie (le repli du moteur couvre un refus)
+        QVERIFY(toolprobe::wantTools("auto", &nat));
+        QVERIFY(!toolprobe::wantTools("auto", &no));
+        QVERIFY(toolprobe::wantTools("on", &no));
+        QVERIFY(!toolprobe::wantTools("off", &nat));
+        QVERIFY(toolprobe::describe(no, false).contains(QStringLiteral("bloc de calcul")));
+
+        QSettings().remove("remote/toolsProbe");
+        // Requête de test réelle contre un faux serveur : 1er essai refusé pour max_tokens, 2e accepté avec un appel.
+        MockServer srv([](const QByteArray&, const QByteArray& body, int i) {
+            const QJsonObject o = QJsonDocument::fromJson(body).object();
+            if (i == 0) return httpResponse(400, "application/json", R"({"error":{"message":"Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead."}})");
+            if (!o.contains("max_completion_tokens")) return httpResponse(500, "application/json", "{}");
+            return httpResponse(200, "application/json",
+                "{\"choices\":[{\"message\":{\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"verifier_outil\",\"arguments\":\"{\\\"valeur\\\":42}\"}}]}}]}");
+        });
+        ToolsProbe probe;
+        QSignalSpy done(&probe, &ToolsProbe::finished);
+        probe.start({ srv.baseUrl(), "", "modele-x" });
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 5000);
+        const ToolProbeResult r = done[0][0].value<ToolProbeResult>();
+        QCOMPARE(r.support, ToolSupport::Native);
+        QCOMPARE(srv.bodies_.size(), 2);
+        const QJsonObject sent = QJsonDocument::fromJson(srv.bodies_[0]).object();
+        QCOMPARE(sent.value("stream").toBool(true), false);
+        QCOMPARE(sent.value("tools").toArray().size(), 1);
+        ToolProbeResult c;
+        QVERIFY(toolprobe::cached(srv.baseUrl(), "modele-x", c));
+        QCOMPARE(c.support, ToolSupport::Native);
+        QVERIFY(toolprobe::isFresh(c));
+        QVERIFY(!toolprobe::cached(srv.baseUrl(), "autre-modele", c));
+        // Échec réseau : rien n'est mémorisé ni effacé.
+        toolprobe::store(srv.baseUrl(), "modele-x", toolprobe::classify(0, {}, "x"));
+        QVERIFY(toolprobe::cached(srv.baseUrl(), "modele-x", c));
+        QSettings().remove("remote/toolsProbe");
+    }
+
+    // ---- Serveur MCP (seldonh-mcp) : protocole JSON-RPC sur stdio
+
+    void mcpServer()
+    {
+        QList<QByteArray> notes;
+        seldon::McpServer srv([&](const QByteArray& l) { notes << l; });
+        auto call = [&](const QByteArray& line) { return QJsonDocument::fromJson(srv.handleLine(line)).object(); };
+        QJsonObject r = call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}");
+        QCOMPARE(r.value("result").toObject().value("protocolVersion").toString(), QString("2025-06-18"));
+        QVERIFY(r.value("result").toObject().value("capabilities").toObject().contains("tools"));
+        r = call("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1999-01-01\"}}");
+        QCOMPARE(r.value("result").toObject().value("protocolVersion").toString(), seldon::McpServer::protocolVersions().first());
+        QVERIFY(srv.handleLine("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}").isEmpty());
+        r = call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}");
+        const QJsonArray tl = r.value("result").toObject().value("tools").toArray();
+        QCOMPARE(tl.size(), int(seldon::tools::all().size()));
+        bool tracesFile = false, densityFolder = false;
+        for (const QJsonValue& v : tl) {
+            const QJsonObject t = v.toObject();
+            QVERIFY(t.contains("inputSchema"));
+            QCOMPARE(t.value("inputSchema").toObject().value("type").toString(), QString("object"));
+            if (t.value("name") == "analyser_traces") tracesFile = t.value("inputSchema").toObject().value("properties").toObject().contains("file");
+            if (t.value("name") == "creer_densite") densityFolder = t.value("inputSchema").toObject().value("properties").toObject().contains("dossier");
+        }
+        QVERIFY(tracesFile && densityFolder);
+        r = call("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"comparer_dates\",\"arguments\":{\"a\":{\"method\":\"gauss\",\"age\":0,\"error\":30},\"b\":{\"method\":\"gauss\",\"age\":50,\"error\":40}}}}");
+        QJsonObject res = r.value("result").toObject();
+        QCOMPARE(res.value("isError").toBool(true), false);
+        const QString text = res.value("content").toArray().first().toObject().value("text").toString();
+        QVERIFY2(text.contains(QStringLiteral("84,1 %")), qPrintable(text.left(300)));
+        QVERIFY(!text.contains(QStringLiteral("DÉJÀ tracé")));
+        QVERIFY(res.value("structuredContent").toObject().contains("plot"));
+        // Valeur manquante : erreur d'exécution lisible (isError), pas une erreur de protocole.
+        r = call("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"dater_luminescence\",\"arguments\":{\"age\":800,\"error\":60}}}");
+        QCOMPARE(r.value("result").toObject().value("isError").toBool(), true);
+        // Outil d'information : pas une erreur.
+        r = call("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"courbes_disponibles\",\"arguments\":{}}}");
+        QCOMPARE(r.value("result").toObject().value("isError").toBool(true), false);
+        // Erreurs de protocole
+        QCOMPARE(call("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"inexistant\"}}").value("error").toObject().value("code").toInt(), -32602);
+        QCOMPARE(call("{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"resources/list\"}").value("error").toObject().value("code").toInt(), -32601);
+        QCOMPARE(call("pas du json").value("error").toObject().value("code").toInt(), -32700);
+        QCOMPARE(call("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}").value("result").toObject().size(), 0);
+        // Traces : fichier lu sur le disque
+        QTemporaryDir dir;
+        const QString path = dir.filePath("Chain_all_Events.csv");
+        QFile f(path);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        QByteArray csv = "iter,A,B\n";
+        for (int i = 0; i < 200; ++i) csv += QByteArray::number(i) + "," + QByteArray::number(-100 + (i % 7)) + "," + QByteArray::number(-50 + (i % 5)) + "\n";
+        f.write(csv);
+        f.close();
+        seldon::traces::clear();
+        const QJsonObject tr = srv.callTool("analyser_traces", QJsonObject{ { "op", "order" }, { "from", "A" }, { "to", "B" }, { "file", path } });
+        QCOMPARE(tr.value("isError").toBool(true), false);
+        QVERIFY(tr.value("content").toArray().first().toObject().value("text").toString().contains(QStringLiteral("antérieur")));
+        seldon::traces::clear();
+        QCOMPARE(srv.callTool("analyser_traces", QJsonObject{ { "op", "order" }, { "from", "A" }, { "to", "B" } }).value("isError").toBool(), true);
+        // Fichier de densité écrit dans le dossier demandé
+        const QJsonObject dn = srv.callTool("creer_densite", QJsonObject{ { "law", "normal" }, { "mean", -250 }, { "sd", 50 }, { "dossier", dir.path() } });
+        QVERIFY(dn.value("content").toArray().first().toObject().value("text").toString().contains(QStringLiteral("Fichier écrit")));
+        QVERIFY(QFileInfo::exists(dir.filePath("normale_-500_0.csv")));
+        // Progression : notifications/progress pour un Event (MCMC) quand la requête porte un progressToken.
+        notes.clear();
+        r = call("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"tools/call\",\"params\":{\"name\":\"calculer_evenement\",\"_meta\":{\"progressToken\":\"p1\"},\"arguments\":{\"dates\":[{\"method\":\"gauss\",\"age\":100,\"error\":20},{\"method\":\"gauss\",\"age\":110,\"error\":20}],\"mcmc\":{\"num_iter\":5000,\"num_proc\":2}}}}");
+        QCOMPARE(r.value("result").toObject().value("isError").toBool(true), false);
+        QVERIFY(!notes.isEmpty());
+        const QJsonObject n0 = QJsonDocument::fromJson(notes.first()).object();
+        QCOMPARE(n0.value("method").toString(), QString("notifications/progress"));
+        QCOMPARE(n0.value("params").toObject().value("progressToken").toString(), QString("p1"));
+    }
+
+    void combination()
+    {
+        // Loi du χ² : quantiles de référence
+        QVERIFY(std::abs(seldon::chi2Quantile(0.95, 1) - 3.8415) < 1e-3);
+        QVERIFY(std::abs(seldon::chi2Quantile(0.95, 2) - 5.9915) < 1e-3);
+        QVERIFY(std::abs(seldon::chi2Cdf(3.8415, 1) - 0.95) < 1e-4);
+
+        // Ward et Wilson sur deux âges 14C de la même courbe : T = Δ² / (σ1² + σ2²)
+        const std::vector<QJsonObject> two = { QJsonObject{ { "method", "c14" }, { "age", 2500 }, { "error", 30 } },
+                                               QJsonObject{ { "method", "c14" }, { "age", 2470 }, { "error", 35 } } };
+        const auto ww = seldon::wardWilsonTests(two, { "A", "B" });
+        QCOMPARE(int(ww.size()), 1);
+        QVERIFY(std::abs(ww[0].T - 900.0 / 2125.0) < 1e-9);
+        QCOMPARE(ww[0].df, 1);
+        QVERIFY(ww[0].compatible());
+        // Une datation à décalage n'entre pas dans le test
+        std::vector<QJsonObject> wig = two;
+        wig[1]["wiggle"] = QJsonObject{ { "type", "fixed" }, { "value", 20 } };
+        QStringList skipped;
+        QVERIFY(seldon::wardWilsonTests(wig, { "A", "B" }, &skipped).empty());
+        QCOMPARE(skipped, QStringList{ "B" });
+
+        // Produit de deux gaussiennes N(0, 10) et N(10, 10) : N(5, 10/√2)
+        const MethodRegistry& reg = MethodRegistry::instance();
+        auto gauss = [&](double m, double e) {
+            return reg.compute(QJsonObject{ { "method", "gauss" }, { "age", m }, { "error", e }, { "untruncated", true } }).density;
+        };
+        const Density c = seldon::combineDensities({ gauss(0, 10), gauss(10, 10) });
+        QVERIFY(c.valid());
+        const DensityStats st = densityStats(c);
+        QVERIFY2(std::abs(st.mean - 5.0) < 0.05, qPrintable(QString::number(st.mean)));
+        QVERIFY2(std::abs(st.sd - 10.0 / std::sqrt(2.0)) < 0.05, qPrintable(QString::number(st.sd)));
+        // Densités disjointes : produit nul, signalé
+        QString err;
+        QVERIFY(!seldon::combineDensities({ reg.compute(QJsonObject{ { "method", "unif" }, { "min", 0 }, { "max", 10 } }).density,
+                                            reg.compute(QJsonObject{ { "method", "unif" }, { "min", 20 }, { "max", 30 } }).density }, &err).valid());
+        QVERIFY(!err.isEmpty());
+
+        // Demande complète : décalage fixe de +10 ans sur N(0, 10) -> combinée avec N(10, 10), centrée sur 10
+        const QJsonObject rq{ { "method", "combine" }, { "name", "Four" },
+                              { "dates", QJsonArray{ QJsonObject{ { "method", "gauss" }, { "age", 0 }, { "error", 10 },
+                                                                  { "wiggle", QJsonObject{ { "type", "fixed" }, { "value", 10 } } } },
+                                                     QJsonObject{ { "method", "gauss" }, { "age", 10 }, { "error", 10 } } } } };
+        const RunOutcome o = MethodRunner::run({ rq });
+        QVERIFY2(o.promptBlock.contains("Densité combinée"), qPrintable(o.promptBlock.left(400)));
+        QVERIFY(o.promptBlock.contains("Ward et Wilson"));
+        QVERIFY(o.promptBlock.contains("hors test"));                 // la datation décalée est signalée
+        const QJsonArray series = o.plot.value("series").toArray();
+        QCOMPARE(series.size(), 3);                                     // combinaison en haut, puis les deux datations
+        QVERIFY(series[0].toObject().value("name").toString().contains("combinaison"));
+        QCOMPARE(o.plot.value("layout").toString(), QString("rows"));
+        QVERIFY(o.promptBlock.contains("MAP (mode) : 10"));
+
+        // Méthodes différentes : 14C et TL
+        const RunOutcome mix = MethodRunner::run({ QJsonObject{ { "method", "combine" },
+            { "dates", QJsonArray{ QJsonObject{ { "method", "c14" }, { "age", 3560 }, { "error", 20 } },
+                                   QJsonObject{ { "method", "tl" }, { "age", 3600 }, { "error", 150 }, { "ref_year", 2015 } } } }, { "level", 90 } } });
+        QVERIFY2(mix.promptBlock.contains("Densité combinée") && mix.promptBlock.contains("HPD à 90"), qPrintable(mix.promptBlock.left(600)));
+
+        // Reconnaissance dans une question et via l'outil
+        const QVector<QJsonObject> q = MethodRunner::requestsFromQuestion("Combine C14 2500 +- 30 BP et C14 2470 +- 35 BP");
+        QCOMPARE(q.size(), 1);
+        QCOMPARE(q[0].value("method").toString(), QString("combine"));
+        QCOMPARE(q[0].value("dates").toArray().size(), 2);
+        const tools::ToolDef* def = tools::find("combiner_dates");
+        QVERIFY(def && def->methodId == "combine");
+        const tools::ToolOutcome t = tools::execute("combiner_dates",
+            R"({"dates":[{"method":"14C","age":"2500","error":30},{"method":"c14","age":2470,"error":35}]})", DateFormat::BcAd);
+        QVERIFY2(t.executed && t.content.contains("Densité combinée"), qPrintable(t.content.left(400)));
+        QCOMPARE(MethodRunner::normalizeRequest(QJsonObject{ { "method", "combinaison" } }).value("method").toString(), QString("combine"));
+
+        // Un décalage par datation, écrit après elle dans la phrase
+        const QVector<QJsonObject> w2 = MethodRunner::requestsFromQuestion(
+            "fait la combinaison de \n14c 6589 +- 30 avec un wiggle fixe de +500 ans\net 14c 5879+- 35 avec un wiggle range -300 et -200");
+        QCOMPARE(w2.size(), 1);
+        const QJsonArray wd = w2[0].value("dates").toArray();
+        QCOMPARE(wd.size(), 2);
+        QCOMPARE(wd[0].toObject().value("wiggle").toObject().value("type").toString(), QString("fixed"));
+        QCOMPARE(wd[0].toObject().value("wiggle").toObject().value("value").toDouble(), 500.0);
+        QCOMPARE(wd[1].toObject().value("wiggle").toObject().value("type").toString(), QString("range"));
+        QCOMPARE(wd[1].toObject().value("wiggle").toObject().value("min").toDouble(), -300.0);
+        QCOMPARE(wd[1].toObject().value("wiggle").toObject().value("max").toDouble(), -200.0);
+        QVERIFY(MethodRunner::run(w2).promptBlock.contains("Densité combinée"));
+        // Méthodes mêlées, une seule datation décalée, décalage gaussien (« 20 ± 5 » n'est pas une datation de plus)
+        const QVector<QJsonObject> w3 = MethodRunner::requestsFromQuestion(
+            "Combine TL 2600 ± 90 ans mesuré en 2015 avec un décalage de 20 ± 5 ans et C14 2500 ± 30 BP");
+        QCOMPARE(w3.size(), 1);
+        const QJsonArray wd3 = w3[0].value("dates").toArray();
+        QCOMPARE(wd3.size(), 2);
+        int withWiggle = 0;
+        for (const QJsonValue& d : wd3) {
+            const QJsonObject o = d.toObject();
+            if (o.contains("wiggle")) {
+                ++withWiggle;
+                QCOMPARE(o.value("method").toString(), QString("tl"));
+                QCOMPARE(o.value("wiggle").toObject().value("type").toString(), QString("gaussian"));
+            }
+        }
+        QCOMPARE(withWiggle, 1);
+        // « range » / « intervalle » : décalage par intervalle
+        QCOMPARE(MethodRunner::wiggleFromQuestion("C14 2500 ± 30 BP, wiggle range -300 et -200").value("type").toString(), QString("range"));
+        QCOMPARE(MethodRunner::wiggleFromQuestion("C14 2500 ± 30 BP, décalage intervalle 10 à 40").value("max").toDouble(), 40.0);
+    }
+
+    // Traces MCMC exportées par ChronoModel : lecture, durée, date entre deux colonnes, densité d'une colonne.
+    void mcmcTraces()
+    {
+        // Deux chaînes (le numéro d'itération saute), A ~ N(-500, 20), B = A + 100 + N(0, 10)
+        std::mt19937 g(7);
+        std::normal_distribution<double> n(0.0, 1.0);
+        QString csv = "iter,US 12,US 14,Phase A Begin,Phase A End\n";
+        QString csvFr = "iter;US 12;US 14\n";
+        int iter = 1001;
+        for (int c = 0; c < 2; ++c) {
+            for (int k = 0; k < 2000; ++k) {
+                const double a = -500.0 + 20.0 * n(g), b = a + 100.0 + 10.0 * n(g);
+                csv += QStringLiteral("%1,%2,%3,%4,%5\n").arg(iter).arg(a, 0, 'g', 15).arg(b, 0, 'g', 15).arg(a - 50.0, 0, 'g', 15).arg(b + 50.0, 0, 'g', 15);
+                csvFr += QStringLiteral("%1;%2;%3\n").arg(iter).arg(QString::number(a, 'g', 15).replace('.', ','), QString::number(b, 'g', 15).replace('.', ','));
+                ++iter;
+            }
+            iter += 1200;                                              // burn-in et adaptation de la chaîne suivante
+        }
+        QVERIFY(seldon::traces::looksLike(csv));
+        QVERIFY(!seldon::traces::looksLike("age,error\n2500,30\n"));
+        seldon::TraceSet ts, fr;
+        QString err;
+        QVERIFY2(seldon::traces::parse(csv, "Chain_all_Events.csv", ts, &err), qPrintable(err));
+        QCOMPARE(int(ts.chainStarts.size()), 2);
+        QCOMPARE(int(ts.rows()), 4000);
+        QCOMPARE(ts.columns.size(), 4);
+        QVERIFY2(seldon::traces::parse(csvFr, "fr.csv", fr, &err), qPrintable(err));      // « ; » et décimale « , »
+        QVERIFY(std::abs(fr.values[0][0] - ts.values[0][0]) < 1e-9);
+        QVERIFY(seldon::traces::summary(ts).contains("Phase A Begin"));
+        // Export réel de ChronoModel 4 : commentaires « # », lignes terminées par « \r », « ; » et décimale « , »
+        const QString cm = "# ChronoModel 4.0.0\r# Italy_MP_UP\r# Date Format : BC/AD\r"
+                           "iter;unknown;CTC_X7021_SB4\r21001;-37663,6489496838;-38295,7861930065\r"
+                           "21002;-37874,546279143;-37875,4479089243\r21003;-37805,62;-37854,71\r";
+        QVERIFY(seldon::traces::looksLike(cm));
+        seldon::TraceSet real;
+        QVERIFY2(seldon::traces::parse(cm, "Chain_all_Events.csv", real, &err), qPrintable(err));
+        QCOMPARE(real.columns, (QStringList{ "unknown", "CTC_X7021_SB4" }));
+        QCOMPARE(int(real.rows()), 3);
+        QCOMPARE(int(real.chainStarts.size()), 1);
+        QVERIFY(std::abs(real.values[1][0] + 38295.7861930065) < 1e-9);
+        // Export dans un autre format de date : converti en années BC/AD (âge cal BP 2000 -> année -50)
+        seldon::TraceSet bp;
+        QVERIFY(seldon::traces::parse("# Date Format : Age Cal. BP\niter,A\n1,2000\n2,2010\n", "bp.csv", bp, &err));
+        QVERIFY(std::abs(bp.values[0][0] - (-50.0)) < 1e-9);
+        QVERIFY(seldon::traces::summary(bp).contains("converties"));
+        QVERIFY(!seldon::traces::parse("# Date Format : Years\niter,A\n1,2000\n2,2010\n", "x.csv", bp, &err));
+        // Séparateur et décimale repérés automatiquement (réglages CSV de ChronoModel indépendants)
+        struct Fmt { const char* name; QString text; };
+        const Fmt fmts[] = {
+            { "anglais , .",      "iter,A,B\n1,-500.5,-400.25\n2,-501.5,-401.25\n" },
+            { "français ; ,",     "iter;A;B\n1;-500,5;-400,25\n2;-501,5;-401,25\n" },
+            { "; et .",           "iter;A;B\n1;-500.5;-400.25\n2;-501.5;-401.25\n" },
+            { "tabulation ,",     "iter\tA\tB\n1\t-500,5\t-400,25\n2\t-501,5\t-401,25\n" },
+            { ", et , (ambigu)",  "iter,A,B\n1,-500,5,-400,25\n2,-501,5,-401,25\n" } };
+        for (const Fmt& f : fmts) {
+            seldon::TraceSet x;
+            QVERIFY2(seldon::traces::looksLike(f.text), f.name);
+            QVERIFY2(seldon::traces::parse(f.text, "f.csv", x, &err), qPrintable(QString(f.name) + " : " + err));
+            QCOMPARE(x.columns, (QStringList{ "A", "B" }));
+            QVERIFY2(std::abs(x.values[0][0] + 500.5) < 1e-9 && std::abs(x.values[1][1] + 401.25) < 1e-9, f.name);
+        }
+        seldon::TraceSet x;
+        QVERIFY(!seldon::traces::parse("iter;A;B\n1;-500,5;-400.25\n2;-501,5;-401.25\n", "m.csv", x, &err));   // décimales mêlées
+        QVERIFY(err.contains("mêlées"));
+        QVERIFY(seldon::traces::parse("iter;A\n1;-500,5\n2;-501,5\n", "s.csv", x, &err));
+        QVERIFY(seldon::traces::summary(x).contains("décimale « , »"));
+
+        seldon::traces::clear();
+        const RunOutcome none = MethodRunner::run({ QJsonObject{ { "method", "traces" }, { "op", "duration" }, { "from", "US 12" }, { "to", "US 14" } } });
+        QVERIFY(none.promptBlock.contains("aucune trace chargée"));
+
+        seldon::traces::add(ts);
+        int set = -1, col = -1;
+        QVERIFY(seldon::traces::resolve("début de la phase A", set, col));
+        QCOMPARE(ts.columns[col], QString("Phase A Begin"));
+        QVERIFY(seldon::traces::resolve("phase a fin", set, col));
+        QCOMPARE(ts.columns[col], QString("Phase A End"));
+        QVERIFY(!seldon::traces::resolve("US 99", set, col, &err));
+        QVERIFY(err.contains("US 12"));                                // la liste des colonnes est donnée
+
+        // Durée de US 12 à US 14 : ≈ 100 ans, B toujours après A
+        const RunOutcome d = MethodRunner::run({ QJsonObject{ { "method", "traces" }, { "op", "duration" }, { "from", "US 12" }, { "to", "US 14" } } });
+        QVERIFY2(d.promptBlock.contains("Durée : MAP"), qPrintable(d.promptBlock.left(600)));
+        QVERIFY(d.promptBlock.contains(": 100,0 %"));                 // P(US 14 postérieur à US 12)
+        QCOMPARE(d.extraPlots.size(), 1);                              // graphique à part, axe en années
+        QVERIFY(d.extraPlots[0].value("xlabel").toString().contains("Durée"));
+        QVERIFY(d.plot.isEmpty());
+        QVERIFY(d.promptBlock.contains("Convergence de cette quantité"));
+        // Durée de la phase : de son début à sa fin ≈ 200 ans
+        const RunOutcome ph = MethodRunner::run({ QJsonObject{ { "method", "traces" }, { "op", "durée" }, { "from", "début de la phase A" }, { "to", "fin de la phase A" } } });
+        QVERIFY2(ph.promptBlock.contains("Durée : MAP"), qPrintable(ph.promptBlock.left(600)));
+
+        // Date entre US 12 et US 14, et densité d'une colonne : graphique des dates
+        const RunOutcome b = MethodRunner::run({ QJsonObject{ { "method", "traces" }, { "op", "between" }, { "from", "US 12" }, { "to", "US 14" }, { "level", 90 } } });
+        QVERIFY2(b.promptBlock.contains("HPD à 90"), qPrintable(b.promptBlock.left(600)));
+        QCOMPARE(b.plot.value("series").toArray().size(), 3);          // date entre, puis US 12 et US 14
+        const RunOutcome v = MethodRunner::run({ QJsonObject{ { "method", "traces" }, { "op", "value" }, { "of", "Phase A Begin" } } });
+        QVERIFY(v.promptBlock.contains("MAP (mode)"));
+        QCOMPARE(v.plot.value("series").toArray().size(), 1);
+
+        // Question directe, sans modèle de langage : colonnes citées dans la question
+        {
+            seldon::TraceSet nt;
+            QString csvN = "# ChronoModel 4.0.0\r# Date Format : BC/AD\riter;N(500);N(200);Phase A Begin;Phase A End\r";
+            for (int k = 0; k < 400; ++k)
+                csvN += QStringLiteral("%1;%2;%3;%4;%5\r").arg(1 + k).arg(QString::number(-500.0 + 0.1 * k, 'f', 3).replace('.', ','))
+                            .arg(QString::number(-200.0 + 0.05 * k, 'f', 3).replace('.', ',')).arg(QString::number(-600.0 + 0.1 * k, 'f', 3).replace('.', ','))
+                            .arg(QString::number(-100.0 + 0.1 * k, 'f', 3).replace('.', ','));
+            QVERIFY2(seldon::traces::parse(csvN, "Chain_all_Events_N.csv", nt, &err), qPrintable(err));
+            seldon::traces::add(nt);
+            for (const char* q : { "quelle durée entre N(500) et N(200)", "quelle durée entre les Event N(500) et N(200)" }) {
+                const QVector<QJsonObject> rq = MethodRunner::requestsFromQuestion(QString::fromUtf8(q));
+                QVERIFY2(rq.size() == 1 && rq[0].value("method").toString() == "traces", q);
+                QCOMPARE(rq[0].value("op").toString(), QString("duration"));
+                QCOMPARE(rq[0].value("from").toString(), QString("N(500)"));
+                QCOMPARE(rq[0].value("to").toString(), QString("N(200)"));
+                QVERIFY2(MethodRunner::analyzeQuestion(QString::fromUtf8(q)).promptBlock.contains("Durée : MAP"), q);
+            }
+            const QVector<QJsonObject> bt = MethodRunner::requestsFromQuestion("date d'un niveau situé entre la fin de la phase A et N(200)");
+            QVERIFY(bt.size() == 1 && bt[0].value("op").toString() == "between");
+            QCOMPARE(bt[0].value("from").toString(), QString("Phase A End"));
+            const QVector<QJsonObject> vt = MethodRunner::requestsFromQuestion("début de la phase A à 90 %");
+            QVERIFY(vt.size() == 1 && vt[0].value("op").toString() == "value");
+            QCOMPARE(vt[0].value("of").toString(), QString("Phase A Begin"));
+            QCOMPARE(vt[0].value("level").toDouble(), 90.0);
+            // Antéro-postérité : P(A antérieur à B), proportion des tirages
+            const QVector<QJsonObject> od = MethodRunner::requestsFromQuestion("N(500) est-il antérieur à N(200) ?");
+            QVERIFY(od.size() == 1 && od[0].value("op").toString() == "order");
+            QCOMPARE(od[0].value("from").toString(), QString("N(500)"));
+            const RunOutcome ro = MethodRunner::run(od);
+            QVERIFY2(ro.promptBlock.contains("P(« N(500) » antérieur à « N(200) ») = 100,0 %"), qPrintable(ro.promptBlock.left(600)));
+            QVERIFY(ro.promptBlock.contains("pas un test de signification"));
+            QCOMPARE(ro.plot.value("series").toArray().size(), 2);
+            // Appartenance à une phase (début et fin), à deux années fixes, à deux colonnes
+            const QVector<QJsonObject> ip = MethodRunner::requestsFromQuestion("N(500) appartient-il à la phase A ?");
+            QVERIFY(ip.size() == 1 && ip[0].value("op").toString() == "inside");
+            QCOMPARE(ip[0].value("from").toString(), QString("Phase A Begin"));
+            QCOMPARE(ip[0].value("to").toString(), QString("Phase A End"));
+            const RunOutcome rip = MethodRunner::run(ip);
+            QVERIFY2(rip.promptBlock.contains("P(« N(500) » dans [Phase A Begin ; Phase A End]) = 100,0 %"), qPrintable(rip.promptBlock.left(700)));
+            const QVector<QJsonObject> iy = MethodRunner::requestsFromQuestion("N(200) est-il compris entre -190 et -150 ?");
+            QVERIFY(iy.size() == 1 && iy[0].value("op").toString() == "inside");
+            const RunOutcome riy = MethodRunner::run(iy);
+            QVERIFY2(riy.promptBlock.contains("= 50,0 %"), qPrintable(riy.promptBlock.left(600)));
+            QVERIFY(riy.promptBlock.contains("[-190 ; -150]"));
+            const QVector<QJsonObject> ic = MethodRunner::requestsFromQuestion("N(200) se situe-t-il entre N(500) et Phase A End ?");
+            QVERIFY2(ic.size() == 1 && ic[0].value("op").toString() == "inside", qPrintable(ic.isEmpty() ? QString("vide") : ic[0].value("op").toString()));
+            QVERIFY(MethodRunner::run(ic).promptBlock.contains("= 100,0 %"));
+            const tools::ToolOutcome to = tools::execute("analyser_traces", R"J({"op":"inside","of":"N(200)","from":"-190","to":"-150"})J", DateFormat::BcAd);
+            QVERIFY2(to.executed && to.content.contains("50,0 %"), qPrintable(to.content.left(400)));
+            QVERIFY(!tools::execute("analyser_traces", R"J({"op":"inside","from":"N(500)","to":"N(200)"})J", DateFormat::BcAd).executed);   // « of » manque
+
+            // Calcul « traces » mis par erreur dans un événement : exécuté seul
+            const RunOutcome rep = MethodRunner::run({ QJsonObject{ { "method", "event" },
+                { "dates", QJsonArray{ QJsonObject{ { "method", "traces" }, { "op", "duration" }, { "from", "N(500)" }, { "to", "N(200)" } } } } } });
+            QVERIFY2(rep.promptBlock.contains("Durée : MAP") && !rep.promptBlock.contains("Événement"), qPrintable(rep.promptBlock.left(400)));
+        }
+
+        // Outil
+        const tools::ToolOutcome t = tools::execute("analyser_traces", R"({"op":"duration","from":"US 12","to":"US 14"})", DateFormat::BcAd);
+        QVERIFY2(t.executed && t.content.contains("Durée"), qPrintable(t.content.left(400)));
+        const tools::ToolOutcome miss = tools::execute("analyser_traces", R"({"op":"duration","from":"US 12"})", DateFormat::BcAd);
+        QVERIFY(!miss.executed && miss.content.contains("to"));
+        seldon::traces::clear();
+        QVERIFY(MethodRunner::requestsFromQuestion("quelle durée entre N(500) et N(200)").isEmpty());   // sans traces : rien
+    }
+
+    // Quota du fournisseur lu dans les en-têtes de la réponse (affiché à droite de la barre d'état).
+    void remoteRateLimits()
+    {
+        using P = QPair<QByteArray, QByteArray>;
+        const auto r = seldon::remote::parseRateLimits({ P("X-RateLimit-Remaining-Tokens", "85000"), P("x-ratelimit-limit-tokens", "100000"),
+                                                         P("x-ratelimit-remaining-requests", "98"), P("content-type", "text/event-stream") });
+        QCOMPARE(r.tokensRemaining, 85000);
+        QCOMPARE(r.tokensLimit, 100000);
+        QCOMPARE(r.requestsRemaining, 98);
+        QCOMPARE(r.requestsLimit, -1);
+        const auto a = seldon::remote::parseRateLimits({ P("anthropic-ratelimit-tokens-remaining", "4000") });
+        QCOMPARE(a.tokensRemaining, 4000);
+        QCOMPARE(seldon::remote::parseRateLimits({}).tokensRemaining, -1);
+    }
+
+    // Années astronomiques : l'année 0 existe (courbes de calibration, ChronoModel) ; N av. J.-C. = 1 − N.
+    void astronomicalYears()
+    {
+        using seldon::text::yearFromText;
+        QCOMPARE(yearFromText("500 av. J.-C."), -499.0);
+        QCOMPARE(yearFromText("500 BC"), -499.0);
+        QCOMPARE(yearFromText("500 BCE"), -499.0);
+        QCOMPARE(yearFromText("1 av. J.-C."), 0.0);
+        QCOMPARE(yearFromText("AD 1200"), 1200.0);
+        QCOMPARE(yearFromText("1200 apr. J.-C."), 1200.0);
+        QCOMPARE(yearFromText("-499"), -499.0);
+        QVERIFY(std::isnan(yearFromText("US 12")));
+        QVERIFY(std::isnan(yearFromText("2500 BP")));
+
+        using seldon::text::erasToAstronomical;
+        QCOMPARE(erasToAstronomical("entre 500 av. J.-C. et 400 av. J.-C."), QString("entre -499 et -399"));
+        QCOMPARE(erasToAstronomical("entre 800 et 700 av. J.-C."), QString("entre -799 et -699"));   // l'ère vaut pour les deux
+        QVERIFY(erasToAstronomical("date de 500 ± 20 av. J.-C.").contains("-499 ± 20"));
+        QCOMPARE(erasToAstronomical("C14 2500 ± 30 BP"), QString("C14 2500 ± 30 BP"));               // âge BP : inchangé
+        QCOMPARE(erasToAstronomical("mesuré en 2015 ce qui est récent"), QString("mesuré en 2015 ce qui est récent"));
+        QCOMPARE(erasToAstronomical("en 1200 apr. J.-C."), QString("en 1200"));
+
+        // Questions : datation, période d'étude
+        const QVector<QJsonObject> u = MethodRunner::requestsFromQuestion("loi uniforme entre 500 av. J.-C. et 400 av. J.-C.");
+        QCOMPARE(u.size(), 1);
+        QCOMPARE(u[0].value("min").toDouble(), -499.0);
+        QCOMPARE(u[0].value("max").toDouble(), -399.0);
+        double a = 0, b = 0;
+        QVERIFY(MethodRunner::periodFromQuestion("C14 2500 ± 30 BP, période d'étude de 1000 av. J.-C. à 0", a, b));
+        QCOMPARE(a, -999.0);
+        QCOMPARE(b, 0.0);
+        // Une date saisie « 500 av. J.-C. » est affichée « 500 av. J.-C. »
+        const RunOutcome g = MethodRunner::analyzeQuestion("date gaussienne 500 av. J.-C. ± 20 ans");
+        QVERIFY2(g.promptBlock.contains("MAP (mode) : -499"), qPrintable(g.promptBlock.left(500)));       // affichage signé par défaut
+        const RunOutcome gh = MethodRunner::analyzeQuestion("date gaussienne 500 av. J.-C. ± 20 ans", DateFormat::Historic);
+        QVERIFY2(gh.promptBlock.contains("MAP (mode) : 500 av. J.-C."), qPrintable(gh.promptBlock.left(500)));
+
+        // Demandes du modèle de langage : année en texte acceptée
+        QCOMPARE(MethodRunner::normalizeRequest(QJsonObject{ { "method", "gauss" }, { "age", "500 av. J.-C." }, { "error", 20 } }).value("age").toDouble(), -499.0);
+        const tools::ToolOutcome t = tools::execute("densite_gauss", R"({"age":"500 av. J.-C.","error":20})", DateFormat::BcAd);
+        QVERIFY2(t.executed && t.content.contains("500 av. J.-C."), qPrintable(t.content.left(400)));
+        // Modèle ChronoModel : borne « 40 BC » -> -39
+        const ChrResult r = ChrBuilder::build(QJsonObject{ { "events", QJsonArray{
+            QJsonObject{ { "name", "Borne" }, { "type", "bound" }, { "known_fixed", "40 BC" } },
+            QJsonObject{ { "name", "US 1" }, { "dates", QJsonArray{ QJsonObject{ { "type", "c14" }, { "age", 2000 }, { "error", 30 } } } } } } } });
+        QVERIFY2(r.ok, qPrintable(r.errors.join("; ")));
+        bool found = false;
+        for (const QJsonValue& e : r.chr.value("events").toArray())
+            if (e.toObject().value("name").toString() == "Borne") { found = true; QCOMPARE(e.toObject().value("bound").toDouble(e.toObject().value("known_fixed").toDouble()), -39.0); }
+        QVERIFY(found);
+    }
+
+    // Calibration inverse : mesure attendue pour une date calendaire.
+    void inverseCalibration()
+    {
+        const RefCurve* c = CurveStore::get("c14", "intcal20", CurveFormat::Radiocarbon, false);
+        QVERIFY(c);
+        double m = 0, e = 0;
+        c->at(-450, m, e);
+        // Date fixe : la mesure attendue est la courbe à cette date
+        const seldon::InverseResult r = seldon::inverseCalibration(QJsonObject{ { "type", "c14" }, { "t", -450 }, { "curve", "intcal20" } });
+        QVERIFY2(r.ok, qPrintable(r.error));
+        QVERIFY(std::abs(r.mean - m) < 1e-6);
+        QVERIFY(std::abs(r.sd - e) < 0.05);
+        QVERIFY(r.hasF14c && r.f14cMean > 0.0 && r.f14cMean < 1.0);
+        // Erreur de mesure : variances additionnées
+        const seldon::InverseResult rl = seldon::inverseCalibration(QJsonObject{ { "type", "c14" }, { "t", -450 }, { "lab_error", 30 } });
+        QVERIFY(std::abs(rl.sd - std::sqrt(e * e + 900.0)) < 0.05);
+        // Période et date gaussienne : dispersion plus grande
+        QVERIFY(seldon::inverseCalibration(QJsonObject{ { "type", "c14" }, { "t_min", -600 }, { "t_max", -300 } }).sd > e);
+        QVERIFY(seldon::inverseCalibration(QJsonObject{ { "type", "c14" }, { "t", -450 }, { "t_error", 50 } }).ok);
+        // Hors domaine, composante manquante
+        QVERIFY(!seldon::inverseCalibration(QJsonObject{ { "type", "c14" }, { "t", 5000 } }).ok);
+        QVERIFY(!seldon::inverseCalibration(QJsonObject{ { "type", "am" }, { "t", 1200 } }).ok);
+        // Archéomagnétisme et F14C
+        const seldon::InverseResult ri = seldon::inverseCalibration(QJsonObject{ { "type", "am" }, { "component", "I" }, { "t", 1200 } });
+        QVERIFY2(ri.ok, qPrintable(ri.error));
+        QCOMPARE(ri.unit, QString("°"));
+        QVERIFY(ri.mean > 40.0 && ri.mean < 80.0);
+        QVERIFY(seldon::inverseCalibration(QJsonObject{ { "type", "f14c" }, { "t", 1970 } }).ok);
+
+        // Fiche et outil
+        const RunOutcome o = MethodRunner::run({ QJsonObject{ { "method", "inverse" }, { "type", "c14" }, { "t", -450 } } });
+        QVERIFY2(o.promptBlock.contains("Calibration inverse") && o.promptBlock.contains("Mesure attendue"), qPrintable(o.promptBlock.left(400)));
+        QCOMPARE(o.extraPlots.size(), 1);
+        QVERIFY(o.extraPlots[0].value("xlabel").toString().contains("BP"));
+        const tools::ToolOutcome t = tools::execute("calibration_inverse", R"({"type":"c14","t":-450})", DateFormat::BcAd);
+        QVERIFY2(t.executed && t.content.contains("Mesure attendue"), qPrintable(t.content.left(400)));
+        QVERIFY(!tools::execute("calibration_inverse", R"({"type":"c14"})", DateFormat::BcAd).executed);
+        QCOMPARE(MethodRunner::normalizeRequest(QJsonObject{ { "method", "calibration_inverse" } }).value("method").toString(), QString("inverse"));
+
+        // Question directe : calcul fait par l'application, sans erreur inventée sur la date
+        QJsonObject q = MethodRunner::inverseFromQuestion("quelle age pour une date 5850 BC");
+        QCOMPARE(q.value("method").toString(), QString("inverse"));
+        QCOMPARE(q.value("type").toString(), QString("c14"));
+        QCOMPARE(q.value("t").toDouble(), -5849.0);                   // 5850 av. J.-C. = année astronomique −5849
+        QVERIFY(!q.contains("t_error"));
+        q = MethodRunner::inverseFromQuestion("quel âge 14C attendre pour un échantillon de 6300 av. J.-C. avec IntCal20 ?");
+        QCOMPARE(q.value("t").toDouble(), -6299.0);
+        QCOMPARE(q.value("curve").toString(), QString("intcal20"));
+        QVERIFY(!q.contains("t_error"));
+        q = MethodRunner::inverseFromQuestion("Quelle inclinaison attendre en France pour l'an 1200 ± 20 ?");
+        QCOMPARE(q.value("type").toString(), QString("am"));
+        QCOMPARE(q.value("component").toString(), QString("I"));
+        QCOMPARE(q.value("t").toDouble(), 1200.0);
+        QCOMPARE(q.value("t_error").toDouble(), 20.0);
+        q = MethodRunner::inverseFromQuestion("Quel âge radiocarbone mesurerait-on pour un bois daté entre 800 et 900, avec une erreur de laboratoire de 25 ans ?");
+        QCOMPARE(q.value("t_min").toDouble(), 800.0);
+        QCOMPARE(q.value("t_max").toDouble(), 900.0);
+        QCOMPARE(q.value("lab_error").toDouble(), 25.0);
+        QVERIFY(MethodRunner::inverseFromQuestion("Calibration inverse : quel âge 14C attendre pour un échantillon de 450 av. J.-C. avec IntCal20 ?").value("t").toDouble() == -449.0);
+        QVERIFY(MethodRunner::inverseFromQuestion("quel âge pour C14 2500 ± 30 BP ?").isEmpty());          // mesure à calibrer
+        QVERIFY(MethodRunner::inverseFromQuestion("C14 de 3560 +- 20 BP, donne la HPD à 99 %").isEmpty());
+        const RunOutcome direct = MethodRunner::analyzeQuestion("quelle age pour une date 5850 BC");
+        QVERIFY2(direct.promptBlock.contains("Calibration inverse") && direct.promptBlock.contains("la date -5849"),
+                 qPrintable(direct.promptBlock.left(400)));
+        QVERIFY(!direct.promptBlock.contains("Calcul impossible"));
+
+        // Le JSON de calcul n'est jamais montré : bloc « calcul », ou JSON écrit dans le texte (et alors exécuté)
+        const QString fenced = "Je lance le calcul.\n```calcul\n{\"method\":\"inverse\",\"type\":\"c14\",\"t\":-6300}\n```\nFin.";
+        QVERIFY(!MethodRunner::hideCalcBlocks(fenced, false).contains('{'));
+        QVERIFY(MethodRunner::hideCalcBlocks(fenced, false).contains("Calcul confié"));
+        const QString bare = "Je vais utiliser la courbe IntCal20.\n{\"method\": \"inverse\", \"type\": \"c14\", \"t\": -6300, \"curve\": \"intcal20\"}";
+        QVERIFY(!MethodRunner::hideCalcBlocks(bare, false).contains('{'));
+        QCOMPARE(MethodRunner::extractCalcBlocks(bare).size(), 1);
+        QCOMPARE(MethodRunner::hideCalcBlocks(bare, true), bare);       // JSON demandé explicitement : montré
+        const QString model = "Voici le modèle.\n```json\n{\"events\":[]}\n```\n";
+        QCOMPARE(MethodRunner::hideCalcBlocks(model, false), model);    // modèle ChronoModel : traité par ChrBuilder
+        QVERIFY(MethodRunner::hideCalcBlocks("Calcul :\n```calcul\n{\"method\":", false).contains("Préparation du calcul"));
     }
 
 };

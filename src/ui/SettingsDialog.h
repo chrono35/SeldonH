@@ -33,6 +33,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "../core/AppSettings.h"
 #include "../llm/LlmCore.h"
 #include "../llm/RemoteApi.h"
+#include "../llm/ToolsProbe.h"
 
 #include <QHash>
 
@@ -68,6 +69,7 @@ private slots:
     void listRemoteModels();
     void updateHttpWarning();
     void optimize();                // « Optimiser pour ce modèle »
+    void testTools();               // « Tester » : le serveur et le modèle font-ils de l'appel d'outils natif ?
 
 private:
     AppSettings     base_;
@@ -89,11 +91,17 @@ private:
     QLabel*         httpWarning_;  // clé envoyée en clair (http:// vers une autre machine)
     QComboBox*      remoteModel_;
     QPushButton*    listBtn_;
-    QCheckBox*      remoteTools_;
+    QComboBox*      remoteToolsMode_;
+    QPushButton*    probeBtn_;
+    QLabel*         probeStatus_;      // résultat du test d'appel d'outils pour la Base URL et le modèle affichés
+    ToolsProbe*     probe_;
+    void showCachedProbe();
     QLabel*         remoteStatus_;
     QLabel*         remoteWarning_;
     QWidget*        remoteKeyRow_;
     QWidget*        remoteModelRow_;
+    QWidget*        remoteToolsRow_ = nullptr;
+    bool            ready_ = false;     // constructeur terminé (tous les widgets existent)
     QNetworkAccessManager* nam_;
     QHash<QString, remote::ModelLimits> remoteLimits_;   // relevées par « Lister les modèles »
     bool            optimizeAfterList_ = false;

@@ -185,13 +185,42 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     connect(listBtn_, &QPushButton::clicked, this, &SettingsDialog::listRemoteModels);
     form->addRow(tr("Nom du modèle"), remoteModelRow_);
 
-    remoteTools_ = new QCheckBox(tr("Le modèle appelle les outils de calcul de SeldonH (appel d'outils natif)"));
-    remoteTools_->setChecked(s.remoteTools);
-    remoteTools_->setToolTip(tr("Le modèle distant demande lui-même un calcul (calibration, HPD…) ; SeldonH l'exécute sur cet ordinateur "
-                                "avec les méthodes de ChronoModel et lui renvoie les valeurs. Si le serveur ou le modèle ne gère pas les "
-                                "outils, SeldonH le détecte et utilise à la place un bloc de calcul dans la réponse. Décochez en cas de "
-                                "comportement étrange."));
-    form->addRow(QString(), remoteTools_);
+    {
+        auto* w = new QWidget;
+        auto* h = new QHBoxLayout(w);
+        h->setContentsMargins(0, 0, 0, 0);
+        remoteToolsMode_ = new QComboBox;
+        remoteToolsMode_->addItem(tr("Automatique (selon le test du serveur)"), QStringLiteral("auto"));
+        remoteToolsMode_->addItem(tr("Toujours"), QStringLiteral("on"));
+        remoteToolsMode_->addItem(tr("Jamais (bloc de calcul dans la réponse)"), QStringLiteral("off"));
+        remoteToolsMode_->setCurrentIndex(std::max(0, remoteToolsMode_->findData(s.remoteToolsMode)));
+        remoteToolsMode_->setToolTip(tr("Avec l'appel d'outils natif, le modèle distant demande lui-même un calcul (calibration, HPD…) ; "
+                                        "SeldonH l'exécute sur cet ordinateur avec les méthodes de ChronoModel et lui renvoie les valeurs. "
+                                        "Tous les serveurs ne le permettent pas : en mode automatique, SeldonH envoie une requête de test "
+                                        "(un outil factice) et retient le résultat pour ce serveur et ce modèle. Sans appel d'outils, les "
+                                        "calculs passent par un bloc de calcul écrit dans la réponse."));
+        probeBtn_ = new QPushButton(tr("Tester"));
+        probeBtn_->setToolTip(tr("Envoie au serveur une requête de test avec un outil factice et indique si le modèle l'appelle. "
+                                 "Le résultat est retenu pour ce serveur et ce modèle."));
+        h->addWidget(remoteToolsMode_, 1);
+        h->addWidget(probeBtn_);
+        form->addRow(tr("Appel d'outils"), w);
+        remoteToolsRow_ = w;
+        connect(probeBtn_, &QPushButton::clicked, this, &SettingsDialog::testTools);
+    }
+    probeStatus_ = new QLabel;
+    probeStatus_->setObjectName(QStringLiteral("probeStatus"));
+    probeStatus_->setWordWrap(true);
+    form->addRow(QString(), probeStatus_);
+    probe_ = new ToolsProbe(this);
+    connect(probe_, &ToolsProbe::finished, this, [this](const ToolProbeResult& r) {
+        probeBtn_->setEnabled(true);
+        probeStatus_->setText(toolprobe::describe(r));
+        updateBackendRows();
+    });
+    connect(remoteUrl_, &QLineEdit::textChanged, this, &SettingsDialog::showCachedProbe);
+    connect(remoteModel_, &QComboBox::currentTextChanged, this, &SettingsDialog::showCachedProbe);
+    showCachedProbe();
     remoteStatus_ = new QLabel;
     remoteStatus_->setWordWrap(true);
     form->addRow(QString(), remoteStatus_);
@@ -297,6 +326,7 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
 
     connect(localRadio_, &QRadioButton::toggled, this, &SettingsDialog::updateBackendRows);
     connect(remoteRadio_, &QRadioButton::toggled, this, &SettingsDialog::updateBackendRows);
+    ready_ = true;
     updateBackendRows();
     resize(std::max(880, sizeHint().width()), sizeHint().height());
 }
@@ -307,10 +337,11 @@ void SettingsDialog::updateBackendRows()
     for (QWidget* w : { static_cast<QWidget*>(modelRow_), static_cast<QWidget*>(ctx_), static_cast<QWidget*>(threads_), static_cast<QWidget*>(gpu_) })
         form_->setRowVisible(w, !remote);
     for (QWidget* w : { static_cast<QWidget*>(remoteUrl_), static_cast<QWidget*>(remoteKeyRow_), static_cast<QWidget*>(keyStore_),
-                        static_cast<QWidget*>(remoteModelRow_), static_cast<QWidget*>(remoteTools_), static_cast<QWidget*>(remoteWarning_) })
+                        static_cast<QWidget*>(remoteModelRow_), static_cast<QWidget*>(remoteToolsRow_), static_cast<QWidget*>(remoteWarning_) })
         form_->setRowVisible(w, remote);
     form_->setRowVisible(httpWarning_, remote && remote::sendsKeyInClear(remoteUrl_->text(), remoteKey_->text()));
     form_->setRowVisible(remoteStatus_, remote && !remoteStatus_->text().isEmpty());
+    form_->setRowVisible(probeStatus_, remote && !probeStatus_->text().isEmpty());
     form_->setRowVisible(optimizeStatus_, !optimizeStatus_->text().isEmpty());
     thinking_->setEnabled(!remote);
 }
@@ -336,6 +367,31 @@ void SettingsDialog::done(int r)
         if (ans != QMessageBox::Yes) { remoteUrl_->setFocus(); return; }
     }
     QDialog::done(r);
+}
+
+// Résultat déjà connu du test d'appel d'outils pour la Base URL et le modèle affichés.
+void SettingsDialog::showCachedProbe()
+{
+    if (probe_ && probe_->running()) return;
+    ToolProbeResult r;
+    probeStatus_->setText(toolprobe::cached(remoteUrl_->text(), remoteModel_->currentText(), r)
+                              ? toolprobe::describe(r)
+                              : tr("<small>Appel d'outils pas encore testé pour ce serveur et ce modèle (test automatique à la "
+                                   "première utilisation, ou bouton « Tester »).</small>"));
+    if (ready_) updateBackendRows();
+}
+
+void SettingsDialog::testTools()
+{
+    RemoteConfig cfg;
+    cfg.baseUrl = remoteUrl_->text().trimmed();
+    cfg.apiKey  = remoteKey_->text().trimmed();
+    cfg.model   = remoteModel_->currentText().trimmed();
+    if (!cfg.isValid()) { probeStatus_->setText(tr("Renseignez d'abord la Base URL et le nom du modèle.")); updateBackendRows(); return; }
+    probeBtn_->setEnabled(false);
+    probeStatus_->setText(tr("Test de l'appel d'outils sur %1…").arg(remote::hostOf(cfg.baseUrl).toHtmlEscaped()));
+    updateBackendRows();
+    probe_->start(cfg);
 }
 
 // GET {Base URL}/models : vérifie l'adresse et la clé, et propose les noms de modèles disponibles.
@@ -456,7 +512,7 @@ AppSettings SettingsDialog::settings() const
     a.remoteUrl   = remoteUrl_->text().trimmed();
     a.remoteKey   = remoteKey_->text().trimmed();
     a.remoteModel = remoteModel_->currentText().trimmed();
-    a.remoteTools = remoteTools_->isChecked();
+    a.remoteToolsMode = remoteToolsMode_->currentData().toString();
     a.userPrompt  = QString::fromStdString(trimUserPrompt(userPrompt_->toPlainText().toStdString()));
     a.keepHistory = keepHistory_->isChecked();
     return a;

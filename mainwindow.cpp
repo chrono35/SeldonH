@@ -142,8 +142,28 @@ MainWindow::MainWindow(QWidget *parent)
         statusBar()->showMessage(tr("Ce modèle n'accepte pas l'appel d'outils : SeldonH utilise à la place le bloc de calcul dans la réponse."), 9000);
         chat_->addNotice(tr("<i>Le serveur a refusé l'appel d'outils (%1). Les calculs passeront par un bloc de calcul dans la réponse ; "
                             "vous pouvez désactiver l'appel d'outils dans les Préférences.</i>").arg(why.toHtmlEscaped()));
+        // Mémorisé pour ce serveur et ce modèle : le mode automatique ne déclarera plus les outils.
+        ToolProbeResult r;
+        r.support = ToolSupport::Refused;
+        r.detail = why;
+        r.when = QDateTime::currentDateTimeUtc();
+        toolprobe::store(settings_.remoteUrl, settings_.remoteModel, r);
     });
-    remote_->setTools(settings_.remoteTools ? tools::schemaForApi() : QJsonArray());
+    toolsProbe_ = new ToolsProbe(this);
+    connect(toolsProbe_, &ToolsProbe::finished, this, [this](const ToolProbeResult& r) {
+        if (!settings_.useRemote || settings_.remoteToolsMode != QLatin1String("auto")) return;
+        if (!r.conclusive()) {
+            statusBar()->showMessage(tr("Test de l'appel d'outils impossible (%1) : nouvel essai au prochain lancement.").arg(r.detail), 9000);
+            return;
+        }
+        if (generating_) toolsApplyPending_ = true; else applyRemoteTools(false);
+        if (r.usesNativeTools())
+            statusBar()->showMessage(tr("Appel d'outils natif vérifié pour %1 : le modèle demandera lui-même les calculs.").arg(settings_.remoteModel), 9000);
+        else
+            chat_->addNotice(tr("<i>Test de l'appel d'outils pour <code>%1</code> : %2</i>")
+                                 .arg(settings_.remoteModel.toHtmlEscaped(), toolprobe::describe(r, false).toHtmlEscaped()));
+    });
+    applyRemoteTools(false);
 
     showWelcome();
     refreshHistory();
@@ -481,7 +501,7 @@ void MainWindow::activateRemote()
     cfg.apiKey  = settings_.remoteKey;
     cfg.model   = settings_.remoteModel;
     remote_->setConfig(cfg);
-    remote_->setTools(settings_.remoteTools ? tools::schemaForApi() : QJsonArray());
+    applyRemoteTools(true);
     remoteCtx_ = 0;
     resetQuota();
     if (!cfg.isValid()) {
@@ -499,6 +519,21 @@ void MainWindow::activateRemote()
                             "sur cet ordinateur.").arg(cfg.model.toHtmlEscaped(), remote::hostOf(cfg.baseUrl).toHtmlEscaped()));
     }
     updateControls();
+}
+
+void MainWindow::applyRemoteTools(bool probeIfNeeded)
+{
+    if (!remote_) return;
+    ToolProbeResult c;
+    const bool has = toolprobe::cached(settings_.remoteUrl, settings_.remoteModel, c);
+    remote_->setTools(toolprobe::wantTools(settings_.remoteToolsMode, has ? &c : nullptr) ? tools::schemaForApi() : QJsonArray());
+    if (!probeIfNeeded || !settings_.useRemote || settings_.remoteToolsMode != QLatin1String("auto")) return;
+    if (has && toolprobe::isFresh(c)) return;
+    RemoteConfig cfg;
+    cfg.baseUrl = settings_.remoteUrl;
+    cfg.apiKey  = settings_.remoteKey;
+    cfg.model   = settings_.remoteModel;
+    if (cfg.isValid() && toolsProbe_ && !toolsProbe_->running()) toolsProbe_->start(cfg);
 }
 
 void MainWindow::onModelLoaded(const QString& description, int ctx)
@@ -601,7 +636,7 @@ void MainWindow::openPreferences()
     settings_ = n;
     settings_.save();
     dateformat::setDecimals(settings_.decimals);
-    if (remote_) remote_->setTools(settings_.remoteTools ? tools::schemaForApi() : QJsonArray());
+    if (remote_) applyRemoteTools(settings_.useRemote && !remoteSettingsChanged);
     if (skillsMoved) reloadSkills();
 
     if (remoteNow) {
@@ -651,7 +686,7 @@ QVector<ChatMessage> MainWindow::buildChat(QJsonArray* refs) const
     QVector<ChatMessage> v;
     const std::string userPrompt = settings_.userPrompt.toStdString();
     const std::string system = skills_.alwaysText().toStdString() + dateformat::systemHint(dateformat::fromId(settings_.dateFormat))
-                               + ((remoteActive() && settings_.remoteTools) ? toolsSystemHint() : std::string()) + userPromptSystemBlock(userPrompt);
+                               + ((remoteActive() && remote_ && remote_->toolsActive()) ? toolsSystemHint() : std::string()) + userPromptSystemBlock(userPrompt);
     v.append({ "system", system });
     if (refs) refs->append(QJsonObject{ { "role", "system" }, { "content", QString::fromStdString(system) } });
     for (int i = 0; i < turns_.size(); ++i) {
@@ -681,7 +716,7 @@ QJsonObject MainWindow::promptSnapshot(const QJsonArray& messages, const Samplin
     QJsonObject engine, sampling{ { "temperature", f6(sp.temperature) }, { "max_tokens", sp.maxTokens }, { "thinking", sp.enableThinking } };
     if (remoteActive()) {
         engine = QJsonObject{ { "type", "distant" }, { "url", settings_.remoteUrl }, { "model", settings_.remoteModel },
-                              { "tools", settings_.remoteTools } };
+                              { "tools", remote_ && remote_->toolsActive() }, { "tools_mode", settings_.remoteToolsMode } };
     } else {
         engine = QJsonObject{ { "type", "local" }, { "model", QFileInfo(settings_.modelPath).fileName() }, { "model_path", settings_.modelPath },
                               { "n_ctx", settings_.nCtx }, { "threads", settings_.nThreads }, { "gpu_layers", settings_.nGpuLayers } };
@@ -896,6 +931,8 @@ void MainWindow::sendMessage()
     QStringList pinned;
     if (modelRequest) pinned << QStringLiteral("03_chronomodel_creer_modele");
     if (MethodRunner::isAgeDepthRequest(qk)) pinned << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    // « Laquelle est la plus ancienne ? », « A est-elle avant B ? » : la fiche qui explique la probabilité d'antériorité.
+    if (!modelRequest && MethodRunner::asksOrder(qk)) pinned << QStringLiteral("21_ordre_des_dates");
     // Traces MCMC jointes dans la conversation : la fiche qui décrit le calcul « traces ».
     if (!seldon::traces::loaded().isEmpty() && !modelRequest) pinned << QStringLiteral("20_combinaison_traces_inverse");
     for (const QString& m : std::as_const(cited)) pinned << dateSkill.value(m);
@@ -1328,6 +1365,7 @@ void MainWindow::onFinished(const GenStats& st)
     }
     finishAssistantMessage(st.stoppedByUser);
     continuing_ = false;
+    if (toolsApplyPending_) { toolsApplyPending_ = false; applyRemoteTools(false); }
     saveCurrent();
 
     const double tps = st.genMs > 0 ? st.generated * 1000.0 / st.genMs : 0.0;
