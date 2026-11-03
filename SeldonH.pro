@@ -1,4 +1,6 @@
 QT += widgets network svg
+# Lecteur zip de Qt (QZipReader, API privée de QtGui) : lecture des classeurs .xlsx et .ods (src/core/Spreadsheet).
+QT += gui-private
 
 # Version de l'application (aussi celle des paquets de l'installateur, QtInstaller_SeldonH/*/meta/package.xml).
 # Lue par QCoreApplication::applicationVersion() : export du prompt, à propos.
@@ -21,8 +23,10 @@ SOURCES += \
     src/core/ChrBuilder.cpp \
     src/core/Calculator.cpp \
     src/core/AutoTune.cpp \
+    src/core/Spreadsheet.cpp \
     src/core/ChronoResults.cpp \
     src/core/ConversationStore.cpp \
+    src/llm/CpuTopology.cpp \
     src/llm/LlmCore.cpp \
     src/llm/LlmEngine.cpp \
     src/llm/RemoteApi.cpp \
@@ -43,11 +47,13 @@ HEADERS += \
     mainwindow.h \
     src/core/AppSettings.h \
     src/core/AutoTune.h \
+    src/core/Spreadsheet.h \
     src/core/ChatText.h \
     src/core/ChrBuilder.h \
     src/core/Calculator.h \
     src/core/ChronoResults.h \
     src/core/ConversationStore.h \
+    src/llm/CpuTopology.h \
     src/llm/LlmCore.h \
     src/llm/LlmEngine.h \
     src/llm/RemoteApi.h \

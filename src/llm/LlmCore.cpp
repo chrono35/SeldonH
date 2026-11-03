@@ -27,6 +27,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 --------------------------------------------------------------------- */
 
 #include "LlmCore.h"
+#include "CpuTopology.h"
 
 #include "llama.h"
 #ifdef SELDON_GGML_DL
@@ -141,15 +142,18 @@ bool LlmCore::load(const LlmParams& p, std::string& err, const std::function<boo
     cp.n_ctx           = static_cast<uint32_t>(nCtx_);
     cp.n_batch         = static_cast<uint32_t>(nBatch_);
     cp.n_ubatch        = static_cast<uint32_t>(nBatch_);
-    // "Automatique" : llama.cpp n'utilise que 4 threads par défaut. On prend les cœurs disponibles
-    // moins deux (laisser de la place à l'interface et au système), au moins 1.
-    int threads = p.nThreads;
-    if (threads <= 0) {
-        const int hw = static_cast<int>(std::thread::hardware_concurrency());
-        threads = hw > 4 ? hw - 2 : std::max(1, hw);
+    // "Automatique" : llama.cpp n'utilise que 4 threads par défaut. Génération : un thread par cœur physique
+    // « performance » (ni threads SMT ni cœurs E, qui ralentissent la génération limitée par la mémoire) ;
+    // prompt : tous les cœurs physiques. Valeur imposée : la même pour les deux.
+    if (p.nThreads > 0) {
+        nThreads_ = nThreadsBatch_ = p.nThreads;
+    } else {
+        const AutoThreads a = autoThreads(cpuTopology());
+        nThreads_      = a.generation;
+        nThreadsBatch_ = a.batch;
     }
-    cp.n_threads       = threads;
-    cp.n_threads_batch = threads;
+    cp.n_threads       = nThreads_;
+    cp.n_threads_batch = nThreadsBatch_;
     cp.no_perf = true;
     cp.op_offload = (p.nGpuLayers != 0);     // mode CPU : aucune opération déléguée au GPU, même pour le prompt
 
@@ -300,6 +304,7 @@ ModelInfo LlmCore::info() const
     if (!model_) return m;
     m.description  = description();
     m.contextSize  = nCtx_;
+    m.supportsThinking = templateHasThinkSwitch_;
     m.trainContext = llama_model_n_ctx_train(model_);
     m.nLayer       = llama_model_n_layer(model_);
     m.nEmbd        = llama_model_n_embd(model_);

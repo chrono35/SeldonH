@@ -82,7 +82,8 @@
 <h2 id="interface">2. L'interface</h2>
 <ul>
   <li><b>Zone de dialogue</b> (à gauche, en haut) : vos questions et les réponses. Sous une réponse, des liens permettent de la copier ou, pour un modèle ChronoModel, de l'enregistrer en <code>.chr</code> ; <b>↻ Relancer</b> repose la même question avec exactement le même texte envoyé au modèle (la dernière réponse est remplacée ; une question plus ancienne est reposée à la fin de la conversation) ; <b>📄 Exporter le prompt</b> enregistre ce qui a été envoyé au modèle (voir <a href="#prompt">Exporter le prompt</a>).</li>
-  <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code>, ou les résultats de ChronoModel en <code>.html</code>). Les images ne sont pas acceptées : le modèle de langage ne reçoit que du texte.</li>
+  <li><b>Zone de question</b> (en bas) et bouton <b>📎</b> pour joindre un fichier (<code>.chr</code>, <code>.json</code>, un tableau <code>.xlsx</code>, <code>.ods</code>, <code>.csv</code>, <code>.tsv</code>, <code>.txt</code>, <code>.md</code>, ou les résultats de ChronoModel en <code>.html</code> ; voir <a href="#tableaux">Tableaux de datations</a>). Les images ne sont pas acceptées : le modèle de langage ne reçoit que du texte.</li>
+  <li>Bouton <b>💭 Réfléchir</b> (sous « Envoyer ») : le modèle raisonne avant de répondre, plus lentement ; utile pour les demandes complexes (modèle ChronoModel, interprétation). Il est grisé, avec l'infobulle « Sans effet sur ce modèle », quand le modèle ne sait pas réfléchir (Qwen2.5, Ministral, modèle distant…) ; Qwen3 et Qwen3.5 le gèrent. Même réglage que <i>Préférences &gt; Mode réflexion</i>.</li>
   <li><b>Panneau graphiques</b> (à droite, fermé au démarrage) : une courbe par calcul, et cet onglet d'aide. Un clic sur une figure de la conversation l'ouvre ; <code>F4</code> l'affiche ou le masque.</li>
   <li><b>Volet Historique</b> (à gauche, repliable) : vos conversations, la plus récente en haut (voir plus bas). Une fine bande avec une flèche le replie ou le déplie : <b>volet ouvert, elle est à sa droite</b> (◀ pour le replier) ; volet replié, elle reste au bord gauche de la fenêtre (▶ pour le rouvrir). Raccourci : <code>Ctrl+Maj+H</code> (<code>⌘⇧H</code> sur Mac), ou le menu <i>Affichage</i>.</li>
   <li><b>Menus</b> : <i>Fichier</i> (nouvelle conversation, modèle, enregistrer la conversation en HTML), <i>Édition</i> (Préférences), <i>Compétences</i>, <i>Affichage</i>, <i>Aide</i>.</li>
@@ -309,14 +310,12 @@
 <p>Réglages possibles dans la phrase : nombre d'<b>itérations</b>, de <b>chaînes</b>, <b>burn-in</b>, <b>thinning</b>, <b>graines</b> (pour reproduire exactement un calcul), <b>période d'étude</b> (« période d'étude -1000 à 0 ») et <b>« pas de recuit »</b> (recuit simulé désactivé, comme <i>Recurrence = 0</i> dans ChronoModel) ; sans indication, la période d'étude, loi a priori uniforme de θ, est calculée d'après les datations. Un niveau de confiance autre que 95 % se demande comme pour une date seule.</p>
 
 <h3 id="evenement-wiggle">Événement dont les dates ont des décalages différents</h3>
-<p>Chaque datation d'un événement peut avoir son propre décalage δ, de type différent (fixe, intervalle, gaussien) ou aucun. Dans l'événement, δ n'est pas une simple convolution : c'est une inconnue du MCMC, et c'est <b>t + δ</b> qui est rattaché à la date θ de l'événement (modèle de ChronoModel). Pour donner des décalages différents, collez les datations au format JSON, une par objet, avec un champ <code>wiggle</code> :</p>
+<p>Chaque datation d'un événement peut avoir son propre décalage δ, de type différent (fixe, intervalle, gaussien) ou aucun. Dans l'événement, δ n'est pas une simple convolution : c'est une inconnue du MCMC, et c'est <b>t + δ</b> qui est rattaché à la date θ de l'événement (modèle de ChronoModel). Décrivez simplement chaque datation avec son décalage, dans une phrase ou une liste (une datation par ligne) : « décalage » ou « wiggle » suivi de <b>« fixe de 15 ans »</b>, <b>« entre 10 et 40 ans »</b> (intervalle) ou <b>« gaussien de 30 ± 10 ans »</b>. Nommez la méthode de chaque datation (date gaussienne, C14, TL…) :</p>
 <ul>
-  <li><a class="ex" data-method="event">Calcule l'événement « Four » avec ces dates : {"type":"gauss","name":"Charbon","age":1000,"error":30,"wiggle":{"type":"range","min":10,"max":40}}, {"type":"gauss","name":"Os","age":1030,"error":25}, {"type":"tl","name":"TL-1","age":1000,"error":60,"ref_year":2015,"wiggle":{"type":"fixed","value":15}}, {"type":"gauss","name":"Bois","age":1000,"error":40,"wiggle":{"type":"gaussian","mean":30,"error":10}}</a></li>
+  <li><a class="ex" data-method="event">Calcule l'événement « Four » avec ces dates : charbon, date gaussienne 1000 ± 30 avec un décalage entre 10 et 40 ans ; os, date gaussienne 1030 ± 25 ; TL 1000 ± 60 ans mesurée en 2015 avec un décalage fixe de 15 ans ; bois, date gaussienne 1000 ± 40 avec un décalage gaussien de 30 ± 10 ans</a></li>
+  <li><a class="ex" data-method="event">Calcule l'événement « Four » : C14 2500 +- 30 BP sur charbon avec un wiggle entre 10 et 40 ans, et TL 2600 +- 90 ans mesuré en 2015, sans décalage</a></li>
 </ul>
-<p>Les trois formes de <code>wiggle</code> : <code>{"type":"fixed","value":15}</code>, <code>{"type":"range","min":10,"max":40}</code>, <code>{"type":"gaussian","mean":30,"error":10}</code>. On peut aussi coller les dates telles qu'elles sont dans un fichier <code>.chr</code> de ChronoModel (avec <code>plugin_id</code>, <code>data</code> et <code>delta_type</code>) : SeldonH les convertit. Ou décrire les décalages en phrase à l'assistant, qui appelle alors le calcul :</p>
-<ul>
-  <li><a class="ex">Calcule l'événement « Four » : C14 2500 +- 30 BP sur charbon avec un wiggle entre 10 et 40 ans, et TL 2600 +- 90 ans mesuré en 2015, sans décalage</a></li>
-</ul>
+<p>Les datations copiées d'un fichier <code>.chr</code> de ChronoModel (avec <code>plugin_id</code>, <code>data</code> et <code>delta_type</code>) sont aussi acceptées : SeldonH les convertit.</p>
 <p>La fiche de résultat donne :</p>
 <ul>
   <li><b>θ a posteriori</b> : HPD, MAP, moyenne, quartiles ;</li>
@@ -362,6 +361,28 @@
   <li><a class="ex">Comment savoir quelle date est avant l'autre, A ou B ?</a></li>
 </ul>
 <table><tr><td class="note"><b>Trois situations.</b> (1) Deux dates <b>indépendantes</b> : le calcul ci-dessus. (2) Des dates d'un même <b>modèle ChronoModel</b> (phases, contraintes, autres dates) : elles ne sont plus indépendantes ; exportez les traces et demandez l'antériorité sur ces traces (<a href="#traces">6 bis</a>). (3) La <b>stratigraphie</b> donne déjà l'ordre : c'est une contrainte à mettre dans le modèle ; avec elle, la probabilité vaut 100 % par construction. Pour vérifier que les datations s'accordent avec la stratigraphie, faites le calcul <i>sans</i> la contrainte. La probabilité obtenue n'est pas un test de signification : à vous de juger ce qui suffit pour votre question.</td></tr></table>
+
+<h2 id="tableaux">4 sexies. Tableaux de datations (Excel, LibreOffice, CSV)</h2>
+<p>Joignez un classeur <b>.xlsx</b> (Excel) ou <b>.ods</b> (LibreOffice) avec 📎 — s'il a plusieurs feuilles, SeldonH demande laquelle lire —, un fichier <b>.csv</b> / <b>.tsv</b>, ou <b>collez le tableau</b> dans la question (copié depuis le tableur, ou en Markdown). SeldonH le lit lui-même et affiche ce qu'il a compris : colonnes reconnues, nombre de lignes datables par méthode, lignes écartées et pourquoi (erreur ou année de mesure manquante…). Le tableau reste disponible pour toute la conversation.</p>
+<ul>
+  <li><b>En-têtes reconnus</b> (français ou anglais) : nom / code labo / échantillon, méthode, âge / valeur, erreur (±, σ), année de mesure (TL/OSL), courbe, ΔR et son erreur, F14C, inclinaison, déclinaison, α95, intensité et son erreur, min et max (date uniforme), décalage (« fixe 15 », « entre 10 et 40 », « gaussien 30 ± 10 »), couleur. Les autres colonnes (US, site, matériau, phase…) sont gardées pour les sélections. Une ligne de titre au-dessus de l'en-tête est ignorée.</li>
+  <li><b>Méthode</b> : une colonne « Méthode » (14C, TL, OSL, archéomagnétisme, gaussienne, uniforme…) ; sans elle, SeldonH la déduit des colonnes remplies (inclinaison → archéomagnétisme, année de mesure → TL), de l'unité « BP » ou du code de laboratoire (Ly-, GrA-, Beta-, Poz-…), et le signale.</li>
+  <li><b>Une valeur « 2500 ± 30 »</b> dans une seule cellule est comprise.</li>
+</ul>
+<p>Demandez ensuite ce que vous voulez faire de ces lignes. Les demandes simples sont faites par SeldonH sans le modèle de langage :</p>
+<ul>
+  <li><a class="ex">Extrais les 14C du tableau</a> — sous-tableau affiché, avec un lien <i>Enregistrer ces lignes en CSV…</i></li>
+  <li><a class="ex">Date les TL du tableau</a> — une calibration par ligne : récapitulatif (HPD, médiane) et graphique</li>
+  <li><a class="ex">Fais un événement « Four » avec les 14C du tableau</a></li>
+  <li><a class="ex">Fais un modèle ChronoModel avec le tableau</a> — un événement par ligne, modèle dessiné et proposé à l'enregistrement (.chr)</li>
+</ul>
+<p>Les demandes avec d'autres critères passent par l'assistant, qui les traduit en sélection ; SeldonH prend toujours les valeurs dans le tableau (l'assistant ne les recopie jamais) :</p>
+<ul>
+  <li><a class="ex">Date les 14C de l'US 12 sauf Ly-1234</a></li>
+  <li><a class="ex">Fais un modèle ChronoModel avec un événement par US</a></li>
+  <li><a class="ex">Combine les datations sur charbon de l'US 10</a></li>
+</ul>
+<table><tr><td class="note">Au-delà de 12 lignes datées, la fiche ne garde que le récapitulatif, et le graphique les 40 premières densités. Une cellule au format <i>date</i> dans Excel contient un numéro de jour (45000 = 2023), pas un âge : SeldonH le signale ; mettez ces cellules au format <i>Nombre</i>. Les anciens fichiers <b>.xls</b> sont à enregistrer en .xlsx.</td></tr></table>
 
 <h2 id="modele">5. Créer un modèle ChronoModel</h2>
 <p>Décrivez votre site : événements (unités stratigraphiques, faits…), phases, âges avec leurs erreurs et relations « plus ancien que ». Le modèle de langage prépare une spécification, que SeldonH vérifie : si le modèle est complet, la réponse affiche « 📦 Modèle ChronoModel prêt » et le lien <i>💾 Enregistrer le modèle (.chr)</i> ; s'il manque quelque chose (un événement sans date, une relation peu claire, un nom inconnu), SeldonH le liste et n'enregistre rien tant que ce n'est pas complété. La spécification JSON n'est pas affichée ; demandez-la explicitement (« montre le JSON du modèle ») pour la voir.</p>

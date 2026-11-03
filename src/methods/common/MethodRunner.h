@@ -55,6 +55,7 @@ struct RunOutcome {
     QString     promptBlock;        // valeurs exactes transmises au modèle
     QJsonObject plot;               // bloc « plot » (vide si rien à tracer)
     QVector<QJsonObject> extraPlots; // figures supplémentaires dans leur propre onglet (traces MCMC d'un événement)
+    QJsonObject chrSpec;            // modèle ChronoModel préparé par SeldonH (tableau, action « model ») : à proposer à l'enregistrement
 };
 
 // Ordre de deux dates INDÉPENDANTES (densités calibrées) : densité de l'écart B − A, f(x) = ∫ f_A(a) f_B(a + x) da,
@@ -130,6 +131,14 @@ public:
     // Vrai si la question demande de superposer les densités (« sur le même graphe », « superposées ») : sinon
     // chaque densité est tracée sur sa propre ligne.
     static bool asksOverlay(const QString& question);
+    // La question demande plus que le calcul : explication, interprétation, avis, comparaison, conseil (« explique »,
+    // « que penser de », « est-ce cohérent », « why », « interpret »…). Sinon, un calcul fait par SeldonH est affiché seul
+    // (mode calculatrice), sans réponse du modèle de langage.
+    static bool asksCommentary(const QString& question);
+    // En-tête du bloc de résultat envoyé au modèle : les valeurs sont déjà affichées dans la fiche de SeldonH, le modèle
+    // ne les recopie pas. externalResultHeader() : pour un assistant qui ne voit pas la fiche (serveur MCP).
+    static QString shownResultHeader();
+    static QString externalResultHeader();
     // La question demande explicitement les traces des chaînes MCMC (« avec les traces », « trace de θ », « trace plot »…).
     static bool asksTraces(const QString& question);
     // Couleur d'une date ou d'un événement : « color » ("#rrggbb" ou nom), ou red/green/blue (format .chr). Vide sinon.

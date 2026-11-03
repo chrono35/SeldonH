@@ -61,6 +61,7 @@ class QToolButton;
 
 namespace seldon {
 class RemoteEngine;
+struct RunOutcome;
 class ChatView;
 class FigurePanel;
 class ChrSceneWidget;
@@ -138,7 +139,16 @@ private:
         QString     truncationDetail;
         bool        drewModel = false;  // SeldonH a dessiné le modèle pour ce tour (bloc plot du modèle de langage ignoré)
         QJsonObject prompt;             // dernier prompt envoyé pour ce tour (voir promptSnapshot)
+        bool        calcOnly = false;   // résultat de SeldonH affiché seul, sans réponse du modèle (lien « Demander un commentaire »)
     };
+    bool thinkingSupported() const;                         // le modèle chargé sait réfléchir (local, gabarit « enable_thinking »)
+    void updateThinkButton();
+    bool wantsCalcComment(const QString& question) const;   // réglage « Commentaire après un calcul » appliqué à la question
+    void finishCalcOnly(const QString& shown = QString());  // termine le dernier tour sans génération (mode calculatrice)
+    void applyRunExtras(const seldon::RunOutcome& out);           // modèle ChronoModel préparé par SeldonH (tableau) : dessiné, gardé
+    bool saveChrSpec(const QJsonObject& spec);              // enregistre un modèle (spécification du bloc chronomodel) en .chr
+    void saveTableCsv(const QUrl& url);                     // lien « Enregistrer ces lignes en CSV… »
+    void requestComment(int turn);                          // « Demander un commentaire » sous un résultat affiché seul
 
     void buildUi();
     void buildMenus();
@@ -222,6 +232,7 @@ private:
     seldon::InputEdit*   input_ = nullptr;
     QPushButton*         sendBtn_ = nullptr;
     QPushButton*         stopBtn_ = nullptr;
+    QToolButton*         thinkBtn_ = nullptr;          // « 💭 Réfléchir » : mode réflexion (grisé si le modèle ne le gère pas)
     QToolButton*         attachBtn_ = nullptr;
     QLabel*              attachLabel_ = nullptr;
     QToolButton*         attachClear_ = nullptr;
@@ -261,6 +272,8 @@ private:
     bool                 generating_ = false;
     QString              attachName_, attachText_;
     bool                 attachChronoResults_ = false;   // pièce jointe = résultats de ChronoModel (résumé extrait)
+    bool                 attachTable_ = false;           // pièce jointe = tableau de datations lu par SeldonH (tableau courant)
+    QString              attachTableHtml_;               // fiche « tableau lu » montrée à l'envoi
     seldon::chronoresults::Report attachResults_;         // résultats joints, lus
     seldon::chronoresults::Report lastResults_;           // derniers résultats de la conversation (questions suivantes)
     QString              lastResultsName_;

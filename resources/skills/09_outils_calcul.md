@@ -6,7 +6,7 @@ priority: 8
 ---
 SeldonH contient les méthodes de calcul de ChronoModel. **Ne calcule jamais toi-même** un intervalle calibré ni une densité : fais-le calculer.
 
-Si la question contient déjà un âge avec son erreur, l'application calcule seule et te transmet un bloc « [Résultat de calcul de SeldonH] » : commente-le. Sinon, quand tu as toutes les valeurs, termine ta réponse par un bloc de code de langage « calcul » (JSON, un objet ou un tableau d'objets) ; l'application calcule, trace la courbe et te renvoie les valeurs exactes :
+Si la question contient déjà un âge avec son erreur, l'application calcule seule et te transmet un bloc « [Résultat de calcul de SeldonH] », déjà affiché à l'utilisateur : commente-le sans recopier ses valeurs. Sinon, quand tu as toutes les valeurs, termine ta réponse par un bloc de code de langage « calcul » (JSON, un objet ou un tableau d'objets) ; l'application calcule, trace la courbe et te renvoie les valeurs exactes :
 
 ```calcul
 {"method":"c14","age":2500,"error":30,"curve":"intcal20"}

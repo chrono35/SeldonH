@@ -277,6 +277,39 @@ QVector<ToolDef> build()
                       { "law" }),
                "density_file" });
 
+    {
+        const QJsonObject strArray{ { "type", "array" }, { "items", QJsonObject{ { "type", "string" } } } };
+        const QJsonObject intArray{ { "type", "array" }, { "items", QJsonObject{ { "type", "integer" } } } };
+        auto withDesc = [](QJsonObject o, const QString& d) { o["description"] = d; return o; };
+        v.append({ "tableau",
+                   QStringLiteral("Agit sur le TABLEAU DE DATATIONS joint ou collé par l'utilisateur, que SeldonH a lu et garde (son résumé, "
+                                  "avec les colonnes et les lignes numérotées #1, #2…, est dans la conversation). Sélectionne des lignes "
+                                  "(méthode, numéros, noms, valeur d'une colonne) puis : « extract » affiche le sous-tableau (export CSV), "
+                                  "« date » calibre chaque ligne (récapitulatif HPD et médiane), « event » estime un événement (MCMC) avec "
+                                  "les lignes choisies, « combine » les combine, « model » prépare un modèle ChronoModel (.chr), un événement "
+                                  "par ligne ou par valeur de la colonne group_by. Les valeurs sont prises dans le tableau : n'écris "
+                                  "jamais toi-même les âges ou les erreurs. Sans critère : toutes les lignes."),
+                   schema({ { "action", str(QStringLiteral("extract (défaut), date, event, combine ou model."),
+                                            { "extract", "date", "event", "combine", "model" }) },
+                            { "methods", withDesc(strArray, QStringLiteral("Méthodes à garder : c14, f14c, tl, am, gauss, unif. Facultatif.")) },
+                            { "rows", withDesc(intArray, QStringLiteral("Numéros de ligne à garder (#1 = première ligne de données). Facultatif.")) },
+                            { "exclude_rows", withDesc(intArray, QStringLiteral("Numéros de ligne à écarter. Facultatif.")) },
+                            { "names", withDesc(strArray, QStringLiteral("Noms (colonne de nom ou code de laboratoire) à garder. Facultatif.")) },
+                            { "exclude_names", withDesc(strArray, QStringLiteral("Noms à écarter. Facultatif.")) },
+                            { "where", QJsonObject{ { "type", "array" },
+                                                    { "description", QStringLiteral("Conditions sur des colonnes, toutes vraies à la fois : "
+                                                                                    "{\"column\":\"US\",\"op\":\"=\",\"value\":\"12\"} ; op : =, !=, "
+                                                                                    "contains, not_contains, <, >, <=, >=, in (value = liste). "
+                                                                                    "Colonnes : en-têtes du tableau (ou méthode, nom, âge, erreur).") },
+                                                    { "items", QJsonObject{ { "type", "object" } } } } },
+                            { "group_by", str(QStringLiteral("model : colonne qui regroupe les lignes en événements (ex. « US »). Sans elle : un événement par ligne.")) },
+                            { "name", str(QStringLiteral("Nom de l'événement, de la combinaison ou du modèle. Facultatif.")) },
+                            { "mcmc", QJsonObject{ { "type", "object" },
+                                                   { "description", QStringLiteral("event : réglages MCMC, seulement si l'utilisateur les donne (mêmes clés que calculer_evenement).") } } } },
+                          {}),
+                   "table" });
+    }
+
     v.append({ "courbes_disponibles",
                QStringLiteral("Liste les courbes de référence intégrées à SeldonH (calibration 14C, F14C bombe, archéomagnétisme). "
                               "À appeler avant un calcul quand l'utilisateur nomme une courbe dont tu n'es pas sûr."),
@@ -288,7 +321,8 @@ QVector<ToolDef> build()
         if (d.methodId.isEmpty() || d.methodId == QLatin1String("density_file")) continue;
         QJsonObject props = d.parameters.value("properties").toObject();
         // Calculs qui ne sont pas des datations : seulement le niveau de confiance.
-        const bool notDating = d.methodId == QLatin1String("traces") || d.methodId == QLatin1String("inverse");
+        const bool notDating = d.methodId == QLatin1String("traces") || d.methodId == QLatin1String("inverse")
+                               || d.methodId == QLatin1String("table");
         props["level"] = num(QStringLiteral("Niveau de confiance des intervalles HPD, en % (défaut 95). À donner seulement si "
                                             "l'utilisateur demande un autre niveau (ex. 99 ou 90) ; les HPD à 95 % et 68 % sont toujours fournies."));
         if (notDating) { d.parameters["properties"] = props; continue; }

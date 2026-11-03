@@ -52,6 +52,9 @@ public:
     void setAssistant(int index, const QString& markdown, const QString& thinking,
                       bool thinkingOpen, bool final);
     void setActions(int index, const QStringList& linksHtml);   // liens sous la bulle
+    // Raisonnement du modèle : affiché pendant qu'il s'écrit puis replié (lien seldon://thinking/<index> pour le déplier).
+    void setShowThinking(bool on);
+    void toggleThinking(int index);
 
     // Rappel d'une figure du panneau de droite : vignette cliquable (lien seldon://figure/<id>). setFigure remplace
     // l'image d'une figure déjà rappelée (datations ajoutées à la même figure).
@@ -73,6 +76,8 @@ private:
         QString actions;       // liens sous la bulle
         QString thinking;
         bool    thinkingOpen = false;
+        bool    final = false;           // réponse terminée (le raisonnement est alors replié)
+        bool    thinkingShown = false;   // raisonnement déplié par l'utilisateur (lien « ▸ Raisonnement »)
         int     figure = -1;   // Figure : identifiant de l'image
     };
     struct FigureImage { QImage img; int version = 0; QString caption; };
@@ -84,6 +89,7 @@ private:
     QHash<int, FigureImage> figures_;
     QTimer        timer_;
     bool          dirty_ = false;
+    bool          showThinking_ = false;
 };
 
 } // namespace seldon

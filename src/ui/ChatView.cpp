@@ -30,6 +30,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../core/MathText.h"
 
+#include <QRegularExpression>
 #include <QApplication>
 #include <QBuffer>
 #include <QUrl>
@@ -113,8 +114,23 @@ void ChatView::setAssistant(int index, const QString& markdown, const QString& t
     it.html = markdown.isEmpty() ? QString() : markdownToHtml(markdown);
     it.thinking = thinking;
     it.thinkingOpen = thinkingOpen;
+    it.final = final;
     if (final) { timer_.stop(); render(); }
     else scheduleRender();
+}
+
+void ChatView::setShowThinking(bool on)
+{
+    if (showThinking_ == on) return;
+    showThinking_ = on;
+    render();
+}
+
+void ChatView::toggleThinking(int index)
+{
+    if (index < 0 || index >= items_.size()) return;
+    items_[index].thinkingShown = !items_[index].thinkingShown;
+    render();
 }
 
 void ChatView::setActions(int index, const QStringList& linksHtml)
@@ -212,6 +228,24 @@ QString ChatView::bubble(const Item& it, bool forExport) const
                         .arg(muted, it.thinkingOpen ? tr("réflexion en cours…") : tr("…"));
         else
             inner = it.html;
+        // Raisonnement : en direct pendant la génération, replié une fois la réponse terminée (dépliable).
+        if (showThinking_ && !it.thinking.trimmed().isEmpty()) {
+            const QString body = QStringLiteral("<div style=\"color:%1; font-size:small; margin-left:8px\"><i>%2</i></div>")
+                                     .arg(muted, it.thinking.trimmed().toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
+            const int words = int(it.thinking.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).size());
+            const int self = int(&it - items_.constData());
+            const bool open = !it.final || it.thinkingShown;
+            QString head = !it.final ? tr("💭 Raisonnement en cours")
+                                     : tr("%1 Raisonnement (%2 mots)").arg(open ? QStringLiteral("▾") : QStringLiteral("▸")).arg(words);
+            if (it.final && !forExport)
+                head = QStringLiteral("<a href=\"seldon://thinking/%1\" style=\"color:%2\">%3</a>").arg(self).arg(muted, head);
+            const QString block = QStringLiteral("<p style=\"color:%1; font-size:small\">%2</p>").arg(muted, head)
+                                  + (open ? body : QString());
+            // Pendant la génération, le raisonnement précède la réponse ; ensuite il passe en dessous, replié.
+            if (it.html.isEmpty() && !it.final) inner = block;
+            else if (!it.final) inner = block + inner;
+            else inner += block;
+        }
         break;
     }
     const QString border = it.kind == Item::User

@@ -63,6 +63,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QListWidget>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QFileInfo>
+#include <QDir>
 #include <QFile>
 #include "../src/skills/Lexicon.h"
 #include "../src/skills/SkillManager.h"
@@ -78,6 +80,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "../src/methods/common/Tools.h"
 #include "../src/llm/ToolsProbe.h"
 #include "../mcp/McpServer.h"
+#include "../src/llm/CpuTopology.h"
+#include "../src/core/Spreadsheet.h"
+#include "DataTable.h"
 
 using namespace seldon;
 
@@ -2274,6 +2279,16 @@ private slots:
                     for (const QJsonObject& o : d) if (o.contains("wiggle")) ++w;
                     QVERIFY2(w >= 2, qPrintable("décalages non lus : " + e.text));
                 }
+                if (e.text.contains(QStringLiteral("décalage gaussien"))) {        // décalages écrits en français, un par date
+                    const QVector<QJsonObject> rq = MethodRunner::requestsFromQuestion(e.text);
+                    QVERIFY2(rq.size() == 1 && rq[0].value("method").toString() == "event", qPrintable("événement non lu : " + e.text));
+                    QStringList kinds;
+                    for (const QJsonValue& v : rq[0].value("dates").toArray())
+                        if (v.toObject().contains("wiggle")) kinds << v.toObject().value("wiggle").toObject().value("type").toString();
+                    kinds.sort();
+                    QCOMPARE(rq[0].value("dates").toArray().size(), 4);
+                    QCOMPARE(kinds, QStringList({ "fixed", "gaussian", "range" }));
+                }
                 methods << e.method;
                 ++checked;
                 continue;
@@ -2731,9 +2746,9 @@ private slots:
     void toolsSchema()
     {
         const auto& all = seldon::tools::all();
-        QCOMPARE(all.size(), 13);
+        QCOMPARE(all.size(), 14);
         const QJsonArray api = seldon::tools::schemaForApi();
-        QCOMPARE(api.size(), 13);
+        QCOMPARE(api.size(), 14);
         static const QRegularExpression okName("^[a-z0-9_]{1,64}$");
         QStringList seen;
         for (const QJsonValue& v : api) {
@@ -2748,8 +2763,9 @@ private slots:
         // chaque outil de calcul vise une méthode qui existe
         for (const auto& d : all)
             // « event » (MCMC) et « combine » (produit) combinent les autres méthodes ; « density_file » écrit un fichier pour
-            // le plugin Density ; « traces » lit les chaînes jointes ; « inverse » lit une courbe de référence ; « order » compare deux datations
-            if (!d.methodId.isEmpty() && !QStringList{ "event", "combine", "order", "density_file", "traces", "inverse" }.contains(d.methodId))
+            // le plugin Density ; « traces » lit les chaînes jointes ; « inverse » lit une courbe de référence ; « order » compare deux datations ;
+            // « table » agit sur le tableau de datations joint
+            if (!d.methodId.isEmpty() && !QStringList{ "event", "combine", "order", "density_file", "traces", "inverse", "table" }.contains(d.methodId))
                 QVERIFY2(seldon::MethodRegistry::instance().byId(d.methodId) != nullptr, qPrintable(d.name));
     }
 
@@ -2878,7 +2894,7 @@ private slots:
         const RemoteConfig cfg{ "http://x/v1", "", "m" };
         const QJsonObject b1 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
                                                                            tools::schemaForApi(), QJsonArray{ am, tm })).object();
-        QCOMPARE(b1.value("tools").toArray().size(), 13);
+        QCOMPARE(b1.value("tools").toArray().size(), 14);
         QCOMPARE(b1.value("tool_choice").toString(), QString("auto"));
         QCOMPARE(b1.value("messages").toArray().size(), 3);
         const QJsonObject b2 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
@@ -2921,7 +2937,7 @@ private slots:
 
         // 1re requête : outils déclarés
         const QJsonObject first = QJsonDocument::fromJson(srv.bodies_[0]).object();
-        QCOMPARE(first.value("tools").toArray().size(), 13);
+        QCOMPARE(first.value("tools").toArray().size(), 14);
 
         eng.submitToolResults({ { cs[0].id, cs[0].name, out.content } });
         QTRY_COMPARE_WITH_TIMEOUT(fin.count(), 1, 5000);
@@ -4449,6 +4465,316 @@ private slots:
         const QString model = "Voici le modèle.\n```json\n{\"events\":[]}\n```\n";
         QCOMPARE(MethodRunner::hideCalcBlocks(model, false), model);    // modèle ChronoModel : traité par ChrBuilder
         QVERIFY(MethodRunner::hideCalcBlocks("Calcul :\n```calcul\n{\"method\":", false).contains("Préparation du calcul"));
+    }
+
+    // Tableaux de datations : lecture (texte, Markdown, en-têtes fr/en, méthode déduite), garde-fou, sélection.
+    void dataTableReading()
+    {
+        namespace dt = seldon::datatable;
+        dt::clear();
+        // Tabulations, en-têtes français, méthode par colonne, décalage, TL sans année de mesure.
+        const QString tsv = QStringLiteral(
+            "Code labo\tMéthode\tÂge\tErreur\tAnnée de mesure\tUS\tMatériau\tDécalage\n"
+            "Ly-1234\t14C\t2500\t30\t\t12\tcharbon\t\n"
+            "Ly-1235\t14C\t2470\t35\t\t12\tos\t\n"
+            "GrA-777\tC14\t2 610\t40\t\t10\tcharbon\tentre 10 et 40\n"
+            "TL-1\tTL\t2600\t90\t2015\t12\tcéramique\t\n"
+            "TL-2\tOSL\t2550\t80\t\t10\tcéramique\t\n"
+            "G-1\tgaussienne\t-550\t25\t\t14\tbois\tfixe 15\n");
+        QString err;
+        dt::Table t = dt::parseText(tsv, QStringLiteral("collé"), &err);
+        QVERIFY2(t.isValid(), qPrintable(err));
+        QCOMPARE(t.cells.size(), 6);
+        QCOMPARE(t.datable(), 5);
+        QCOMPARE(t.requests[0].value("method").toString(), QStringLiteral("c14"));
+        QCOMPARE(t.requests[0].value("name").toString(), QStringLiteral("Ly-1234"));
+        QCOMPARE(t.requests[2].value("age").toDouble(), 2610.0);                     // séparateur de milliers
+        QCOMPARE(t.requests[2].value("wiggle").toObject().value("type").toString(), QStringLiteral("range"));
+        QCOMPARE(t.requests[3].value("ref_year").toDouble(), 2015.0);
+        QVERIFY(t.requests[4].isEmpty());
+        QVERIFY(t.problems[4].contains(QStringLiteral("année de mesure")));
+        QCOMPARE(t.requests[5].value("method").toString(), QStringLiteral("gauss"));
+        QCOMPARE(t.requests[5].value("wiggle").toObject().value("value").toDouble(), 15.0);
+        for (const QJsonObject& r : t.requests)
+            if (!r.isEmpty()) QVERIFY2(MethodRegistry::instance().compute(MethodRunner::normalizeRequest(r)).ok, qPrintable(QJsonDocument(r).toJson()));
+
+        // Markdown, ligne de titre au-dessus, « valeur ± erreur » dans une cellule, sans colonne Méthode (BP, code labo).
+        const QString md = QStringLiteral(
+            "Résultats du labo\n\n"
+            "| Sample | Radiocarbon age (BP) | Site |\n|---|---|---|\n| Poz-1 | 3560 ± 20 | A |\n| X-12 | 3400 +/- 25 | B |\n");
+        dt::Table m = dt::parseText(md, QString(), &err);
+        QVERIFY2(m.isValid(), qPrintable(err));
+        QCOMPARE(m.cells.size(), 2);
+        QCOMPARE(m.datable(), 2);
+        QCOMPARE(m.requests[1].value("method").toString(), QStringLiteral("c14"));   // en-tête « BP »
+        QCOMPARE(m.requests[1].value("error").toDouble(), 25.0);
+        QVERIFY(!m.notes.isEmpty());                                                 // méthode déduite : signalé
+
+        // Pas un tableau de datations : rien n'est lu (et rien n'est calculé).
+        dt::Table bad = dt::parseText(QStringLiteral("a;b;c\n1;2;3\n4;5;6\n"), QString(), &err);
+        QVERIFY(!bad.isValid());
+        QVERIFY(!err.isEmpty());
+
+        // Garde-fou : un tableau collé n'est jamais lu comme des datations isolées.
+        const QString q = QStringLiteral("Calcule l'événement « Four » :\n| Nom | Méthode | Valeur | Erreur | Décalage |\n|---|---|---|---|---|\n"
+                                         "| Charbon | gauss | 1000 | 30 | entre 10 et 40 |\n| Os | gauss | 1030 | 25 | |\n");
+        int a = -1, n = -1;
+        QVERIFY(dt::looksLikeTable(q, &a, &n));
+        QVERIFY(q.mid(a, n).contains(QStringLiteral("Charbon")));
+        QVERIFY(!q.left(a).contains(QStringLiteral("|")));
+        QVERIFY(MethodRunner::requestsFromQuestion(q).isEmpty());
+        // Le cas de départ : ce tableau donnait une seule date fausse (gauss 30 ± 10, décalage 1000). Lu par le lecteur de tableaux,
+        // la consigne qui le précède (« Calcule l'événement « Four » ») le vise.
+        const QString four = QStringLiteral("| Nom | Méthode | Valeur | Erreur | Année de mesure | Décalage |\n|---|---|---|---|---|---|\n"
+            "| Charbon | gauss | 1000 | 30 | | entre 10 et 40 |\n| Os | gauss | 1030 | 25 | | |\n| TL-1 | TL | 1000 | 60 | 2015 | fixe 15 |\n"
+            "| Bois | gauss | 1000 | 40 | | gaussien 30 ± 10 |\n");
+        const dt::Table ft = dt::parseText(four, QString(), &err);
+        QVERIFY2(ft.isValid(), qPrintable(err));
+        QCOMPARE(ft.datable(), 4);
+        dt::setCurrent(ft);
+        const QVector<QJsonObject> fr = MethodRunner::requestsFromQuestion(QStringLiteral("Calcule l'événement « Four » (tableau)"));
+        QCOMPARE(fr.size(), 1);
+        QCOMPARE(fr[0].value("action").toString(), QStringLiteral("event"));
+        QCOMPARE(fr[0].value("name").toString(), QStringLiteral("Four"));
+        QStringList kinds;
+        for (const QJsonObject& r : dt::requestsOf(ft, dt::select(ft, {}).rows))
+            if (r.contains("wiggle")) kinds << r.value("wiggle").toObject().value("type").toString();
+        kinds.sort();
+        QCOMPARE(kinds, QStringList({ "fixed", "gaussian", "range" }));
+        QCOMPARE(dt::requestsOf(ft, { 2 })[0].value("ref_year").toDouble(), 2015.0);
+        dt::clear();
+        QVERIFY(!dt::looksLikeTable(QStringLiteral("Calcule l'événement :\n- charbon : date gaussienne 1000 ± 30\n- os : date gaussienne 1030 ± 25")));
+        QVERIFY(dt::isChronoModelImport(QStringLiteral("method;dating name;param a\n")));
+
+        // Sélections.
+        dt::Selection s = dt::select(t, QJsonObject{ { "methods", QJsonArray{ "14C" } } });
+        QCOMPARE(s.rows, QVector<int>({ 0, 1, 2 }));
+        s = dt::select(t, QJsonObject{ { "where", QJsonArray{ QJsonObject{ { "column", "US" }, { "op", "=" }, { "value", 12 } } } } });
+        QCOMPARE(s.rows, QVector<int>({ 0, 1, 3 }));
+        s = dt::select(t, QJsonObject{ { "where", QJsonArray{ QJsonObject{ { "column", "matériau" }, { "op", "!=" }, { "value", "os" } },
+                                                              QJsonObject{ { "column", "Âge" }, { "op", ">" }, { "value", 2500 } } } } });
+        QCOMPARE(s.rows, QVector<int>({ 2, 3, 4 }));
+        s = dt::select(t, QJsonObject{ { "rows", "2-4" }, { "exclude_names", QJsonArray{ "gra-777" } } });
+        QCOMPARE(s.rows, QVector<int>({ 1, 3 }));
+        s = dt::select(t, QJsonObject{ { "where", QJsonArray{ QJsonObject{ { "column", "Phase" }, { "value", "A" } } } } });
+        QVERIFY(s.error.contains(QStringLiteral("Phase")));
+        s = dt::select(t, QJsonObject{ { "names", QJsonArray{ "Ly-9999" } } });
+        QVERIFY(!s.error.isEmpty());
+        QStringList skipped;
+        QCOMPARE(dt::requestsOf(t, { 3, 4 }, &skipped).size(), 1);
+        QCOMPARE(skipped.size(), 1);
+        QVERIFY(dt::toCsv(t, { 0 }).startsWith(QStringLiteral("Code labo;Méthode;")));
+
+        // Modèle : un événement par US.
+        const QJsonObject spec = dt::modelSpec(t, dt::select(t, {}).rows, QStringLiteral("US"), QStringLiteral("Site"));
+        const QJsonArray evs = spec.value("events").toArray();
+        QCOMPARE(evs.size(), 3);
+        QCOMPARE(evs[0].toObject().value("name").toString(), QStringLiteral("US 12"));
+        QCOMPARE(evs[0].toObject().value("dates").toArray().size(), 3);
+        QCOMPARE(evs[0].toObject().value("dates").toArray()[0].toObject().value("type").toString(), QStringLiteral("c14"));
+        const ChrResult cr = ChrBuilder::build(spec);
+        QVERIFY2(cr.ok, qPrintable(cr.errors.join("; ")));
+
+        // Demandes directes (sans modèle de langage), avec le tableau courant.
+        dt::setCurrent(t);
+        QJsonObject d = dt::requestFromQuestion(QStringLiteral("extrais les 14C du tableau"));
+        QCOMPARE(d.value("action").toString(), QStringLiteral("extract"));
+        QCOMPARE(d.value("methods").toArray(), QJsonArray({ "c14" }));
+        QCOMPARE(dt::requestFromQuestion(QStringLiteral("date les TL")).value("action").toString(), QStringLiteral("date"));
+        QCOMPARE(dt::requestFromQuestion(QStringLiteral("calibre toutes les dates du tableau")).value("action").toString(), QStringLiteral("date"));
+        d = dt::requestFromQuestion(QStringLiteral("fais un événement « Four » avec les 14C du tableau"));
+        QCOMPARE(d.value("action").toString(), QStringLiteral("event"));
+        QCOMPARE(d.value("name").toString(), QStringLiteral("Four"));
+        QVERIFY(dt::requestFromQuestion(QStringLiteral("date les 14C de l'US 12")).isEmpty());          // critère : pour le modèle
+        QVERIFY(dt::requestFromQuestion(QStringLiteral("extrais les 14C sauf Ly-1234")).isEmpty());
+        QVERIFY(dt::requestFromQuestion(QStringLiteral("calibre 2500 ± 30 BP")).isEmpty());              // datation donnée
+        QVERIFY(dt::requestFromQuestion(QStringLiteral("que penser du tableau ?")).isEmpty());          // pas d'action
+        QCOMPARE(MethodRunner::requestsFromQuestion(QStringLiteral("extrais les 14C du tableau")).size(), 1);
+        dt::clear();
+        QVERIFY(dt::requestFromQuestion(QStringLiteral("extrais les 14C du tableau")).isEmpty());
+    }
+
+    // Actions sur le tableau courant : extraction, datation ligne par ligne, combinaison, événement, modèle, outil.
+    void dataTableActions()
+    {
+        namespace dt = seldon::datatable;
+        const QString tsv = QStringLiteral(
+            "Nom\tMéthode\tÂge\tErreur\tUS\n"
+            "Ly-1\t14C\t2500\t30\t12\nLy-2\t14C\t2470\t35\t12\nTL-1\tTL\t2600\t90\t10\nG-1\tgauss\t-550\t25\t14\n");
+        dt::clear();
+        RunOutcome none = MethodRunner::run({ QJsonObject{ { "method", "table" }, { "action", "date" } } });
+        QVERIFY(none.found);
+        QVERIFY(none.promptBlock.contains(QStringLiteral("aucun tableau")));
+        dt::setCurrent(dt::parseText(tsv, QStringLiteral("essai.csv")));
+        QVERIFY(dt::hasCurrent());
+        QCOMPARE(dt::current().problems[2].isEmpty(), false);         // TL sans année de mesure
+
+        RunOutcome ex = MethodRunner::run({ QJsonObject{ { "method", "table" }, { "action", "extract" }, { "methods", QJsonArray{ "c14" } } } });
+        QVERIFY(ex.noticeHtml.contains(QStringLiteral("seldon://tablecsv?data=")));
+        QVERIFY(ex.noticeHtml.contains(QStringLiteral("Ly-2")));
+        QVERIFY(!ex.noticeHtml.contains(QStringLiteral("G-1")));
+        QVERIFY(ex.promptBlock.contains(QStringLiteral("ne recopie"), Qt::CaseInsensitive));
+        QVERIFY(ex.plot.isEmpty());
+
+        RunOutcome da = MethodRunner::run({ QJsonObject{ { "method", "table" }, { "action", "date" } } });
+        QVERIFY(da.noticeHtml.contains(QStringLiteral("Récapitulatif")));
+        QVERIFY(da.noticeHtml.contains(QStringLiteral("non datables écartées")));
+        QCOMPARE(da.plot.value("series").toArray().size(), 3);
+        QVERIFY(da.promptBlock.contains(QStringLiteral("#1 Ly-1 : HPD")));
+        QVERIFY(da.promptBlock.contains(QStringLiteral("#4 G-1 : HPD")));
+
+        RunOutcome co = MethodRunner::run({ QJsonObject{ { "method", "table" }, { "action", "combine" }, { "methods", QJsonArray{ "c14" } },
+                                                        { "name", "Foyer" } } });
+        QVERIFY2(co.promptBlock.contains(QStringLiteral("Densité combinée")), qPrintable(co.promptBlock.left(400)));
+
+        RunOutcome ev = MethodRunner::run({ QJsonObject{ { "method", "table" }, { "action", "event" },
+                                                        { "where", QJsonArray{ QJsonObject{ { "column", "US" }, { "value", "12" } } } },
+                                                        { "mcmc", QJsonObject{ { "num_iter", 3000 }, { "num_burn", 300 }, { "num_proc", 2 },
+                                                                               { "max_batches", 20 } } } } });
+        QVERIFY2(ev.promptBlock.contains(QStringLiteral("θ")), qPrintable(ev.promptBlock.left(400)));
+
+        RunOutcome mo = MethodRunner::run({ QJsonObject{ { "method", "table" }, { "action", "model" }, { "group_by", "US" } } });
+        QCOMPARE(mo.chrSpec.value("events").toArray().size(), 2);    // US 12 et US 14 (le TL est écarté)
+        QVERIFY(mo.noticeHtml.contains(QStringLiteral("seldon://tablechr?spec=")));
+
+        // Outil (modèle distant) et bloc calcul : même demande.
+        const seldon::tools::ToolOutcome to = seldon::tools::execute(QStringLiteral("tableau"),
+            QStringLiteral(R"({"action":"extract","where":[{"column":"US","op":"in","value":["10","14"]}]})"), DateFormat::BcAd);
+        QVERIFY2(to.executed, qPrintable(to.content));
+        QVERIFY(to.run.noticeHtml.contains(QStringLiteral("TL-1")) && to.run.noticeHtml.contains(QStringLiteral("G-1")));
+        QVERIFY(!to.run.noticeHtml.contains(QStringLiteral("Ly-1<")));
+        QCOMPARE(MethodRunner::extractCalcBlocks(QStringLiteral("```calcul\n{\"method\":\"table\",\"action\":\"date\",\"rows\":[1]}\n```")).size(), 1);
+
+        // Serveur MCP : le tableau est lu depuis un fichier CSV ; les lignes extraites sont rendues en CSV.
+        QTemporaryDir tmp;
+        const QString csv = tmp.filePath(QStringLiteral("t.csv"));
+        { QFile f(csv); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(QString(tsv).replace('\t', ';').toUtf8()); }
+        dt::clear();
+        seldon::McpServer srv([](const QByteArray&) {});
+        const QJsonObject res = srv.callTool(QStringLiteral("tableau"), QJsonObject{ { "file", csv }, { "methods", QJsonArray{ "gauss" } } });
+        const QString text = res.value("content").toArray().first().toObject().value("text").toString();
+        QVERIFY2(!res.value("isError").toBool(), qPrintable(text));
+        QVERIFY(text.contains(QStringLiteral("G-1;gauss;-550;25;14")));
+        QVERIFY(text.contains(QStringLiteral("Tableau courant")));
+        QVERIFY(srv.callTool(QStringLiteral("tableau"), QJsonObject{ { "file", tmp.filePath("x.xlsx") } }).value("isError").toBool());
+        dt::clear();
+    }
+
+    // Classeurs : feuilles d'un .xlsx et d'un .ods, ligne de titre, cellules vides, textes partagés et en ligne.
+    void spreadsheetReading()
+    {
+        namespace dt = seldon::datatable;
+        for (const char* file : { "data/tableau_datations.xlsx", "data/tableau_datations.ods" }) {
+            const QString path = QFINDTESTDATA(file);
+            QVERIFY2(!path.isEmpty(), file);
+            QString err;
+            QCOMPARE(seldon::spreadsheet::sheetNames(path, &err), QStringList({ "Notes", "Datations" }));
+            seldon::spreadsheet::Sheet sh;
+            QVERIFY2(seldon::spreadsheet::read(path, QStringLiteral("Datations"), sh, &err), qPrintable(err));
+            QCOMPARE(sh.name, QStringLiteral("Datations"));
+            const dt::Table t = dt::fromGrid(sh.rows, QFileInfo(path).fileName(), &err, sh.lineNumbers);
+            QVERIFY2(t.isValid(), qPrintable(QString(file) + " : " + err));
+            QCOMPARE(t.headerLine, 2);
+            QCOMPARE(t.cells.size(), 6);                     // ligne vide ignorée
+            QCOMPARE(t.sourceLines.last(), 9);
+            QCOMPARE(t.datable(), 5);
+            QCOMPARE(t.requests[0].value("age").toDouble(), 2500.0);
+            QCOMPARE(t.cells[1][6], QStringLiteral("os"));    // texte en ligne (xlsx)
+            QCOMPARE(t.requests[5].value("age").toDouble(), -550.0);
+            QCOMPARE(t.requests[2].value("wiggle").toObject().value("max").toDouble(), 40.0);
+            QVERIFY(!t.notes.isEmpty());                     // ligne de titre ignorée : signalé
+            seldon::spreadsheet::Sheet first;
+            QVERIFY(seldon::spreadsheet::read(path, QString(), first, &err));
+            QCOMPARE(first.name, QStringLiteral("Notes"));
+            QVERIFY(!seldon::spreadsheet::read(path, QStringLiteral("Absente"), first, &err));
+        }
+        QCOMPARE(seldon::spreadsheet::columnIndex(QStringLiteral("AA3")), 26);
+        QCOMPARE(seldon::spreadsheet::rowNumber(QStringLiteral("B12")), 12);
+    }
+
+    // Mode calculatrice : un simple calcul n'appelle pas de commentaire du modèle ; consigne « déjà affiché, ne recopie pas »
+    void calcCommentary()
+    {
+        for (const char* q : { "calibre 2500 ± 30 BP", "C14 de 2500 +/- 30 BP avec IntCal20", "date TL 1200 ± 80 ans, mesure en 2020",
+                               "calcule l'événement de 2500 ± 30 BP et 2450 ± 30 BP", "Et à 50 % ?", "laquelle est la plus ancienne : 2500 ± 30 BP ou 2450 ± 30 BP ?",
+                               "calibrate 3000 ± 40 BP", "comment calibrer 2500 ± 30 BP ?" })
+            QVERIFY2(!MethodRunner::asksCommentary(QString::fromUtf8(q)), q);
+        for (const char* q : { "calibre 2500 ± 30 BP et explique le résultat", "que penser de 2500 ± 30 BP ?", "pourquoi la date 2500 ± 30 BP est-elle si large ?",
+                               "Interprète la calibration de 2500 ± 30 BP", "est-ce cohérent avec la stratigraphie ?", "commente ce résultat",
+                               "compare 2500 ± 30 BP et 2450 ± 30 BP", "explain the calibration of 2500 ± 30 BP", "why is it bimodal?",
+                               "qu'en penser ?", "ces dates sont-elles compatibles ?", "donne ton avis" })
+            QVERIFY2(MethodRunner::asksCommentary(QString::fromUtf8(q)), q);
+
+        // Le bloc envoyé au modèle dit que les valeurs sont déjà affichées ; pour un autre assistant (MCP), elles sont à reprendre.
+        const RunOutcome r = MethodRunner::analyzeQuestion(QStringLiteral("calibre 2500 ± 30 BP"));
+        QVERIFY(r.found);
+        QVERIFY(r.promptBlock.startsWith(MethodRunner::shownResultHeader()));
+        QVERIFY(r.promptBlock.contains(QStringLiteral("ne les recopie pas")));
+        const QString ext = McpServer::adaptText(r.promptBlock);
+        QVERIFY(ext.startsWith(MethodRunner::externalResultHeader()));
+        QVERIFY(!ext.contains(QStringLiteral("DÉJÀ AFFICHÉES")));
+    }
+
+    // Threads « Automatique » : cœurs physiques performance (pas les threads SMT ni les cœurs E)
+    void cpuTopologyThreads()
+    {
+        using seldon::CpuTopology;
+        auto writeFile = [](const QString& path, const QByteArray& txt) {
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            QFile f(path); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(txt + "\n");
+        };
+        // cpus : (cpu, core_id) ; capacity : -1 = pas de fichier
+        auto makeSys = [&](const QString& root, const QByteArray& online, const QList<QPair<int,int>>& cpus,
+                           const QList<int>& capacity, const QByteArray& intelP) {
+            writeFile(root + "/devices/system/cpu/online", online);
+            for (int i = 0; i < cpus.size(); ++i) {
+                const QString d = root + QString("/devices/system/cpu/cpu%1/").arg(cpus[i].first);
+                writeFile(d + "topology/physical_package_id", "0");
+                writeFile(d + "topology/core_id", QByteArray::number(cpus[i].second));
+                if (i < capacity.size() && capacity[i] >= 0) writeFile(d + "cpu_capacity", QByteArray::number(capacity[i]));
+            }
+            if (!intelP.isEmpty()) writeFile(root + "/devices/cpu_core/cpus", intelP);
+        };
+        QTemporaryDir tmp; QVERIFY(tmp.isValid());
+
+        // 1. Intel 6 cœurs / 12 threads (i9-8950HK) : frères SMT cpu n et n+6
+        {
+            const QString r = tmp.filePath("smt");
+            QList<QPair<int,int>> c; for (int i = 0; i < 12; ++i) c.append({ i, i % 6 });
+            makeSys(r, "0-11", c, {}, {});
+            CpuTopology t; QVERIFY(seldon::readLinuxCpuTopology(r.toStdString(), t));
+            QCOMPARE(t.logical, 12); QCOMPARE(t.physical, 6); QCOMPARE(t.performance, 6);
+            const auto a = seldon::autoThreads(t);
+            QCOMPARE(a.generation, 6); QCOMPARE(a.batch, 6);
+        }
+        // 2. Intel hybride : 2 cœurs P avec SMT (cpu 0-3) + 4 cœurs E (cpu 4-7)
+        {
+            const QString r = tmp.filePath("hybrid");
+            makeSys(r, "0-7", { {0,0},{1,0},{2,4},{3,4},{4,8},{5,9},{6,10},{7,11} }, {}, "0-3");
+            CpuTopology t; QVERIFY(seldon::readLinuxCpuTopology(r.toStdString(), t));
+            QCOMPARE(t.logical, 8); QCOMPARE(t.physical, 6); QCOMPARE(t.performance, 2);
+            const auto a = seldon::autoThreads(t);
+            QCOMPARE(a.generation, 2); QCOMPARE(a.batch, 6);
+        }
+        // 3. ARM big.LITTLE : 4 petits (capacité 446) + 4 gros (1024), liste « 0-3,4-7 »
+        {
+            const QString r = tmp.filePath("arm");
+            QList<QPair<int,int>> c; for (int i = 0; i < 8; ++i) c.append({ i, i });
+            makeSys(r, "0-3,4-7", c, { 446, 446, 446, 446, 1024, 1024, 1024, 1024 }, {});
+            CpuTopology t; QVERIFY(seldon::readLinuxCpuTopology(r.toStdString(), t));
+            QCOMPARE(t.physical, 8); QCOMPARE(t.performance, 4);
+        }
+        // 4. CPU hors ligne ignorés ; /sys absent → échec (repli)
+        {
+            const QString r = tmp.filePath("offline");
+            makeSys(r, "0,2", { {0,0},{1,1},{2,2} }, {}, {});
+            CpuTopology t; QVERIFY(seldon::readLinuxCpuTopology(r.toStdString(), t));
+            QCOMPARE(t.logical, 2); QCOMPARE(t.physical, 2);
+            QVERIFY(!seldon::readLinuxCpuTopology(tmp.filePath("absent").toStdString(), t));
+        }
+        // Machine réelle : bornes cohérentes
+        const CpuTopology& m = seldon::cpuTopology();
+        QVERIFY(m.performance >= 1 && m.performance <= m.physical && m.physical <= m.logical);
     }
 
 };

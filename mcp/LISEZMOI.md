@@ -12,12 +12,15 @@ parle en JSON-RPC, un message par ligne, sur l'entrée et la sortie standard.
 
 ## Outils
 
-Les 13 outils de SeldonH : `calibrer_radiocarbone`, `calibrer_f14c`, `dater_luminescence`, `densite_gauss`,
+Les 14 outils de SeldonH : `calibrer_radiocarbone`, `calibrer_f14c`, `dater_luminescence`, `densite_gauss`,
 `densite_uniforme`, `dater_archeomagnetisme`, `calculer_evenement` (MCMC, avec notifications de progression),
-`combiner_dates`, `comparer_dates` (laquelle de deux dates est la plus ancienne), `analyser_traces`,
+`combiner_dates`, `comparer_dates` (laquelle de deux dates est la plus ancienne), `analyser_traces`, `tableau`
+(tableau de datations : sélection, extraction, datation, événement, modèle),
 `calibration_inverse`, `creer_densite`, `courbes_disponibles`. `seldonh-mcp --list` les affiche.
 
 Différences avec l'application :
+- `tableau` + `file` : chemin d'un tableau CSV, TSV ou texte (lu et gardé). Les .xlsx et .ods sont lus par l'application,
+  pas par ce serveur (QtCore seul) : enregistrez-les d'abord en CSV. Les lignes extraites et le modèle préparé sont rendus dans le texte.
 - `analyser_traces` : argument supplémentaire `file`, chemin du fichier de traces exporté par ChronoModel
   (`Chain_all_Events.csv`…), lu sur le disque ; il reste chargé pour les appels suivants.
 - `creer_densite` : argument supplémentaire `dossier` ; le fichier CSV y est écrit (par exemple le dossier

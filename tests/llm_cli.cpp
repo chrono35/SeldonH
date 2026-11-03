@@ -30,17 +30,18 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //
 //   llm_cli modele.gguf                 conversation interactive (/reset, /quit)
 //   llm_cli modele.gguf --selftest      vérifications automatiques (gabarit, cache KV, arrêt, troncature)
-//   options : --ctx N  --max N  --think  --cpu
+//   options : --ctx N  --max N  --think  --cpu  --threads N (0 = automatique)  --cpuinfo
 //
 // Compilation (après scripts/build_llama.sh) :
-//   macOS : c++ -std=c++17 -O2 -I third_party/llama-install/include tests/llm_cli.cpp src/llm/LlmCore.cpp
+//   macOS : c++ -std=c++17 -O2 -I third_party/llama-install/include tests/llm_cli.cpp src/llm/LlmCore.cpp src/llm/CpuTopology.cpp
 //             -L third_party/llama-install/lib -lllama -lggml -lggml-metal -lggml-blas -lggml-cpu -lggml-base
 //             -framework Accelerate -framework Metal -framework MetalKit -framework Foundation -o llm_cli
-//   Linux : c++ -std=c++17 -O2 -I third_party/llama-install/include tests/llm_cli.cpp src/llm/LlmCore.cpp
+//   Linux : c++ -std=c++17 -O2 -I third_party/llama-install/include tests/llm_cli.cpp src/llm/LlmCore.cpp src/llm/CpuTopology.cpp
 //             -L third_party/llama-install/lib -lllama -lggml -lggml-cpu -lggml-base -lgomp -ldl -lpthread -o llm_cli
 //   (une seule ligne de commande : les retours à la ligne ci-dessus sont là pour la lisibilité)
 #include "../src/core/ChatText.h"
 #include "../src/llm/LlmCore.h"
+#include "../src/llm/CpuTopology.h"
 
 #include <cstdio>
 #include <cstring>
@@ -155,24 +156,34 @@ static int selftest(const std::string& model, int ctx)
 
 int main(int argc, char** argv)
 {
-    if (argc < 2) { std::fprintf(stderr, "usage: %s modele.gguf [--selftest] [--ctx N] [--max N] [--think] [--cpu]\n", argv[0]); return 2; }
+    if (argc < 2) { std::fprintf(stderr, "usage: %s modele.gguf [--selftest] [--ctx N] [--max N] [--think] [--cpu] [--threads N] [--cpuinfo]\n", argv[0]); return 2; }
     std::string model = argv[1];
-    int ctx = 4096, maxTok = 512;
-    bool self = false, think = false, cpu = false;
+    int ctx = 4096, maxTok = 512, threads = 0;
+    bool self = false, think = false, cpu = false, cpuinfo = !std::strcmp(argv[1], "--cpuinfo");
     for (int i = 2; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--selftest")) self = true;
         else if (!std::strcmp(argv[i], "--think")) think = true;
         else if (!std::strcmp(argv[i], "--cpu")) cpu = true;
         else if (!std::strcmp(argv[i], "--ctx") && i + 1 < argc) ctx = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--max") && i + 1 < argc) maxTok = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--threads") && i + 1 < argc) threads = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--cpuinfo")) cpuinfo = true;
+    }
+    {
+        const CpuTopology& t = cpuTopology();
+        const AutoThreads a = autoThreads(t);
+        std::printf("Processeur : %d cœurs physiques (%d performance), %d threads logiques [%s] ; automatique : %d threads (prompt %d)\n",
+                    t.physical, t.performance, t.logical, t.source.c_str(), a.generation, a.batch);
+        if (cpuinfo) return 0;
     }
     if (self) return selftest(model, ctx);
 
     LlmCore core;
     std::string err;
-    LlmParams lp; lp.modelPath = model; lp.nCtx = ctx; lp.nGpuLayers = cpu ? 0 : 999;
+    LlmParams lp; lp.modelPath = model; lp.nCtx = ctx; lp.nGpuLayers = cpu ? 0 : 999; lp.nThreads = threads;
     if (!core.load(lp, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 1; }
-    std::printf("Modèle : %s (contexte %d). /reset pour recommencer, /quit pour sortir.\n", core.description().c_str(), core.contextSize());
+    std::printf("Modèle : %s (contexte %d, %d threads, prompt %d). /reset pour recommencer, /quit pour sortir.\n",
+                core.description().c_str(), core.contextSize(), core.threads(), core.threadsBatch());
 
     std::vector<ChatMessage> chat = { { "system", "Tu es un assistant d'aide à la datation en archéologie. Réponds en français." } };
     SamplingParams sp; sp.maxTokens = maxTok; sp.enableThinking = think;

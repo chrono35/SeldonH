@@ -55,6 +55,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QSpinBox>
 #include <QThread>
 
+#include "../llm/CpuTopology.h"
+
 #include <algorithm>
 
 namespace seldon {
@@ -115,7 +117,17 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
 
     threads_ = new QSpinBox;
     threads_->setRange(0, QThread::idealThreadCount());
-    threads_->setSpecialValueText(tr("Automatique"));
+    {
+        const seldon::CpuTopology& cpu = seldon::cpuTopology();
+        const seldon::AutoThreads at = seldon::autoThreads(cpu);
+        threads_->setSpecialValueText(tr("Automatique (%1)").arg(at.generation));
+        QString tip = tr("Automatique : un thread par cœur physique « performance » pour la génération (%1), "
+                         "tous les cœurs physiques pour la lecture de la question (%2).\n"
+                         "Ce processeur : %3 cœurs physiques, dont %4 « performance », %5 threads logiques.\n"
+                         "Au-delà du nombre de cœurs physiques, la génération ralentit.")
+                          .arg(at.generation).arg(at.batch).arg(cpu.physical).arg(cpu.performance).arg(cpu.logical);
+        threads_->setToolTip(tip);
+    }
     threads_->setValue(s.nThreads);
     form->addRow(tr("Threads CPU"), threads_);
 
@@ -272,6 +284,25 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
                              "Sans effet avec un modèle distant (choisissez alors un modèle de raisonnement chez le fournisseur)."));
     thinking_->setChecked(s.thinking);
     form->addRow(QString(), thinking_);
+
+    showThinking_ = new QCheckBox(tr("Afficher le raisonnement du modèle"));
+    showThinking_->setToolTip(tr("Montre la réflexion du modèle pendant qu'il l'écrit, puis la replie sous la réponse "
+                                 "(« ▸ Raisonnement »). Modèle local : cochez aussi « Mode réflexion ». Modèle distant : "
+                                 "seulement si le fournisseur transmet le raisonnement (modèles de raisonnement)."));
+    showThinking_->setChecked(s.showThinking);
+    form->addRow(QString(), showThinking_);
+
+    calcComment_ = new QComboBox;
+    calcComment_->addItem(tr("Si la question le demande"), 1);
+    calcComment_->addItem(tr("Jamais (résultat de SeldonH seul)"), 0);
+    calcComment_->addItem(tr("Toujours"), 2);
+    calcComment_->setCurrentIndex(std::max(0, calcComment_->findData(s.calcComment)));
+    calcComment_->setToolTip(tr("Après un calcul fait par SeldonH (calibration, Event, combinaison…), la fiche donne déjà les valeurs "
+                                "exactes et le graphique. « Si la question le demande » : le modèle ne répond que si la question "
+                                "demande une explication, une interprétation ou un avis (« explique », « que penser de », « est-ce "
+                                "cohérent »…). Un lien « Demander un commentaire » reste proposé sous la fiche."));
+    expanding(calcComment_);
+    form->addRow(tr("Commentaire après un calcul"), calcComment_);
 
     skillChars_ = new QSpinBox;
     skillChars_->setRange(1000, 20000);
@@ -504,6 +535,8 @@ AppSettings SettingsDialog::settings() const
     a.temperature = temp_->value();
     a.maxTokens   = maxTokens_->value();
     a.thinking    = thinking_->isChecked();
+    a.showThinking = showThinking_->isChecked();
+    a.calcComment = calcComment_->currentData().toInt();
     a.skillChars  = skillChars_->value();
     a.skillsDir   = skillsDir_->text().trimmed();
     a.dateFormat  = dateFormat_->currentData().toString();

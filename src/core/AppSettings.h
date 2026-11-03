@@ -55,6 +55,10 @@ struct AppSettings {
     double  temperature = 0.7;
     int     maxTokens   = 2048;      // longueur max. d'une réponse (tokens), réflexion non comprise
     bool    thinking    = false;     // mode réflexion (plus lent, meilleur sur les raisonnements)
+    bool    showThinking = false;    // affiche le raisonnement du modèle (réflexion locale, modèle distant de raisonnement)
+    // Commentaire du modèle après un calcul de SeldonH : 0 jamais (calculatrice), 1 si la question demande une explication,
+    // 2 toujours. Sans commentaire, la fiche de SeldonH suffit ; un lien « Demander un commentaire » reste proposé.
+    int     calcComment = 1;
     int     skillChars  = 6000;      // budget de texte des compétences injectées par question (≈ 1 700 tokens)
     QString skillsDir;               // dossier des compétences utilisateur
     QString curvesDir;               // dossier des courbes de référence de l'utilisateur (sous-dossiers 14C, F14C, AM)
@@ -158,6 +162,8 @@ struct AppSettings {
         a.temperature = s.value("gen/temperature", a.temperature).toDouble();
         a.maxTokens   = s.value("gen/maxTokens", a.maxTokens).toInt();
         a.thinking    = s.value("gen/thinking", a.thinking).toBool();
+        a.showThinking = s.value("display/showThinking", a.showThinking).toBool();
+        a.calcComment = std::clamp(s.value("gen/calcComment", a.calcComment).toInt(), 0, 2);
         a.skillChars  = s.value("skills/chars", a.skillChars).toInt();
         a.skillsDir   = s.value("skills/dir", defaultSkillsDir()).toString();
         a.curvesDir   = s.value("curves/dir", defaultCurvesDir()).toString();
@@ -189,6 +195,8 @@ struct AppSettings {
         s.setValue("gen/temperature", temperature);
         s.setValue("gen/maxTokens", maxTokens);
         s.setValue("gen/thinking", thinking);
+        s.setValue("display/showThinking", showThinking);
+        s.setValue("gen/calcComment", calcComment);
         s.setValue("skills/chars", skillChars);
         s.setValue("skills/dir", skillsDir);
         s.setValue("curves/dir", curvesDir);

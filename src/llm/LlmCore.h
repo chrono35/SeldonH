@@ -119,6 +119,7 @@ struct ModelInfo {
     uint64_t    modelBytes = 0;         // taille des poids
     uint64_t    nParams    = 0;
     bool        onGpu      = false;     // couches confiées à un GPU (Metal, Vulkan…)
+    bool        supportsThinking = false;   // gabarit de conversation avec « enable_thinking » (Qwen3, Qwen3.5…)
     std::string device;                 // nom du périphérique
     uint64_t    memTotal   = 0;         // mémoire de ce périphérique (GPU ; sinon RAM) ; 0 = inconnue
 };
@@ -152,6 +153,8 @@ public:
     std::string description() const;     // ex. "qwen35 4B Q4_K_M"
     ModelInfo   info() const;            // vide si aucun modèle
     int  contextSize() const { return nCtx_; }
+    int  threads() const { return nThreads_; }             // threads de génération (après « Automatique »)
+    int  threadsBatch() const { return nThreadsBatch_; }   // threads d'évaluation du prompt
     int  trainContextSize() const;
     int  countTokens(const std::string& text) const;
     void resetCache();                   // oublie le cache KV (nouvelle conversation)
@@ -186,6 +189,8 @@ private:
     llama_context*       ctx_   = nullptr;
     const llama_vocab*   vocab_ = nullptr;
     int                  nCtx_  = 0;
+    int                  nThreads_ = 0;
+    int                  nThreadsBatch_ = 0;
     int                  nBatch_ = 512;
     int                  nGpuLayers_ = 0;
     std::string          chatTemplate_;       // modèle Jinja embarqué dans le GGUF

@@ -129,6 +129,7 @@ QJsonObject ConversationStore::toJson(const Conversation& c)
         QJsonObject o{ { "question", t.question }, { "modelUser", t.modelUser }, { "answer", t.answer },
                        { "followUp", t.followUp }, { "synthetic", t.synthetic } };
         if (!t.toolBlocks.isEmpty()) o["toolBlocks"] = t.toolBlocks;
+        if (t.calcOnly)              o["calcOnly"] = true;
         if (!t.skillIds.isEmpty())   o["skills"] = QJsonArray::fromStringList(t.skillIds);
         if (!t.prompt.isEmpty())     o["prompt"] = t.prompt;
         turns.append(o);
@@ -172,6 +173,7 @@ bool ConversationStore::fromJson(const QJsonObject& o, Conversation& out, QStrin
         s.toolBlocks = t.value("toolBlocks").toString();
         s.followUp = t.value("followUp").toBool();
         s.synthetic = t.value("synthetic").toBool();
+        s.calcOnly = t.value("calcOnly").toBool();
         for (const QJsonValue& id : t.value("skills").toArray()) s.skillIds << id.toString();
         s.prompt = t.value("prompt").toObject();
         c.turns.append(s);

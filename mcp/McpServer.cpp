@@ -39,6 +39,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
 
+#include "DataTable.h"
 #include "DensityFile.h"
 #include "MethodRunner.h"
 #include "Tools.h"
@@ -62,6 +63,7 @@ QString toolTitle(const QString& name)
         { "combiner_dates", "Combiner des datations d'une même date" },
         { "comparer_dates", "Ordre de deux datations (laquelle est la plus ancienne)" },
         { "analyser_traces", "Calculs sur des traces MCMC de ChronoModel" },
+        { "tableau", "Tableau de datations : sélection, extraction, datation, événement, modèle" },
         { "calibration_inverse", "Calibration inverse (mesure attendue pour une date)" },
         { "creer_densite", "Fichier de densité pour le plugin Density de ChronoModel" },
         { "courbes_disponibles", "Courbes de référence disponibles" } };
@@ -100,6 +102,15 @@ QJsonArray McpServer::toolList()
                                                                          "premier appel ; le fichier reste chargé pour les appels suivants.") } };
             desc += QStringLiteral(" Avec ce serveur, indique le chemin du fichier de traces dans « file ».");
         }
+        if (d.name == QLatin1String("tableau")) {
+            props["file"] = QJsonObject{ { "type", "string" },
+                                         { "description", QStringLiteral("Chemin complet du tableau de datations (CSV, TSV ou texte ; un "
+                                                                         ".xlsx ou .ods est à enregistrer d'abord en CSV). Obligatoire au "
+                                                                         "premier appel ; le tableau reste chargé pour les appels suivants.") } };
+            desc += QStringLiteral(" Avec ce serveur, indique le chemin du tableau dans « file » ; appelle d'abord l'outil avec "
+                                   "action « extract » pour voir ses colonnes et ses lignes.");
+            readOnly = true;
+        }
         if (d.name == QLatin1String("creer_densite")) {
             const QString hint = densityFolderHint();
             props["dossier"] = QJsonObject{ { "type", "string" },
@@ -122,6 +133,10 @@ QJsonArray McpServer::toolList()
 QString McpServer::adaptText(const QString& promptBlock)
 {
     QString t = promptBlock;
+    // Ici, l'assistant ne voit aucune fiche de SeldonH : il doit reprendre les valeurs lui-même.
+    t.replace(MethodRunner::shownResultHeader(), MethodRunner::externalResultHeader());
+    t.replace(QStringLiteral("DÉJÀ AFFICHÉES en tableau par SeldonH (avec un lien d'export CSV)"), QStringLiteral("données en CSV ci-dessous"));
+    t.replace(QStringLiteral("DÉJÀ PROPOSÉ à l'enregistrement"), QStringLiteral("spécification ci-dessous"));
     // L'application de SeldonH trace les courbes elle-même ; ici, aucun panneau de graphiques.
     static const QRegularExpression drawn(QStringLiteral("Le graphique est DÉJÀ tracé par l'application.*?en rouge…\\)\\. "),
                                           QRegularExpression::DotMatchesEverythingOption);
@@ -159,6 +174,27 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& argument
             return failure(QStringLiteral("Aucune trace chargée : donne dans « file » le chemin du fichier exporté par ChronoModel "
                                           "(Résultats > Export, Chain_all_Events.csv ou Chain_all_Phases.csv)."));
     }
+    // Tableau de datations : lu sur cet ordinateur et gardé pour les appels suivants (QtCore seul : CSV, TSV, texte).
+    QString tableDigest;
+    if (name == QLatin1String("tableau")) {
+        const QString file = args.take("file").toString().trimmed();
+        if (!file.isEmpty()) {
+            const QString ext = QFileInfo(file).suffix().toLower();
+            if (ext == QLatin1String("xlsx") || ext == QLatin1String("ods") || ext == QLatin1String("xls"))
+                return failure(QStringLiteral("Ce serveur lit les tableaux CSV, TSV ou texte : enregistre « %1 » en CSV (Fichier > "
+                                              "Enregistrer sous), ou joins-le dans l'application SeldonH qui lit les .xlsx et .ods.").arg(file));
+            QFile f(QDir::fromNativeSeparators(file));
+            if (!f.open(QIODevice::ReadOnly))
+                return failure(QStringLiteral("Impossible de lire le tableau « %1 » : %2.").arg(file, f.errorString()));
+            QString err;
+            const datatable::Table t = datatable::parseText(QString::fromUtf8(f.readAll()), QFileInfo(file).fileName(), &err);
+            if (!t.isValid()) return failure(QStringLiteral("« %1 » n'est pas un tableau de datations lisible : %2.").arg(file, err));
+            datatable::setCurrent(t);
+            tableDigest = datatable::digest(t, 6000);
+        }
+        if (!datatable::hasCurrent())
+            return failure(QStringLiteral("Aucun tableau chargé : donne dans « file » le chemin du tableau de datations (CSV, TSV)."));
+    }
     QString folder;
     if (name == QLatin1String("creer_densite")) folder = args.take("dossier").toString().trimmed();
 
@@ -185,6 +221,17 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& argument
     MethodRunner::setProgressHandler({});
 
     QString text = r.executed ? adaptText(r.content) : r.content;
+    if (!tableDigest.isEmpty()) text.prepend(tableDigest + QLatin1Char('\n'));
+    if (r.executed && name == QLatin1String("tableau")) {          // ici, rien n'est affiché : les lignes vont dans la réponse
+        const QString action = args.value("action").toString();
+        if (action.isEmpty() || action == QLatin1String("extract")) {
+            const datatable::Selection sel = datatable::select(datatable::current(), args);
+            if (sel.error.isEmpty()) text += QStringLiteral("\nLignes sélectionnées (CSV, « ; ») :\n") + datatable::toCsv(datatable::current(), sel.rows);
+        }
+        if (!r.run.chrSpec.isEmpty())
+            text += QStringLiteral("\nSpécification du modèle (bloc chronomodel de SeldonH, à enregistrer dans l'application) :\n")
+                    + QString::fromUtf8(QJsonDocument(r.run.chrSpec).toJson(QJsonDocument::Compact));
+    }
     if (cancelled_.load()) text.prepend(QStringLiteral("Calcul interrompu à la demande.\n"));
     if (r.executed && !folder.isEmpty()) {
         const DensityFileResult F = buildDensityFile(r.request);

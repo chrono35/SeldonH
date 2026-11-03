@@ -114,6 +114,8 @@ private:
     QDoubleSpinBox* temp_;
     QSpinBox*       maxTokens_;
     QCheckBox*      thinking_;
+    QCheckBox*      showThinking_;
+    QComboBox*      calcComment_;
     QCheckBox*      keepHistory_;
     QSpinBox*       skillChars_;
     QLineEdit*      skillsDir_;

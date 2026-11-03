@@ -51,6 +51,7 @@ struct StoredTurn {
     QStringList skillIds;
     bool        followUp = false;   // pas de calcul à relancer pour ce tour
     bool        synthetic = false;  // tour créé par l'application (résultat d'un calcul), pas par une question de l'utilisateur
+    bool        calcOnly = false;   // résultat de SeldonH affiché seul, sans réponse du modèle (mode calculatrice)
     // Prompt envoyé au modèle pour ce tour (moteur, paramètres, messages ; les messages des tours sont des renvois
     // {"role","turn"} pour ne pas recopier la conversation) : export pour la reproductibilité. Vide si inconnu.
     QJsonObject prompt;

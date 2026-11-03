@@ -6,6 +6,7 @@ INCLUDEPATH += $$METHODS_DIR
 
 SOURCES += \
     $$METHODS_DIR/common/Combination.cpp \
+    $$METHODS_DIR/common/DataTable.cpp \
     $$METHODS_DIR/common/Density.cpp \
     $$METHODS_DIR/common/DensityFile.cpp \
     $$METHODS_DIR/common/EventMcmc.cpp \
@@ -26,6 +27,7 @@ SOURCES += \
 
 HEADERS += \
     $$METHODS_DIR/common/Combination.h \
+    $$METHODS_DIR/common/DataTable.h \
     $$METHODS_DIR/common/Density.h \
     $$METHODS_DIR/common/DensityFile.h \
     $$METHODS_DIR/common/EventMcmc.h \

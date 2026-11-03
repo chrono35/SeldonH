@@ -48,6 +48,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "Combination.h"
 #include "CurveStore.h"
+#include "DataTable.h"
 #include "DensityFile.h"
 #include "../c14/C14Method.h"
 #include "EventMcmc.h"
@@ -1529,6 +1530,29 @@ bool MethodRunner::asksTraces(const QString& question)
     return re.match(text::fold(question)).hasMatch();
 }
 
+bool MethodRunner::asksCommentary(const QString& question)
+{
+    static const QRegularExpression re(QStringLiteral(
+        R"(\b(expliqu\w*|explication\w*|interpret\w*|comment(?:e|es|ez|er|aire|aires)|pourquoi|que (?:faut.il |dois.je |peut.on )?penser|qu.en penser|)"
+        R"(que signifi\w*|signification|veut dire|coheren\w*|incoheren\w*|compatib\w*|conseil\w*|recommand\w*|discut\w*|analys\w*|)"
+        R"((?:ton|votre) avis|plausib\w*|fiab\w*|est.ce (?:normal|correct|coherent|possible|plausible)|compar\w*|)"
+        R"(explain\w*|why|comment on|what does|meaning|consistent|advice|advise|recommend\w*|discuss\w*|analy[sz]\w*|opinion|)"
+        R"(reliab\w*|should)\b)"));
+    return re.match(text::fold(question)).hasMatch();
+}
+
+QString MethodRunner::shownResultHeader()
+{
+    return QStringLiteral("[Résultat de calcul de SeldonH — valeurs exactes, DÉJÀ AFFICHÉES à l'utilisateur dans une fiche avec le "
+                          "graphique : ne les recalcule pas, ne les contredis pas et ne les recopie pas (ni liste, ni tableau, ni "
+                          "résumé des intervalles) ; cite seulement la valeur dont ton commentaire a besoin, à l'identique]\n");
+}
+
+QString MethodRunner::externalResultHeader()
+{
+    return QStringLiteral("[Résultat de calcul de SeldonH — valeurs exactes, à reprendre telles quelles sans les recalculer ni les contredire]\n");
+}
+
 bool MethodRunner::asksOverlay(const QString& question)
 {
     static const QRegularExpression re(QStringLiteral(
@@ -1609,7 +1633,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
 
     const MethodRegistry& reg = MethodRegistry::instance();
     QString html = QStringLiteral("<b>🧮 Calcul fait par SeldonH</b> <i>(méthodes de ChronoModel)</i>");
-    QString prompt = QStringLiteral("[Résultat de calcul de SeldonH — valeurs exactes, à reprendre telles quelles sans les recalculer ni les contredire]\n");
+    QString prompt = shownResultHeader();
     QJsonArray series;
     QStringList plotNames;           // noms des datations / événements tracés : titre du graphique
     QVector<double> levelsUsed;
@@ -1630,7 +1654,119 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     // Un modèle de langage met parfois un calcul « traces » ou « inverse » dans un événement ou une combinaison
     // ({"method":"event","dates":[{"method":"traces",…}]}) : ce ne sont pas des datations, ils sont exécutés seuls.
     QVector<QJsonObject> todo;
+    // Demandes sur le tableau courant ({"method":"table",…}) : sélection, puis extraction, datations, événement,
+    // combinaison ou modèle. Les valeurs viennent du tableau lu par SeldonH.
+    QString tableHtml, tablePrompt;
+    int tableDates = 0;
+    auto expandTable = [&](const QJsonObject& r) {
+        if (!datatable::hasCurrent()) {
+            tableHtml += QStringLiteral("<p><i>Aucun tableau n'est chargé : joignez un fichier (.xlsx, .ods, .csv) ou collez le tableau dans la question.</i></p>");
+            tablePrompt += QStringLiteral("Calcul impossible : aucun tableau n'est chargé. Demande à l'utilisateur de joindre le fichier "
+                                          "(.xlsx, .ods, .csv) ou de coller le tableau ; n'écris pas les valeurs toi-même.\n");
+            return;
+        }
+        const datatable::Table& T = datatable::current();
+        const datatable::Selection S = datatable::select(T, r);
+        if (!S.error.isEmpty()) {
+            tableHtml += QStringLiteral("<p><i>Sélection impossible dans le tableau « %1 » : %2.</i></p>").arg(T.title().toHtmlEscaped(), S.error.toHtmlEscaped());
+            tablePrompt += QStringLiteral("Sélection impossible dans le tableau « %1 » : %2. Corrige la sélection (noms de colonnes et "
+                                          "valeurs du résumé du tableau).\n").arg(T.title(), S.error);
+            return;
+        }
+        QString action = text::fold(r.value("action").toString()).trimmed();
+        static const QHash<QString, QString> actions = {
+            { "", "extract" }, { "extract", "extract" }, { "extraire", "extract" }, { "liste", "extract" }, { "list", "extract" },
+            { "date", "date" }, { "dater", "date" }, { "calibrate", "date" }, { "calibrer", "date" }, { "event", "event" },
+            { "evenement", "event" }, { "combine", "combine" }, { "combiner", "combine" }, { "model", "model" }, { "modele", "model" } };
+        if (!actions.contains(action)) {
+            tablePrompt += QStringLiteral("Action « %1 » inconnue : extract, date, event, combine ou model.\n").arg(action);
+            tableHtml += QStringLiteral("<p><i>Action « %1 » inconnue pour le tableau.</i></p>").arg(action.toHtmlEscaped());
+            return;
+        }
+        action = actions.value(action);
+        QStringList skipped;
+        const QVector<QJsonObject> dates = datatable::requestsOf(T, S.rows, &skipped);
+        static const QHash<QString, QString> verb = { { "extract", "extraction" }, { "date", "datation ligne par ligne" },
+                                                      { "event", "événement" }, { "combine", "combinaison" }, { "model", "modèle ChronoModel" } };
+        tableHtml += QStringLiteral("<p><b>📋 Tableau « %1 »</b> — %2 : %3 → <b>%4 ligne(s)</b>%5.</p>")
+                         .arg(T.title().toHtmlEscaped(), verb.value(action), S.criteria.toHtmlEscaped()).arg(S.rows.size())
+                         .arg(action == QLatin1String("extract") ? QString() : QStringLiteral(", %1 datable(s)").arg(dates.size()));
+        tablePrompt += QStringLiteral("Tableau « %1 », %2 : sélection « %3 » → %4 ligne(s), %5 datable(s).\n")
+                           .arg(T.title(), verb.value(action), S.criteria).arg(S.rows.size()).arg(dates.size());
+        if (!skipped.isEmpty() && action != QLatin1String("extract")) {
+            tableHtml += QStringLiteral("<p><i>Lignes non datables écartées : %1.</i></p>").arg(skipped.join(QStringLiteral(" ; ")).toHtmlEscaped());
+            tablePrompt += QStringLiteral("Lignes non datables écartées : %1.\n").arg(skipped.join(QStringLiteral(" ; ")));
+        }
+        if (action == QLatin1String("extract")) {
+            tableHtml += datatable::rowsHtml(T, S.rows);
+            const QString csv = datatable::toCsv(T, S.rows);
+            if (csv.size() < 400000) {
+                const QByteArray b64 = csv.toUtf8().toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+                tableHtml += QStringLiteral("<p><a href=\"seldon://tablecsv?data=%1\">💾 Enregistrer ces lignes en CSV…</a></p>").arg(QString::fromLatin1(b64));
+            }
+            QStringList names;
+            for (int i : S.rows) {
+                const QJsonObject& q = T.requests[i];
+                names << QStringLiteral("#%1%2").arg(i + 1).arg(q.contains("name") ? QStringLiteral(" ") + q.value("name").toString() : QString());
+            }
+            QString list = names.join(QStringLiteral(", "));
+            if (list.size() > 1500) list = list.left(1500) + QStringLiteral(" …");
+            tablePrompt += QStringLiteral("Lignes extraites, DÉJÀ AFFICHÉES en tableau par SeldonH (avec un lien d'export CSV) : %1. Ne recopie "
+                                          "pas le tableau.\n").arg(list);
+            return;
+        }
+        if (dates.isEmpty()) {
+            tableHtml += QStringLiteral("<p><i>Aucune ligne datable dans cette sélection.</i></p>");
+            tablePrompt += QStringLiteral("Calcul impossible : aucune ligne datable dans cette sélection.\n");
+            return;
+        }
+        if (action == QLatin1String("model")) {
+            QString err;
+            const QJsonObject spec = datatable::modelSpec(T, S.rows, r.value("group_by").toString(), r.value("name").toString(), &err);
+            if (spec.isEmpty()) {
+                tableHtml += QStringLiteral("<p><i>Modèle impossible : %1.</i></p>").arg(err.toHtmlEscaped());
+                tablePrompt += QStringLiteral("Modèle impossible : %1.\n").arg(err);
+                return;
+            }
+            out.chrSpec = spec;
+            QStringList evs;
+            for (const QJsonValue& e : spec.value("events").toArray())
+                evs << QStringLiteral("%1 (%2 datation(s))").arg(e.toObject().value("name").toString()).arg(e.toObject().value("dates").toArray().size());
+            const QByteArray b64 = QJsonDocument(spec).toJson(QJsonDocument::Compact).toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+            tableHtml += QStringLiteral("<p>🗺 Modèle ChronoModel préparé : %1 événement(s) — %2. Ni phase ni contrainte. "
+                                        "<a href=\"seldon://tablechr?spec=%3\">💾 Enregistrer le modèle (.chr)…</a></p>")
+                             .arg(evs.size()).arg(evs.join(QStringLiteral(", ")).toHtmlEscaped(), QString::fromLatin1(b64));
+            tablePrompt += QStringLiteral("Modèle ChronoModel préparé par SeldonH avec les valeurs du tableau, DÉJÀ PROPOSÉ à l'enregistrement : "
+                                          "%1 événement(s) : %2. Ni phase ni contrainte : si l'utilisateur en veut, dis-lui de les décrire "
+                                          "(événements nommés comme ci-dessus). Ne recopie pas les valeurs.\n")
+                               .arg(evs.size()).arg(evs.join(QStringLiteral(", ")));
+            return;
+        }
+        auto carry = [&](QJsonObject& o, std::initializer_list<const char*> keys) {
+            for (const char* k : keys) if (r.contains(k) && !o.contains(k)) o[k] = r.value(k);
+        };
+        if (action == QLatin1String("date")) {
+            int k = 0;
+            for (int i : S.rows) {
+                if (T.requests[i].isEmpty()) continue;
+                QJsonObject d = dates[k++];
+                d["_table_row"] = i + 1;
+                carry(d, { "level", "tmin", "tmax", "layout" });
+                todo << d;
+                ++tableDates;
+            }
+            return;
+        }
+        QJsonArray arr;
+        for (const QJsonObject& d : dates) arr.append(d);
+        QJsonObject e{ { "method", action }, { "dates", arr } };
+        e["name"] = r.value("name").toString().trimmed().isEmpty() ? S.criteria : r.value("name").toString().trimmed();
+        carry(e, { "level", "tmin", "tmax", "mcmc", "traces", "layout", "color" });
+        todo << e;
+    };
     for (const QJsonObject& r : requests) {
+        const QString rawMethod = text::fold(r.value("method").toString()).trimmed();
+        if (rawMethod == QLatin1String("table") || rawMethod == QLatin1String("tableau")) { expandTable(r); continue; }
         const QJsonObject n = normalizeRequest(r);
         const QString m = n.value("method").toString();
         if ((m == QLatin1String("event") || m == QLatin1String("combine")) && n.value("dates").isArray() && !n.value("dates").toArray().isEmpty()) {
@@ -1647,6 +1783,14 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         todo << r;
     }
     out.count = todo.size();
+    html += tableHtml;
+    prompt += tablePrompt;
+    const int recapHtmlPos = html.size(), recapPromptPos = prompt.size();
+    const bool tableCompact = tableDates > 12;       // beaucoup de lignes : récapitulatif seul, sans fiche par datation
+    struct RecapRow { int row; QString name, measure, hpd, median, note; };
+    QVector<RecapRow> recap;
+    QStringList recapCurves;
+    double recapLevel = kDefaultLevel;
     for (const QJsonObject& rq0 : std::as_const(todo)) {
         if (rq0.value("layout").toString() == QLatin1String("overlay")) overlay = true;
         if (!colorOf(rq0).isEmpty()) anyColor = true;
@@ -1760,6 +1904,12 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
             }
             continue;
         }
+        // Ligne d'un tableau : résumée dans le récapitulatif ; fiche détaillée seulement s'il y a peu de lignes.
+        const int tableRow = rq0.value("_table_row").toInt(-1);
+        struct Restore {
+            QString& h; QString& p; qsizetype hl, pl; bool on;
+            ~Restore() { if (on) { h.truncate(hl); p.truncate(pl); } }
+        } restore{ html, prompt, html.size(), prompt.size(), tableCompact && tableRow >= 0 };
         QString head = reg.describe(rq);
         // Nom de la datation (champ « name », notamment d'un fichier .chr) : en tête de la fiche et dans le titre du graphique.
         const QString dateName = rq.value("name").toString().trimmed();
@@ -1822,11 +1972,13 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
             html += QStringLiteral("<p><i>Courbe%1 de référence : %2</i></p>").arg(cl.size() > 1 ? "s" : "", cl.join(" ; ").toHtmlEscaped());
             prompt += QStringLiteral("Courbe%1 de référence : %2.\n").arg(cl.size() > 1 ? "s" : "", cl.join(" ; "));
             anyCurve = true;
+            if (tableRow >= 0) for (const QString& c : cl) if (!recapCurves.contains(c)) recapCurves << c;
         }
 
         if (!r.ok) {
             html += QStringLiteral("<p><i>Calcul impossible : %1.</i></p>").arg(r.error.toHtmlEscaped());
             prompt += QStringLiteral("Calcul impossible : %1.\n").arg(r.error);
+            if (tableRow >= 0) recap << RecapRow{ tableRow, dateName, reg.describe(rq), QString(), QString(), QStringLiteral("calcul impossible : ") + r.error };
             continue;
         }
 
@@ -1839,6 +1991,12 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         }
         levelsUsed << level;
         appendSummary(html, prompt, r.density, r.hpd95, r.hpd68, r.stats, level, fmt);
+        if (tableRow >= 0) {
+            recapLevel = level;
+            recap << RecapRow{ tableRow, dateName, reg.describe(rq) + (wg.type != Wiggle::None ? QStringLiteral(" + δ") : QString()),
+                               intervalsText(std::abs(level - 95.0) < 1e-9 ? r.hpd95 : hpdIntervals(r.density, level), fmt).replace('\n', QStringLiteral(" ; ")),
+                               dateformat::format(r.stats.median, fmt), r.warnings.join(QStringLiteral(" ; ")) };
+        }
         for (const QString& w : r.warnings) html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(w.toHtmlEscaped());
         for (const QString& w : r.warnings) prompt += QStringLiteral("Avertissement : %1.\n").arg(w);
 
@@ -1846,6 +2004,35 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         if (const QString col = colorOf(rq); !col.isEmpty()) ser["color"] = col;
         series.append(ser);
         if (!dateName.isEmpty() && !plotNames.contains(dateName)) plotNames << dateName;
+    }
+
+    // Récapitulatif des lignes d'un tableau datées une par une (au début de la fiche).
+    if (!recap.isEmpty()) {
+        const QString lv = text::numAuto(recapLevel, 2);
+        QString h = QStringLiteral("<p><b>Récapitulatif</b> (%1 datation(s)%2)</p><table border=\"1\" cellspacing=\"0\" cellpadding=\"3\">"
+                                   "<tr><th>#</th><th>Nom</th><th>Mesure</th><th>HPD %3 %</th><th>Médiane</th><th>Remarque</th></tr>")
+                        .arg(recap.size()).arg(tableCompact ? QStringLiteral(", sans fiche détaillée au-delà de 12 lignes") : QString(), lv);
+        QString p = QStringLiteral("Récapitulatif des datations du tableau (HPD %1 %, médiane) :\n").arg(lv);
+        for (const RecapRow& x : std::as_const(recap)) {
+            h += QStringLiteral("<tr><td>%1</td><td>%2</td><td>%3</td><td>%4</td><td>%5</td><td>%6</td></tr>")
+                     .arg(x.row).arg(x.name.toHtmlEscaped(), x.measure.toHtmlEscaped(), x.hpd.toHtmlEscaped(), x.median.toHtmlEscaped(), x.note.toHtmlEscaped());
+            p += QStringLiteral("#%1 %2 : %3%4%5\n").arg(x.row).arg(x.name, x.hpd.isEmpty() ? QString() : QStringLiteral("HPD ") + x.hpd,
+                                                                      x.median.isEmpty() ? QString() : QStringLiteral(" ; médiane ") + x.median,
+                                                                      x.note.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(x.note));
+        }
+        h += QStringLiteral("</table>");
+        if (tableCompact && !recapCurves.isEmpty()) {
+            h += QStringLiteral("<p><i>Courbe(s) de référence : %1</i></p>").arg(recapCurves.join(QStringLiteral(" ; ")).toHtmlEscaped());
+            p += QStringLiteral("Courbe(s) de référence : %1.\n").arg(recapCurves.join(QStringLiteral(" ; ")));
+        }
+        html.insert(recapHtmlPos, h);
+        prompt.insert(recapPromptPos, p);
+    }
+    // Beaucoup de densités : un graphique lisible garde les 40 premières.
+    if (series.size() > 40) {
+        const int n = int(series.size());
+        while (series.size() > 40) series.removeLast();
+        html += QStringLiteral("<p><i>Graphique limité aux 40 premières datations sur %1.</i></p>").arg(n);
     }
 
     // Remplissage du graphique : niveau demandé s'il est le même pour toutes les dates, sinon 95 %.
@@ -2258,6 +2445,14 @@ QJsonObject MethodRunner::inverseFromQuestion(const QString& question)
 
 QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question)
 {
+    // Tableau courant : « extrais les 14C du tableau », « date les TL », « un modèle avec le tableau »… (sélection simple).
+    if (QJsonObject t = datatable::requestFromQuestion(question); !t.isEmpty()) {
+        if (const double lv = requestedLevel(question); lv > 0) t["level"] = lv;
+        return { t };
+    }
+    // Tableau collé dans la question : jamais lu comme des datations isolées (les colonnes se mélangeraient). SeldonH le lit
+    // avec le lecteur de tableaux (datatable) avant d'arriver ici.
+    if (datatable::looksLikeTable(question)) return {};
     if (isModelRequest(question)) return {};
     // Traces MCMC jointes et colonnes citées (« durée entre N(500) et N(200) ») : calcul sur les tirages, avant toute
     // lecture de datations (« N(500) » ressemble à une loi normale, « Event » à un événement à calculer).

@@ -105,3 +105,4 @@ CMakeLists.txt.user*
 *.bak
 /tests
 /tests
+/Documents/_to_delete

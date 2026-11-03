@@ -119,7 +119,7 @@ inline QString title(DateFormat f)
 inline QString axisLabel(DateFormat f)
 {
     switch (f) {
-    case DateFormat::BcAd:   return QStringLiteral("Année calendaire (astronomique, 0 = 1 av. J.-C.)");
+    case DateFormat::BcAd:   return QStringLiteral("BC/AD");
     case DateFormat::Historic: return QStringLiteral("Année calendaire (négatif = avant J.-C.)");
     case DateFormat::BceCe:  return QStringLiteral("Année calendaire BCE/CE (négatif = BCE)");
     case DateFormat::CalBP:  return QStringLiteral("Âge cal. BP");
