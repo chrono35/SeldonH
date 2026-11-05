@@ -24,6 +24,8 @@ SOURCES += \
     src/core/Calculator.cpp \
     src/core/AutoTune.cpp \
     src/core/Spreadsheet.cpp \
+    src/core/DocxWriter.cpp \
+    src/core/Suggestions.cpp \
     src/core/ChronoResults.cpp \
     src/core/ConversationStore.cpp \
     src/llm/CpuTopology.cpp \
@@ -48,6 +50,8 @@ HEADERS += \
     src/core/AppSettings.h \
     src/core/AutoTune.h \
     src/core/Spreadsheet.h \
+    src/core/DocxWriter.h \
+    src/core/Suggestions.h \
     src/core/ChatText.h \
     src/core/ChrBuilder.h \
     src/core/Calculator.h \

@@ -3,7 +3,7 @@
     <DisplayName>SeldonH</DisplayName>
     <Description>Assistant d'aide à la datation : datations simples, création et interprétation de modèles ChronoModel ; serveur MCP seldonh-mcp (calculs de SeldonH dans Claude Desktop, Jan…)</Description>
     <Version>1.0.0</Version>
-    <ReleaseDate>2026-10-30</ReleaseDate>
+    <ReleaseDate>2026-11-03</ReleaseDate>
     <Default>true</Default>
     <ForcedInstallation>true</ForcedInstallation>
     <SortingPriority>100</SortingPriority>

@@ -76,10 +76,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "src/methods/common/CurveStore.h"
 #include "src/methods/common/DensityFile.h"
 #include "src/methods/common/MethodRunner.h"
+#include "src/methods/common/MethodRegistry.h"
+#include "src/methods/common/TextUtil.h"
 #include "src/methods/common/Tools.h"
+#include "src/methods/common/CurveTraces.h"
 #include "src/methods/common/Traces.h"
 #include "src/methods/common/DataTable.h"
 #include "src/core/Spreadsheet.h"
+#include "src/core/Suggestions.h"
 #include "src/llm/RemoteEngine.h"
 #include "src/llm/RemoteApi.h"
 #include "src/ui/ChatView.h"
@@ -210,6 +214,8 @@ void MainWindow::buildUi()
     connect(chat_, &QTextBrowser::anchorClicked, this, &MainWindow::onLink);
 
     input_ = new InputEdit;
+    input_->setPlaceholderText(tr("Posez une question (ex. « C14 de 3560 ± 20 BP »), collez un tableau de datations, ou joignez avec 📎 "
+                                  "des traces Chain_*.csv, des journaux Log_*.html, un projet .chr ou un tableau .xlsx / .ods / .csv"));
     connect(input_, &InputEdit::submitted, this, &MainWindow::sendMessage);
 
     sendBtn_ = new QPushButton(tr("Envoyer"));
@@ -236,7 +242,7 @@ void MainWindow::buildUi()
     attachBtn_->setText(tr("📎 Joindre"));
     attachBtn_->setToolButtonStyle(Qt::ToolButtonTextOnly);
     attachBtn_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);   // même largeur que « Envoyer »
-    attachBtn_->setToolTip(tr("Joindre un fichier (.chr, .csv, .txt…) ou une image"));
+    attachBtn_->setToolTip(tr("Joindre un ou plusieurs fichiers (.chr, .csv, .xlsx, .html…) ; un nouveau clic en ajoute d'autres"));
     connect(attachBtn_, &QToolButton::clicked, this, &MainWindow::attachFile);
 
     attachLabel_ = new QLabel;
@@ -396,8 +402,8 @@ void MainWindow::buildMenus()
     file->addAction(tr("Nouvelle conversation"), QKeySequence::New, this, &MainWindow::newConversation);
     file->addAction(tr("Ouvrir un modèle (.gguf)…"), QKeySequence::Open, this, &MainWindow::chooseModel);
     file->addAction(tr("Ouvrir le dossier des modèles"), this, &MainWindow::openModelsFolder);
-    file->addAction(tr("Joindre un fichier…"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O), this, &MainWindow::attachFile);
-    file->addAction(tr("Enregistrer la conversation (HTML)…"), QKeySequence::Save, this, &MainWindow::saveTranscript);
+    file->addAction(tr("Joindre des fichiers…"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O), this, &MainWindow::attachFile);
+    file->addAction(tr("Exporter la conversation (HTML ou Word)…"), QKeySequence::Save, this, &MainWindow::saveTranscript);
     file->addSeparator();
     file->addAction(tr("Quitter"), QKeySequence::Quit, qApp, &QApplication::quit);
 
@@ -453,23 +459,56 @@ void MainWindow::showWelcome()
         return QStringLiteral("<a href=\"seldon://insert?q=%1\">%2</a>")
             .arg(QString::fromLatin1(QUrl::toPercentEncoding(text)), text.toHtmlEscaped());
     };
-    chat_->addNotice(
-        tr("<b>Bienvenue dans SeldonH</b><br>"
-           "%1 pour :"
-           "<ul><li>réaliser des <b>datations simples</b> et vérifier leur cohérence ;</li>"
-           "<li><b>construire un modèle ChronoModel</b> (événements, phases, contraintes) et l'exporter en <code>.chr</code> ;</li>"
-           "<li><b>contrôler la convergence</b> d'un calcul ChronoModel (joignez avec 📎 le journal des résultats exporté en HTML, "
-           "<code>Log_Posterior_Distrib_Stats.html</code>, onglet Résultats &gt; Log).</li></ul>")
-              .arg(settings_.useRemote ? tr("Assistant utilisant un <b>modèle distant</b> (vos questions sont envoyées au serveur configuré ; "
-                                            "les calculs de datation restent locaux)")
-                                       : tr("Assistant local (aucune donnée ne quitte votre ordinateur)"))
-        + tr("Pour essayer, cliquez sur un exemple (il est recopié dans la zone de question) :<ul>"
-             "<li>%1</li><li>%2</li><li>%3</li></ul>")
-              .arg(ex(QStringLiteral("C14 de 3560 +- 20 BP")),
-                   ex(QStringLiteral("archéomagnétisme : inclinaison 65°, alpha95 = 1")),
-                   ex(QStringLiteral("date uniforme entre -500 et -400")))
-        + tr("<a href=\"seldon://help\">Mode d'emploi</a> (F1 ou <code>/aide</code>) — "
-             "les compétences de l'assistant sont des fiches Markdown que vous pouvez enrichir (menu Compétences)."));
+    // Les exemples sont vérifiés par le test welcomeExamples (tests/tst_core.cpp) : les garder identiques.
+    // Assemblage par concaténation : un QString::arg() appliqué APRÈS l'insertion des liens remplacerait les « %3A »,
+    // « %3F »… de leurs adresses comme des marqueurs %3 (texte des exemples abîmé).
+    const QString sep = QStringLiteral(" · ");
+    QString h = tr("<b>Bienvenue dans SeldonH</b><br>"
+                   "%1. Cliquez sur un exemple : il est recopié dans la zone de question, vous pouvez le modifier avant d'appuyer sur Entrée.")
+                    .arg(settings_.useRemote ? tr("Assistant utilisant un <b>modèle distant</b> (vos questions sont envoyées au serveur configuré ; "
+                                                  "les calculs de datation restent locaux)")
+                                             : tr("Assistant local (aucune donnée ne quitte votre ordinateur)"));
+    h += QStringLiteral("<ul><li>") + tr("<b>Datations simples</b> : ")
+         + ex(QStringLiteral("C14 de 3560 +- 20 BP")) + sep + ex(QStringLiteral("archéomagnétisme : inclinaison 65°, alpha95 = 1")) + sep
+         + ex(QStringLiteral("date uniforme entre -500 et -400")) + QStringLiteral("</li>");
+    h += QStringLiteral("<li>") + tr("<b>Calcul rapide d'un Event</b> (MCMC fait par SeldonH, sans contrainte ni phase) : ")
+         + ex(QStringLiteral("Calcule l'événement Four avec C14 2450 ± 30 BP et TL 2600 ± 80 mesurée en 2025")) + QStringLiteral("</li>");
+    h += QStringLiteral("<li>") + tr("<b>Fabrique de modèle</b> ChronoModel (<code>.chr</code> : événements, phases, contraintes) : ")
+         + ex(QStringLiteral("Crée un modèle ChronoModel : phase A avec US 12 (C14 2450 ± 30 BP), phase B avec US 10 "
+                             "(C14 2350 ± 30 BP), US 12 sous US 10")) + QStringLiteral("</li>");
+    h += QStringLiteral("<li>") + tr("<b>Contrôle de la convergence</b> d'un calcul ChronoModel :") + QStringLiteral("<ul><li>")
+         + tr("à partir des <b>traces</b> (joignez avec 📎 <code>Chain_all_Events.csv</code> ou <code>Chain_all_Phases.csv</code>, "
+              "onglet Résultats &gt; Export) : R̂ et ESS de la quantité calculée — ")
+         + ex(QStringLiteral("Durée de la phase A : la convergence est-elle satisfaisante ?")) + QStringLiteral("</li><li>")
+         + tr("par l'<b>exploration du Log</b> (joignez <code>Log_Posterior_Distrib_Stats.html</code> et les autres journaux, "
+              "onglet Résultats &gt; Log) : variables non convergées et remèdes — ")
+         + ex(QStringLiteral("Le modèle a-t-il convergé ? Quelles variables posent problème et que faire ?")) + QStringLiteral("</li></ul></li>");
+    h += QStringLiteral("<li>") + tr("<b>Post-traitement</b> des traces jointes, tirage par tirage :") + QStringLiteral("<ul><li>")
+         + tr("écart entre deux Events : ") + ex(QStringLiteral("Quel est l'écart entre l'Event US 12 et l'Event US 14 ?"))
+         + QStringLiteral("</li><li>") + tr("avec le calcul <i>relation</i> : ")
+         + tr("ordre ") + ex(QStringLiteral("US 12 est-il antérieur à US 14 ?")) + sep
+         + tr("date entre ") + ex(QStringLiteral("Date d'un niveau situé entre US 12 et US 14")) + sep
+         + tr("appartenance ") + ex(QStringLiteral("US 5 appartient-il à la phase A ?")) + sep
+         + tr("densité d'une borne ") + ex(QStringLiteral("Début de la phase A")) + sep
+         + tr("corrélation ") + ex(QStringLiteral("Corrélation entre US 12 et US 14")) + sep
+         + tr("avec une datation hors modèle ") + ex(QStringLiteral("Combien de temps entre la fin de la phase A et Ly-1 2450 ± 30 BP ?"))
+         + QStringLiteral("</li></ul></li>");
+    h += QStringLiteral("<li>") + tr("<b>Courbes de ChronoModel</b> (mode courbe ; joignez avec 📎 <code>Curve_X_Splines.csv</code>, et "
+                                     "<code>Chain_all_Events.csv</code> du même calcul pour la convergence, onglet Résultats &gt; Export), "
+                                     "chaque courbe tirée évaluée comme dans ChronoModel :") + QStringLiteral("<ul><li>")
+         + tr("vitesse entre deux dates ") + ex(QStringLiteral("Vitesse de la courbe entre -500 et 300")) + sep
+         + tr("vitesse instantanée ") + ex(QStringLiteral("Vitesse instantanée de la courbe en 300 av. J.-C., par siècle"))
+         + QStringLiteral("</li><li>")
+         + tr("vitesse entre deux valeurs ") + ex(QStringLiteral("Vitesse de la courbe entre X = -10 et X = 10")) + sep
+         + tr("date où la courbe atteint une valeur ") + ex(QStringLiteral("À quelle date la courbe atteint X = 0 ?"))
+         + QStringLiteral("</li><li>")
+         + tr("probabilité d'une valeur à une date ") + ex(QStringLiteral("Probabilité que X = 10 en 200")) + sep
+         + ex(QStringLiteral("Probabilité que la courbe soit comprise entre -10 et 10 en l'an 0"))
+         + QStringLiteral("</li></ul></li></ul>");
+    h += QStringLiteral("<p>") + tr("Remplacez les noms (US 12, phase A, X…) et les valeurs par ceux de vos fichiers.") + QStringLiteral("</p>");
+    h += QStringLiteral("<p>") + tr("📖 <b><a href=\"seldon://help\">Mode d'emploi</a></b> (F1 ou <code>/aide</code>)") + QStringLiteral("<br>")
+         + tr("Les compétences de l'assistant sont des fiches Markdown que vous pouvez enrichir (menu Compétences).") + QStringLiteral("</p>");
+    chat_->addNotice(h);
 }
 
 void MainWindow::showHelp()
@@ -590,6 +629,7 @@ void MainWindow::updateControls()
     sendBtn_->setVisible(!generating_);
     if (history_) history_->setBusy(generating_);
     if (newConvBtn_) newConvBtn_->setEnabled(!generating_);
+    if (chat_) chat_->setEditEnabled(!generating_);
     updateThinkButton();
 }
 
@@ -729,6 +769,13 @@ QString MainWindow::historyUser(const Turn& t)
     return b < 0 ? mu.left(a) : mu.left(a) + mu.mid(b);
 }
 
+// Tour passé en mode calculatrice (résultat affiché par SeldonH, sans réponse du modèle), mis en contexte du message suivant.
+QString MainWindow::calcOnlyContext(const Turn& t)
+{
+    return QStringLiteral("[Échange précédent : question de l'utilisateur et résultat affiché par SeldonH, sans réponse du modèle]\n")
+           + historyUser(t) + QStringLiteral("\n[Fin de l'échange précédent]\n\n");
+}
+
 QVector<ChatMessage> MainWindow::buildChat(QJsonArray* refs) const
 {
     QVector<ChatMessage> v;
@@ -737,20 +784,31 @@ QVector<ChatMessage> MainWindow::buildChat(QJsonArray* refs) const
                                + ((remoteActive() && remote_ && remote_->toolsActive()) ? toolsSystemHint() : std::string()) + userPromptSystemBlock(userPrompt);
     v.append({ "system", system });
     if (refs) refs->append(QJsonObject{ { "role", "system" }, { "content", QString::fromStdString(system) } });
+    // Mode calculatrice : un tour sans réponse du modèle n'est pas mis en paire question / réponse (une réponse de
+    // remplacement serait imitée par un petit modèle, qui la recopierait à la question suivante) ; sa question et son
+    // résultat sont placés en contexte au début du message suivant.
+    QString context;
+    QJsonArray contextTurns;
     for (int i = 0; i < turns_.size(); ++i) {
         const Turn& t = turns_[i];
         const bool last = (i == turns_.size() - 1);
-        QString said = (t.answer.trimmed() + t.toolBlocks).trimmed();     // réponse + appels d'outils réécrits en blocs
-        if (said.isEmpty() && t.calcOnly)            // mode calculatrice : le résultat reste dans la conversation
-            said = QStringLiteral("(Résultat affiché à l'utilisateur par SeldonH, sans commentaire.)");
+        const QString said = (t.answer.trimmed() + t.toolBlocks).trimmed();     // réponse + appels d'outils réécrits en blocs
+        if (!last && said.isEmpty() && t.calcOnly) {
+            context += calcOnlyContext(t);
+            contextTurns.append(i);
+            continue;
+        }
         if (!last && said.isEmpty()) continue;       // tour interrompu/en erreur : ignoré
         const std::string suffix = last ? userPromptReminder(userPrompt) : std::string();
-        v.append({ "user", (last ? t.modelUser : historyUser(t)).toStdString() + suffix });
+        v.append({ "user", (context + (last ? t.modelUser : historyUser(t))).toStdString() + suffix });
         if (refs) {
             QJsonObject u{ { "role", "user" }, { "turn", i } };
             if (!suffix.empty()) u["suffix"] = QString::fromStdString(suffix);
+            if (!contextTurns.isEmpty()) u["context_turns"] = contextTurns;
             refs->append(u);
         }
+        context.clear();
+        contextTurns = QJsonArray();
         if (!last) {
             v.append({ "assistant", said.toStdString() });
             if (refs) refs->append(QJsonObject{ { "role", "assistant" }, { "turn", i } });
@@ -795,8 +853,11 @@ QJsonArray MainWindow::expandPromptMessages(const QJsonArray& messages) const
             const int k = m.value("turn").toInt(-1);
             if (k < 0 || k >= turns_.size()) continue;
             const Turn& t = turns_[k];
+            QString context;                                 // tours « calcul seul » placés en tête (voir buildChat)
+            for (const QJsonValue& c : m.value("context_turns").toArray())
+                if (c.toInt(-1) >= 0 && c.toInt() < turns_.size()) context += calcOnlyContext(turns_[c.toInt()]);
             e["content"] = m.value("role").toString() == QLatin1String("user")
-                               ? (k == turns_.size() - 1 ? t.modelUser : historyUser(t)) + m.value("suffix").toString()
+                               ? context + (k == turns_.size() - 1 ? t.modelUser : historyUser(t)) + m.value("suffix").toString()
                                : (t.answer.trimmed() + t.toolBlocks).trimmed();
         }
         out.append(e);
@@ -916,6 +977,22 @@ void MainWindow::sendMessage()
         showHelp();
         return;
     }
+    // « relance », « recommence », « réessaie » tapé seul (prompt réel du 05/11/2026 : le modèle a recopié sa réponse précédente) :
+    // la dernière question de l'utilisateur est reposée telle quelle, analysée de nouveau par SeldonH.
+    if (!generating_) {
+        static const QRegularExpression retryCmd(QStringLiteral(R"(^\s*(relance[rz]?|recommence[rz]?|r[ée]essa(ie|ye)[rz]?|refai[st]( le calcul)?|retry|again|try again)\s*[.!]?\s*$)"),
+                                                 QRegularExpression::CaseInsensitiveOption);
+        if (retryCmd.match(input_->toPlainText()).hasMatch()) {
+            for (int k = int(turns_.size()) - 1; k >= 0; --k) {
+                if (turns_[k].synthetic || turns_[k].question.trimmed().isEmpty() || retryCmd.match(turns_[k].question).hasMatch()) continue;
+                QString prev = turns_[k].question;
+                const qsizetype clip = prev.indexOf(QStringLiteral("\n\n📎"));
+                if (clip >= 0) prev.truncate(clip);
+                input_->setPlainText(prev.trimmed());
+                break;
+            }
+        }
+    }
 
     // Calcul seul (« 2+3 », « ADtoBP(-550) », « a = 3560 ») : calculatrice locale, exacte et instantanée ; rien n'est envoyé
     // au modèle de langage, qui n'a pas besoin d'être chargé.
@@ -936,7 +1013,7 @@ void MainWindow::sendMessage()
         const QString q0 = input_->toPlainText().trimmed();
         const QString k0 = lexicon_.translate(q0);
         if (ChrSceneWidget::asksForDrawing(k0) && !ChrBuilder::asksForJson(q0)) {
-            if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; rememberChrDates(attachChr_); }
+            if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachChrName_; rememberChrDates(attachChr_); }
             if (!lastChr_.isEmpty()) {
                 drawRequested = true;
                 // Seulement le dessin (ou pas de modèle de langage) : fait par l'application, sans le modèle de langage.
@@ -979,8 +1056,9 @@ void MainWindow::sendMessage()
     // Sans modèle de langage, un simple calcul de datation reste possible (mode calculatrice) : fiche de SeldonH seule.
     // Un tableau joint ou collé est aussi lu sans modèle (fiche « tableau lu »).
     const bool tableHere = attachTable_ || (!tableNotice.isEmpty() && seldon::datatable::hasCurrent());
-    const bool calcWithoutModel = !modelReady_ && (attachName_.isEmpty() || attachTable_)
-                                  && (tableOnly || tableHere || !MethodRunner::requestsFromQuestion(q).isEmpty())
+    const bool calcWithoutModel = !modelReady_ && attachOnlyData()
+                                  && (tableOnly || tableHere || !MethodRunner::requestsFromQuestion(q).isEmpty()
+                                      || MethodRunner::asksCurveList(lexicon_.translate(q)))
                                   && !wantsCalcComment(q);
     if (!modelReady_ && !calcWithoutModel) {
         statusBar()->showMessage(loading_ ? tr("Chargement du modèle en cours…")
@@ -1009,8 +1087,13 @@ void MainWindow::sendMessage()
     QStringList pinned;
     if (modelRequest) pinned << QStringLiteral("03_chronomodel_creer_modele");
     if (MethodRunner::isAgeDepthRequest(qk)) pinned << QStringLiteral("13_chronomodel_courbe_age_profondeur");
-    // « Laquelle est la plus ancienne ? », « A est-elle avant B ? » : la fiche qui explique la probabilité d'antériorité.
-    if (!modelRequest && MethodRunner::asksOrder(qk)) pinned << QStringLiteral("21_ordre_des_dates");
+    // « Laquelle est la plus ancienne ? », « combien de temps entre A et B ? », « C est-elle entre A et B ? » : la fiche
+    // des relations entre dates (probabilité d'antériorité, durée, mélange datations / traces).
+    if (!modelRequest && (MethodRunner::asksOrder(qk)
+                          || (MethodRunner::asksRelation(qk) && (!cited.isEmpty() || !seldon::traces::loaded().isEmpty()))))
+        pinned << QStringLiteral("21_ordre_des_dates");
+    // Courbe de ChronoModel jointe (trace des splines, carte de densité) : la fiche du calcul « curve ».
+    if (seldon::curves::anyLoaded() && !modelRequest) pinned << QStringLiteral("23_courbes_chronomodel");
     // Tableau de datations joint ou collé : la fiche des actions sur le tableau (sélection, datation, modèle).
     if (seldon::datatable::hasCurrent()) pinned << QStringLiteral("22_tableaux");
     // Traces MCMC jointes dans la conversation : la fiche qui décrit le calcul « traces ».
@@ -1019,7 +1102,8 @@ void MainWindow::sendMessage()
     // Résultats de ChronoModel : ceux joints à la question, sinon les derniers de la conversation (« fais le tableau des
     // phases » après une première question). Question sur les phases, successions ou Events : fiche dédiée ; sinon,
     // résultats joints : fiche de diagnostic de l'utilisateur si elle existe, sinon la fiche intégrée des logs.
-    if (attachChronoResults_) { lastResults_ = attachResults_; lastResultsName_ = attachName_; }
+    if (attachChronoResults_) { lastResults_ = attachResults_; lastResultsName_ = attachResultsName_; }
+    turnHasResults_ = attachChronoResults_;          // journaux joints à cette question : suites sur la convergence
     const int resultsFocus = lastResultsName_.isEmpty() ? 0 : chronoresults::focusOf(qk);
     if (resultsFocus) {
         pinned << QStringLiteral("19_chronomodel_phases_events");
@@ -1035,8 +1119,21 @@ void MainWindow::sendMessage()
     bool modelFollowUp = false;
     for (const Turn& p : std::as_const(turns_)) { QJsonObject spec; modelFollowUp = modelFollowUp || ChrBuilder::extractSpec(p.answer, spec); }
     QStringList exclude;
+    // « Durée », « début », « fin » appellent aussi les fiches de lecture des résultats de ChronoModel : sans résultats
+    // joints ni question sur ChronoModel, elles n'ont pas lieu d'être (elles chassent les fiches utiles d'un petit modèle).
+    static const QRegularExpression aboutChronoModel(QStringLiteral(
+        R"(\b(?:chronomodel|phases?|events?|evenements?|mcmc|convergence|chaines?|r\^|ess|posteriori|posterior|log|logs|modeles?|model)\b)"));
+    if (lastResultsName_.isEmpty() && !attachChronoResults_ && seldon::traces::loaded().isEmpty()
+        && !aboutChronoModel.match(seldon::text::fold(qk)).hasMatch())
+        exclude << QStringLiteral("19_chronomodel_phases_events") << QStringLiteral("04_chronomodel_interpreter")
+                << QStringLiteral("chronomodel_resultats_convergence");
     if (!modelRequest && !modelFollowUp)
         exclude << QStringLiteral("03_chronomodel_creer_modele") << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    // Question sur l'utilisation de SeldonH, sans calcul (« comment faire une datation ? ») : seulement la fiche d'aide ; la
+    // réponse donne des phrases à taper, pas de code (les fiches de calcul pousseraient le modèle à écrire un bloc).
+    const bool helpQuestion = !modelRequest && !tableOnly && attachName_.isEmpty() && !resultsFocus && MethodRunner::asksHowTo(qk)
+                              && MethodRunner::requestsFromQuestion(q).isEmpty();
+    if (helpQuestion) pinned = QStringList{ QStringLiteral("10_aide_utilisation") };
     // Création de modèle : budget 0 → seulement les fiches imposées ci-dessus.
     const QList<SkillMatch> matches = skills_.select(qk, modelRequest ? 0 : settings_.skillChars, exclude, pinned);
     const QString knowledge = SkillManager::format(matches);
@@ -1046,16 +1143,32 @@ void MainWindow::sendMessage()
         setTurnActions(turns_.size() - 1);
     }
 
+    if (!turns_.isEmpty() && turns_.last().view >= 0) chat_->setSuggestions(turns_.last().view, QString());   // suites : seulement sous la dernière réponse
+    turnRuns_.clear();
     Turn t;
     t.question = qShown;
     t.drewModel = drawRequested;
+    t.help = helpQuestion;
     for (const SkillMatch& m : matches) t.skillIds << m.skill->id;
 
     // Calculs déterministes (calibration 14C) : faits par l'application, pas par le modèle.
     // Tableau joint ou collé avec cette question : la consigne le vise (« calcule l'événement « Four » », « date les 14C »).
     const QString qCalc = (attachTable_ || (!tableNotice.isEmpty() && seldon::datatable::hasCurrent() && !tableOnly))
                               ? q + QStringLiteral(" (tableau)") : q;
-    RunOutcome dating = tableOnly ? RunOutcome() : MethodRunner::analyzeQuestion(qCalc, dateformat::fromId(settings_.dateFormat));
+    // « Combien de temps sépare la date précédente de 14C 3660 ± 25 ? », « quelle durée entre ces deux dates ? » : relation
+    // avec les datations des questions précédentes, calculée par SeldonH (sans cela, seule la nouvelle date serait calibrée).
+    RunOutcome dating;
+    if (!tableOnly && attachName_.isEmpty()) {
+        const QVector<QJsonObject> rel = MethodRunner::relationWithPrevious(q, recentDatings());
+        if (!rel.isEmpty()) {
+            dating = MethodRunner::run(rel, dateformat::detect(q, displayFormat()));
+            dating.noticeHtml.prepend(tr("<p><i>↻ Avec la ou les datations des questions précédentes.</i></p>"));
+            dating.promptBlock.prepend(QStringLiteral("[La question renvoie aux datations précédentes de la conversation : SeldonH a "
+                                                      "fait le calcul avec elles (mêmes mesures, mêmes courbes). Commente ce résultat ; "
+                                                      "ne réécris pas de bloc calcul.]\n"));
+        }
+    }
+    if (!dating.found && !tableOnly) dating = MethodRunner::analyzeQuestion(qCalc, dateformat::fromId(settings_.dateFormat));
     // « Et à 50 % ? » : pas de datation dans la question, seulement un autre niveau de confiance -> la dernière datation
     // de la conversation est recalculée à ce niveau (le modèle ne doit pas déduire une HPD des quartiles).
     if (!dating.found) {
@@ -1075,6 +1188,15 @@ void MainWindow::sendMessage()
                                                       "pas de bloc calcul ; une HPD ne se déduit pas des quartiles.]\n").arg(what.join(" et ")));
         }
     }
+    // « Liste les courbes de réf » : la liste complète, affichée par SeldonH (le modèle n'en recopiait qu'une partie).
+    if (!dating.found && !tableOnly && attachName_.isEmpty() && !modelRequest && MethodRunner::asksCurveList(qk)) {
+        QString plain;
+        dating.noticeHtml = MethodRunner::cardMarker(tr("Courbes de référence disponibles")) + curvesListHtml(&plain);
+        dating.promptBlock = MethodRunner::shownResultHeader() + plain
+                             + QStringLiteral("\nLa liste complète est DÉJÀ affichée : ne la recopie pas ; réponds seulement à une "
+                                              "question précise sur ces courbes.\n");
+        dating.found = true;
+    }
     t.followUp = dating.found;       // déjà calculé par l'application : pas de nouveau calcul à relancer
 
     QString mu;
@@ -1085,7 +1207,8 @@ void MainWindow::sendMessage()
         const int budget = remoteActive() ? 12000 : std::clamp(settings_.nCtx / 3, 2000, 8000);
         mu += seldon::datatable::digest(seldon::datatable::current(), budget) + "\n";
     }
-    if (!attachText_.isEmpty()) mu += "[Fichier joint : " + attachName_ + "]\n" + attachText_ + "\n\n";
+    for (const Attachment& a : std::as_const(attachments_))
+        if (!a.text.isEmpty()) mu += "[Fichier joint : " + a.name + "]\n" + a.text + "\n\n";
     // Tableau demandé : SeldonH l'affiche avec les valeurs exactes ; le modèle reçoit ces valeurs (dans un budget) et le
     // commente. Un modèle local à 8 k tokens ne pourrait ni lire ni réécrire 48 phases.
     QString resultsTable;
@@ -1101,8 +1224,9 @@ void MainWindow::sendMessage()
                              "Le dessin est DÉJÀ fait et affiché : n'écris AUCUN bloc de code (ni plot, ni autre) pour le dessiner, "
                              "ne décris pas le dessin ; réponds seulement au reste de la question.]\n\n")
                   .arg(lastChrTitle_, ChrSceneWidget::hasPhases(lastChr_) ? QStringLiteral(" et scène des phases") : QString());
-    if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachName_; rememberChrDates(attachChr_); }
+    if (!attachChr_.isEmpty()) { lastChr_ = attachChr_; lastChrTitle_ = attachChrName_; rememberChrDates(attachChr_); }
     const QString asked = tableOnly ? tr("(L'utilisateur a collé ce tableau sans consigne.)") : q;
+    if (helpQuestion && !dating.found) mu += MethodRunner::helpHint();
     t.modelUser = mu.isEmpty() ? asked : mu + "[Question]\n" + asked;
 
     QString shown = qShown;
@@ -1120,7 +1244,8 @@ void MainWindow::sendMessage()
     }
     // Mode calculatrice : un calcul que SeldonH a fait seul, sans demande d'explication, est affiché sans réponse du modèle
     // (la fiche donne les valeurs exactes) ; « Demander un commentaire » reste possible.
-    const bool calcAlone = (dating.found || tableOnly || !modelReady_) && (attachName_.isEmpty() || attachTable_) && !resultsFocus
+    // Traces ou tableau joints : lus par SeldonH, le calcul se suffit à lui-même (pas de commentaire automatique).
+    const bool calcAlone = (dating.found || tableOnly || !modelReady_) && attachOnlyData() && !resultsFocus
                            && !modelRequest && !drawRequested && (!modelReady_ || !wantsCalcComment(q));
     t.view = newAssistantBubble();
     turns_.append(t);
@@ -1157,7 +1282,9 @@ void MainWindow::finishCalcOnly(const QString& shownText)
     t.answer.clear();
     const QString shown = shownText.isEmpty() ? tr("*Résultat calculé par SeldonH : voir la fiche ci-dessus.*") : shownText;
     chat_->setAssistant(t.view, shown, QString(), false, true);
+    chat_->setAppNote(t.view, true);
     logAssistantText(turns_.size() - 1, shown, QString());
+    computeSuites();
     setTurnActions(turns_.size() - 1);
     generating_ = false;
     continuing_ = false;
@@ -1205,6 +1332,7 @@ void MainWindow::requestComment(int turn)
 void MainWindow::startGeneration()
 {
     raw_.clear();
+    calcCut_ = false;
     const bool thinking = settings_.thinking && thinkingSupported();     // sans effet sur un modèle qui ne sait pas réfléchir
     startsInThink_ = thinking;                // corrigé par le signal `started`
     generating_ = true;
@@ -1218,8 +1346,15 @@ void MainWindow::startGeneration()
     QJsonArray refs;
     const QVector<ChatMessage> chat = buildChat(&refs);
     if (!turns_.isEmpty()) turns_.last().prompt = promptSnapshot(refs, sp);
+    if (remote_) remote_->setToolsSuspended(helpTurn());           // question d'aide : pas d'appel d'outil
     if (remoteActive()) emit requestRemoteGenerate(chat, sp);
     else emit requestGenerate(chat, sp);
+}
+
+bool MainWindow::helpTurn() const
+{
+    const int k = currentQuestionTurn();
+    return k >= 0 && turns_[k].help;
 }
 
 // Suite d'une réponse coupée : le modèle reçoit la conversation, le début de sa réponse et la consigne de continuer ;
@@ -1274,7 +1409,7 @@ void MainWindow::continueAnswer(int turn)
 // dernière vraie question de l'utilisateur demande explicitement le JSON.
 QString MainWindow::calcHtml(const QVector<Calculator::Line>& lines) const
 {
-    QString h = tr("<p><b>🧮 Calcul fait par SeldonH</b> <i>(calculatrice locale, sans le modèle de langage)</i></p><table cellspacing='0' cellpadding='3'>");
+    QString h = MethodRunner::cardMarker(tr("Calculatrice (sans le modèle de langage)")) + QStringLiteral("<table cellspacing='0' cellpadding='3'>");
     for (const Calculator::Line& l : lines) {
         h += QStringLiteral("<tr><td><code>%1</code></td><td>").arg(l.expr.toHtmlEscaped());
         const QString shown = Calculator::formatValue(l.value, l.uncertainty);
@@ -1348,6 +1483,45 @@ QString MainWindow::truncationNotice(const Turn& t) const
 
 // Dernières datations de la conversation (au plus 8 tours en arrière) : écrites dans une question de l'utilisateur,
 // ou demandées par l'assistant dans un bloc « calcul » (ou un appel d'outil, ré-écrit en bloc).
+QVector<QJsonObject> MainWindow::recentDatings() const
+{
+    // Datations écrites par l'utilisateur dans les 8 dernières questions (et termes datés des relations), sans doublon.
+    const MethodRegistry& reg = MethodRegistry::instance();
+    QVector<QJsonObject> out;
+    QStringList seen;
+    auto add = [&](QJsonObject o) {
+        o = MethodRunner::normalizeRequest(o);
+        if (!reg.byId(o.value("method").toString())) return;
+        for (const char* k : { "level", "layout" }) o.remove(k);
+        const QString key = QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+        if (seen.contains(key)) return;
+        seen << key;
+        out << o;
+    };
+    for (int i = std::max(0, int(turns_.size()) - 8); i < turns_.size(); ++i) {
+        if (turns_[i].synthetic) continue;
+        for (const QJsonObject& r : MethodRunner::requestsFromQuestion(turns_[i].question)) {
+            if (r.value("method").toString() == QLatin1String("relation")) {
+                // Termes de la relation : datations, et colonnes des traces jointes (« Pomigliano del Arco », « Phase A End »),
+                // pour « quelle est la durée entre ces deux dates ? » après une question sur deux colonnes.
+                QJsonArray terms;
+                for (const char* k : { "of", "from", "to" }) if (r.contains(k)) terms.append(r.value(k));
+                for (const QJsonValue& v : r.value("terms").toArray()) terms.append(v);
+                for (const QJsonValue& v : std::as_const(terms)) {
+                    if (v.isObject()) add(v.toObject());
+                    else if (v.isString() && !v.toString().trimmed().isEmpty()) {
+                        const QString key = QStringLiteral("column:") + v.toString();
+                        if (!seen.contains(key)) { seen << key; out << QJsonObject{ { "_column", v.toString() } }; }
+                    }
+                }
+            } else {
+                add(r);
+            }
+        }
+    }
+    return out;
+}
+
 QVector<QJsonObject> MainWindow::lastDatingRequests() const
 {
     // D'abord les datations écrites par l'utilisateur (valeurs et courbes exactes) ; à défaut, un bloc « calcul » de
@@ -1378,6 +1552,7 @@ DateFormat MainWindow::displayFormat() const
 bool MainWindow::runRequestedCalculations()
 {
     if (turns_.isEmpty() || turns_.last().followUp) return false;
+    if (helpTurn()) return false;                // réponse d'aide : un bloc n'y serait qu'un exemple, jamais exécuté
     QVector<QJsonObject> blocks = MethodRunner::extractCalcBlocks(turns_.last().answer);
     if (blocks.isEmpty()) return false;
     for (QJsonObject& b : blocks) b = MethodRunner::fillDateNames(b, chrDates_);
@@ -1413,6 +1588,20 @@ void MainWindow::onToken(const QString& piece)
     if (turns_.isEmpty()) return;
     raw_ += piece;
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
+    // Demande de calcul terminée (bloc ```calcul) et le modèle continue à écrire : la suite serait un résultat inventé
+    // (il ne connaît pas encore les valeurs). SeldonH arrête la génération, fait le calcul et affiche la fiche ; le modèle
+    // commente ensuite les vraies valeurs si la question le demande. Plusieurs blocs à la suite restent possibles.
+    if (!calcCut_ && !continuing_ && !turns_.last().followUp && !helpTurn()) {
+        const QString a = QString::fromStdString(s.answer);
+        qsizetype b0 = -1, b1 = -1;
+        if (MethodRunner::lastCalcBlock(a, &b0, &b1)) {
+            const QString tail = a.mid(b1).trimmed();
+            if (tail.size() >= 12 && !tail.startsWith(QLatin1Char('`')) && !tail.startsWith(QLatin1Char('{'))) {
+                calcCut_ = true;
+                stopGeneration();
+            }
+        }
+    }
     const QString thinking = continuing_ ? turns_.last().thinking : QString::fromStdString(s.thinking);
     chat_->setAssistant(turns_.last().view, shownAnswer(QString::fromStdString(s.answer)), thinking, !continuing_ && s.thinkingOpen, false);
 }
@@ -1424,7 +1613,21 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
     t.answer = QString::fromStdString(s.answer);       // texte complet (avec le bloc de modèle) : historique, enregistrement
     if (!modelExpected()) t.answer = ChrBuilder::stripModelBlocks(t.answer);     // bloc de modèle non demandé
+    if (helpTurn()) t.answer = MethodRunner::stripCodeBlocks(t.answer);          // aide : phrases à taper, pas de code
+    qsizetype b0 = -1, b1 = -1;
+    const bool endsWithCalc = !t.followUp && !helpTurn() && MethodRunner::lastCalcBlock(t.answer, &b0, &b1)
+                              && (calcCut_ || t.answer.mid(b1).trimmed().isEmpty());
+    if (endsWithCalc) t.answer.truncate(b1);           // texte écrit après la demande de calcul : inventé, retiré
     QString answer = shownAnswer(t.answer);
+    // Réponse réduite à une demande de calcul (titres, « je calcule… ») : simple note ; la fiche de SeldonH suit.
+    bool calcRequestNote = false;
+    if (endsWithCalc && !interrupted) {
+        QString rest = answer;
+        rest.remove(QStringLiteral("*Calcul confié à SeldonH.*"));
+        static const QRegularExpression headings(QStringLiteral("^\\s*#+[^\\n]*$"), QRegularExpression::MultilineOption);
+        rest.remove(headings);
+        if (rest.trimmed().size() < 300) { answer = calcRequestText(); calcRequestNote = true; }
+    }
     if (t.drewModel) {                                 // dessin fait par SeldonH : un bloc plot du modèle serait faux
         answer = ChrSceneWidget::stripPlotBlocks(answer);
         if (answer.isEmpty()) answer = tr("*Modèle dessiné par SeldonH dans le panneau des graphiques.*");
@@ -1433,7 +1636,9 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     if (interrupted) answer += tr("\n\n*(réponse interrompue)*");
     else if (t.truncation) answer += QStringLiteral("\n\n*%1*").arg(truncationNotice(t));
     chat_->setAssistant(t.view, answer, t.thinking, false, true);
+    if (calcRequestNote) chat_->setAppNote(t.view, true);
     logAssistantText(turns_.size() - 1, answer, t.thinking);
+    computeSuites();
     setTurnActions(turns_.size() - 1);
 
     if (!t.drewModel) applyPlotBlocks(t.answer);
@@ -1528,11 +1733,13 @@ void MainWindow::onFinished(const GenStats& st)
     if (!turns_.isEmpty()) {
         Turn& t = turns_.last();
         if (st.droppedMessages > 0) t.prompt["dropped_messages"] = st.droppedMessages;   // ce que le moteur a réellement gardé
-        t.truncation = st.stoppedByUser ? 0 : st.truncation;
+        t.truncation = st.stoppedByUser ? 0 : st.truncation;      // (arrêt après un bloc de calcul : pas de troncature)
         t.tokenLimit = st.tokenLimit;
         t.truncationDetail = QString::fromStdString(st.truncationDetail);
     }
-    finishAssistantMessage(st.stoppedByUser);
+    const bool stopped = st.stoppedByUser && !calcCut_;      // arrêt par SeldonH après un bloc de calcul : pas une interruption
+    finishAssistantMessage(stopped);
+    calcCut_ = false;
     continuing_ = false;
     if (toolsApplyPending_) { toolsApplyPending_ = false; applyRemoteTools(false); }
     saveCurrent();
@@ -1543,10 +1750,10 @@ void MainWindow::onFinished(const GenStats& st)
     if (st.droppedMessages > 0)
         msg += tr(" — %1 ancien(s) message(s) oublié(s) (contexte plein)").arg(st.droppedMessages);
     if (st.contextFull) msg += tr(" — contexte saturé");
-    if (!st.stoppedByUser && st.truncation) msg += tr(" — réponse coupée");
+    if (!stopped && st.truncation) msg += tr(" — réponse coupée");
 
     updateQuota(st);
-    if (!st.stoppedByUser && runRequestedCalculations()) return;      // relance l'assistant avec le résultat
+    if (!stopped && runRequestedCalculations()) return;      // relance l'assistant avec le résultat
     updateControls();
     statsLabel_->setText(msg);
 }
@@ -1659,7 +1866,7 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
             allExecuted = false;                 // valeur manquante, erreur : le modèle doit réagir (demander, corriger)
             forModel << tr("[Retour de l'outil « %1 » (SeldonH)]\n%2").arg(c.name, o.content);
             if (c.name != QLatin1String("courbes_disponibles"))
-                logNotice(tr("<i>🧮 L'assistant a appelé l'outil <code>%1</code> mais le calcul n'a pas pu être lancé : %2</i>")
+                logNotice(tr("<i>L'assistant a appelé l'outil <code>%1</code> mais le calcul n'a pas pu être lancé : %2</i>")
                                      .arg(c.name.toHtmlEscaped(), o.content.toHtmlEscaped()));
         }
     }
@@ -1718,7 +1925,9 @@ void MainWindow::resetConversation(bool clearFigures)
     lastResults_ = chronoresults::Report();
     lastResultsName_.clear();
     seldon::traces::clear();             // traces MCMC jointes : propres à la conversation
+    seldon::curves::clear();             // courbes de ChronoModel jointes : idem
     seldon::datatable::clear();          // tableau de datations : idem
+    CurveStore::clearSession();          // courbes de référence jointes (plugin Gauss) : idem
     resetQuota();                        // nouvelle conversation : tout le contexte est libre
     calc_.reset();
     chat_->clearAll();
@@ -1733,11 +1942,43 @@ void MainWindow::resetConversation(bool clearFigures)
 
 void MainWindow::attachFile()
 {
-    const QString f = QFileDialog::getOpenFileName(
-        this, tr("Joindre un fichier"), QString(),
+    // Sélection multiple (traces des Events et des phases, splines et Chain_all_Events.csv, journaux de ChronoModel…) ;
+    // un nouveau clic sur 📎 ajoute d'autres fichiers à ceux déjà joints.
+    const QStringList files = QFileDialog::getOpenFileNames(
+        this, tr("Joindre un ou plusieurs fichiers"), QString(),
         tr("Fichiers pris en charge (*.chr *.json *.html *.htm *.csv *.tsv *.txt *.md *.xlsx *.xlsm *.ods);;"
            "Tableaux (*.xlsx *.xlsm *.ods *.csv *.tsv *.txt);;Résultats ChronoModel (*.html *.htm);;Tous les fichiers (*)"));
-    if (f.isEmpty()) return;
+    for (const QString& f : files) attachOne(f);
+}
+
+bool MainWindow::attachOnlyData() const
+{
+    for (const Attachment& a : attachments_) if (!a.data) return false;
+    return true;
+}
+
+void MainWindow::updateAttachLabel()
+{
+    QStringList names, tips;
+    qsizetype chars = 0;
+    for (const Attachment& a : std::as_const(attachments_)) {
+        names << a.name;
+        tips << tr("%1 (%2 caractères%3)").arg(a.name).arg(a.text.size()).arg(a.data ? tr(", lu par SeldonH") : QString());
+        chars += a.text.size();
+    }
+    attachName_ = names.join(QStringLiteral(", "));
+    if (attachments_.isEmpty()) { attachLabel_->hide(); attachClear_->hide(); return; }
+    const QString list = attachLabel_->fontMetrics().elidedText(attachName_, Qt::ElideRight, 520);
+    attachLabel_->setText(attachments_.size() == 1 ? tr("📎 %1 (%2 caractères)").arg(list).arg(chars)
+                                                   : tr("📎 %1 fichiers : %2 (%3 caractères)").arg(attachments_.size()).arg(list).arg(chars));
+    attachLabel_->setToolTip(tips.join('\n'));
+    attachClear_->setToolTip(attachments_.size() == 1 ? tr("Retirer la pièce jointe") : tr("Retirer les %1 pièces jointes").arg(attachments_.size()));
+    attachLabel_->show();
+    attachClear_->show();
+}
+
+void MainWindow::attachOne(const QString& f)
+{
 
     const QString ext = QFileInfo(f).suffix().toLower();
     if (QStringList{ "png", "jpg", "jpeg", "svg", "bmp", "gif", "webp", "tif", "tiff", "heic" }.contains(ext)) {
@@ -1757,16 +1998,19 @@ void MainWindow::attachFile()
     const QByteArray data = file.readAll();
 
     QString text;
+    QString suggestions;             // questions proposées d'après le contenu du fichier (noms réels des Events, phases…)
     bool chronoResults = false;
-    attachChr_ = QJsonObject();
-    attachTable_ = false;
-    attachTableHtml_.clear();
+    bool dataRead = false;           // ce fichier est lu par SeldonH (tableau, traces, courbe) : le modèle n'en reçoit qu'un résumé
     // Tableau de datations (classeur, CSV) : lu par SeldonH, gardé comme tableau courant ; le modèle n'en reçoit que le résumé.
     auto useTable = [&](const seldon::datatable::Table& t) {
         seldon::datatable::setCurrent(t);
         attachTable_ = true;
+        dataRead = true;
         attachTableHtml_ = seldon::datatable::summaryHtml(t);
         text = tr("[tableau lu par SeldonH : %1 ligne(s), %2 datable(s)]").arg(t.cells.size()).arg(t.datable());
+        suggestions = seldon::suggest::html(tr("📎 <b>Tableau de datations lu</b> (%1 ligne(s), %2 datable(s)). Que voulez-vous en faire ?")
+                                                .arg(t.cells.size()).arg(t.datable()),
+                                            seldon::suggest::forTable(t));
     };
     if (seldon::spreadsheet::isSpreadsheet(f)) {
         QString err;
@@ -1813,13 +2057,79 @@ void MainWindow::attachFile()
         const QString plain = chronoresults::htmlToText(QString::fromUtf8(data));
         if (chronoresults::looksLike(plain)) {
             attachResults_ = chronoresults::parse(plain);
+            attachResultsName_ = QFileInfo(f).fileName();
             text = chronoresults::summarize(attachResults_, QFileInfo(f).fileName());
             chronoResults = true;
+            suggestions = seldon::suggest::html(tr("📎 <b>Résultats de ChronoModel lus</b> (%1). Questions possibles :").arg(QFileInfo(f).fileName().toHtmlEscaped()),
+                                                seldon::suggest::forLog(attachResults_),
+                                                tr("<small>Joindre aussi les autres journaux (Log_Model_Description, Log_MCMC_Adaptation…) "
+                                                   "aide à localiser la cause d'une non-convergence.</small>"));
         } else {
             text = plain;
         }
     }
+    bool curveRead = false;
     if (ext == "csv" || ext == "tsv" || ext == "txt") {
+        // Courbe de ChronoModel (mode courbe) : trace des splines (Curve_X_Splines.csv) ou carte de densité (Curve_X_Map.csv,
+        // Curve_X_GP_Map.csv). SeldonH garde les tirages et évalue lui-même chaque spline ; le modèle ne reçoit qu'un résumé.
+        const QString plain = QString::fromUtf8(data);
+        QString err;
+        // Courbe de référence du plugin Gauss (« t, valeur, erreur », ex. Curve_X_Gauss_ref.csv exporté par ChronoModel) : gardée
+        // pour la conversation, utilisable pour dater une mesure gaussienne (« date une gaussienne x = 45 ± 1 avec la courbe … »).
+        if (CurveStore::looksLikeGaussRef(QFileInfo(f).fileName(), plain)) {
+            curveRead = true;
+            if (CurveStore::addSession(QStringLiteral("gauss"), QFileInfo(f).fileName(), data, &err)) {
+                const QString n = QFileInfo(f).completeBaseName().toLower();
+                const RefCurve* c = CurveStore::get(QStringLiteral("gauss"), n, CurveFormat::Simple);
+                text = QStringLiteral("[Courbe de référence du plugin Gauss « %1 » lue par SeldonH (%2 points, %3 → %4) : pour dater une mesure "
+                                      "gaussienne sur cette courbe, méthode gauss avec \"curve\":\"%1\" (outil densite_gauss). N'écris pas "
+                                      "les valeurs de la courbe.]").arg(n).arg(c ? c->t.size() : 0)
+                           .arg(c ? c->tmin() : 0.0).arg(c ? c->tmax() : 0.0);
+                attachTraces_ = dataRead = true;
+                suggestions = seldon::suggest::html(tr("📎 <b>Courbe de référence Gauss lue</b> (%1). Questions possibles :").arg(n.toHtmlEscaped()),
+                                                    { tr("Date une gaussienne à x = 45 ± 1 avec la courbe %1").arg(n) }, QString());
+            } else {
+                text = tr("[Courbe de référence illisible : %1]").arg(err);
+            }
+        } else
+        if (seldon::curves::looksLikeSplines(plain)) {
+            curveRead = true;
+            seldon::SplineTrace st;
+            if (seldon::curves::parseSplines(plain, QFileInfo(f).fileName(), st, &err)) {
+                seldon::curves::add(st);
+                text = seldon::curves::summary(st) + (err.isEmpty() ? QString() : QStringLiteral(" [Lecture : %1.]").arg(err));
+                attachTraces_ = dataRead = true;            // lue par SeldonH : le mode calculatrice reste possible
+                suggestions = seldon::suggest::html(tr("📎 <b>Trace des splines de ChronoModel lue</b> (%1 : %2 tirages, %3 nœuds, période "
+                                                       "%4 → %5). SeldonH évalue chaque courbe tirée comme ChronoModel. Questions possibles :")
+                                                        .arg(st.file.toHtmlEscaped()).arg(st.rows).arg(st.knots)
+                                                        .arg(seldon::dateformat::format(st.tmin, seldon::dateformat::fromId(settings_.dateFormat)),
+                                                             seldon::dateformat::format(st.tmax(), seldon::dateformat::fromId(settings_.dateFormat))),
+                                                    seldon::suggest::forCurve(st),
+                                                    tr("<small>Joindre aussi <code>Chain_all_Events.csv</code> du même calcul donne la "
+                                                       "convergence (chaînes) et permet de citer les Events par leur nom.</small>"));
+            } else {
+                text = tr("[Trace des splines de ChronoModel illisible : %1]").arg(err);
+            }
+        } else if (seldon::curves::looksLikeMap(plain)) {
+            curveRead = true;
+            seldon::CurveMap cm;
+            if (seldon::curves::parseMap(plain, QFileInfo(f).fileName(), cm, &err)) {
+                seldon::curves::add(cm);
+                text = seldon::curves::summary(cm);
+                attachTraces_ = dataRead = true;
+                suggestions = cm.usable
+                    ? seldon::suggest::html(tr("📎 <b>Carte de densité de ChronoModel lue</b> (%1). Elle donne la loi de la courbe à une date "
+                                               "donnée ; pour les vitesses entre deux dates et les dates d'atteinte, joindre "
+                                               "<code>Curve_X_Splines.csv</code>. Questions possibles :").arg(cm.file.toHtmlEscaped()),
+                                            seldon::suggest::forCurveMap(cm))
+                    : tr("<p>📎 <b>Carte de densité de ChronoModel lue</b> (%1), mais inutilisable : %2.</p>")
+                          .arg(cm.file.toHtmlEscaped(), cm.notes.join(QStringLiteral(" ; ")).toHtmlEscaped());
+            } else {
+                text = tr("[Carte de densité de ChronoModel illisible : %1]").arg(err);
+            }
+        }
+    }
+    if (!curveRead && (ext == "csv" || ext == "tsv" || ext == "txt")) {
         // Export des chaînes MCMC de ChronoModel (Chain_all_Events.csv…) : SeldonH garde les tirages pour les calculs a
         // posteriori (durées, dates entre deux Events) ; le modèle ne reçoit que la liste des colonnes.
         const QString plain = QString::fromUtf8(data);
@@ -1833,6 +2143,13 @@ void MainWindow::attachFile()
             if (seldon::traces::parse(plain, QFileInfo(f).fileName(), ts, &err)) {
                 seldon::traces::add(ts);
                 text = seldon::traces::summary(ts);
+                attachTraces_ = dataRead = true;            // lues par SeldonH : le mode calculatrice reste possible
+                suggestions = seldon::suggest::html(tr("📎 <b>Traces MCMC lues</b> (%1 : %2 colonne(s), %3 tirages). SeldonH calcule tirage par "
+                                                       "tirage, avec la convergence de chaque résultat. Questions possibles :")
+                                                        .arg(ts.file.toHtmlEscaped()).arg(ts.columns.size()).arg(ts.rows()),
+                                                    seldon::suggest::forTraces(ts),
+                                                    tr("<small>Les traces restent chargées pendant la conversation ; vous pouvez joindre aussi "
+                                                       "l'autre export (Events ou phases) du même calcul.</small>"));
             } else {
                 text = tr("[Fichier de traces MCMC illisible : %1]").arg(err);
             }
@@ -1843,6 +2160,8 @@ void MainWindow::attachFile()
         if (d.isObject() && d.object().contains("events")) {
             text = ChrBuilder::summarize(d.object());
             attachChr_ = d.object();               // dessiné à la demande (« dessine le modèle »)
+            attachChrName_ = QFileInfo(f).fileName();
+            suggestions = seldon::suggest::html(tr("📎 <b>Projet ChronoModel lu</b>. Questions possibles :"), seldon::suggest::forChr(d.object()));
         }
     }
     if (text.isEmpty()) {
@@ -1850,20 +2169,26 @@ void MainWindow::attachFile()
         const int kMax = 8000;
         if (text.size() > kMax) text = text.left(kMax) + tr("\n[… fichier tronqué à %1 caractères]").arg(kMax);
     }
-    attachName_ = QFileInfo(f).fileName();
-    attachText_ = text;
-    attachChronoResults_ = chronoResults;
-    attachLabel_->setText(tr("📎 %1 (%2 caractères)").arg(attachName_).arg(text.size()));
-    attachLabel_->show();
-    attachClear_->show();
+    const QString name = QFileInfo(f).fileName();
+    bool replaced = false;
+    for (Attachment& a : attachments_)
+        if (a.name == name) { a.text = text; a.data = dataRead; replaced = true; }
+    if (!replaced) attachments_.append({ name, text, dataRead });
+    attachChronoResults_ = attachChronoResults_ || chronoResults;
+    updateAttachLabel();
+    // Ne pas laisser l'utilisateur seul devant la zone de question : questions cliquables construites avec ce fichier.
+    if (!suggestions.isEmpty()) chat_->addNotice(suggestions);
 }
 
 void MainWindow::clearAttachment()
 {
+    attachments_.clear();
     attachName_.clear();
-    attachText_.clear();
+    attachChrName_.clear();
+    attachResultsName_.clear();
     attachChronoResults_ = false;
     attachTable_ = false;
+    attachTraces_ = false;
     attachTableHtml_.clear();
     attachResults_ = chronoresults::Report();
     attachChr_ = QJsonObject();
@@ -1885,6 +2210,7 @@ void MainWindow::onLink(const QUrl& url)
     else if (action == "continue") continueAnswer(idx);
     else if (action == "relaunch") relaunchTurn(idx);
     else if (action == "comment") requestComment(idx);
+    else if (action == "edit") editLastQuestion();
     else if (action == "thinking") chat_->toggleThinking(idx);
     else if (action == "prompt") exportPrompt(idx);
     else if (action == "figure") showFigure(idx);
@@ -1896,7 +2222,10 @@ void MainWindow::onLink(const QUrl& url)
         const QJsonDocument d = QJsonDocument::fromJson(raw);
         if (d.isObject()) saveChrSpec(d.object());
     }
-    else if (action == "copy" && idx >= 0 && idx < turns_.size()) QApplication::clipboard()->setText(turns_[idx].answer);
+    else if (action == "copy" && idx >= 0 && idx < turns_.size()) QApplication::clipboard()->setText(shownAnswer(turns_[idx].answer));
+    else if (action == "copycard") {
+        if (chat_->copyCard(idx)) statusBar()->showMessage(tr("Fiche copiée (texte mis en forme, tableaux et graphiques) : collez-la dans votre traitement de texte."), 5000);
+    }
 }
 
 void MainWindow::saveChrFromTurn(int turn)
@@ -1945,6 +2274,7 @@ bool MainWindow::saveChrSpec(const QJsonObject& spec)
 
 void MainWindow::applyRunExtras(const RunOutcome& out)
 {
+    turnRuns_ += out.requests;
     if (out.chrSpec.isEmpty()) return;
     const ChrResult r = ChrBuilder::build(out.chrSpec);
     if (!r.ok) {
@@ -2083,8 +2413,63 @@ void MainWindow::logDatingPlot(const QJsonObject& plot, int questionTurn)
 int MainWindow::newAssistantBubble()
 {
     DisplayItem d; d.kind = DisplayItem::Assistant; d.turn = turns_.size();     // le tour est ajouté juste après
+    d.model = modelLabel();
     display_.append(d);
-    return chat_->addAssistant();
+    const int view = chat_->addAssistant();
+    chat_->setModelLabel(view, d.model);
+    return view;
+}
+
+QString MainWindow::calcRequestText() const
+{
+    return tr("*Calcul demandé par le modèle d'IA : voir la fiche « Calcul SeldonH » ci-dessous.*");
+}
+
+QString MainWindow::modelLabel() const
+{
+    if (!modelReady_ || modelDesc_.isEmpty()) return QString();
+    return ChatView::shortModelName(modelDesc_) + (remoteActive() ? tr(" (distant)") : tr(" (local)"));
+}
+
+void MainWindow::editLastQuestion()
+{
+    if (generating_) {
+        statusBar()->showMessage(tr("Une réponse est en cours : arrêtez-la avant de modifier la question."), 5000);
+        return;
+    }
+    int u = -1;                                   // dernière question dans l'affichage enregistré
+    for (int i = int(display_.size()) - 1; i >= 0 && u < 0; --i)
+        if (display_[i].kind == DisplayItem::User) u = i;
+    const int view = chat_->lastUserIndex();
+    if (u < 0 || view < 0) return;
+    // Tours de cette question : ceux des réponses affichées après elle (et les tours de suite qui les suivent).
+    int firstTurn = -1;
+    for (int i = u; i < display_.size(); ++i)
+        if (display_[i].kind == DisplayItem::Assistant && display_[i].turn >= 0)
+            firstTurn = firstTurn < 0 ? display_[i].turn : std::min(firstTurn, display_[i].turn);
+    QString text = firstTurn >= 0 && firstTurn < turns_.size() && !turns_[firstTurn].synthetic ? turns_[firstTurn].question
+                                                                                              : chat_->userText(view);
+    // Mentions ajoutées à l'affichage (pièce jointe, question relancée) : pas dans le texte à corriger.
+    bool hadAttachment = false;
+    for (const QString& tag : { QStringLiteral("\n\n📎 "), QStringLiteral("\n\n↻ ") }) {
+        const qsizetype k = text.indexOf(tag);
+        if (k >= 0) { hadAttachment = hadAttachment || tag.contains(QStringLiteral("📎")); text.truncate(k); }
+    }
+    display_.resize(u);
+    chat_->truncate(view);
+    if (firstTurn >= 0 && firstTurn < turns_.size()) turns_.resize(firstTurn);
+    if (datingPlotItem_ >= u) { datingPlotTurn_ = datingPlotItem_ = datingPlotFig_ = -1; datingPlotPage_ = nullptr; }
+    if (!turns_.isEmpty()) { computeSuites(); setTurnActions(int(turns_.size()) - 1); }
+    input_->setPlainText(text.trimmed());
+    input_->setFocus();
+    QTextCursor c = input_->textCursor();
+    c.movePosition(QTextCursor::End);
+    input_->setTextCursor(c);
+    updateConvTitle();
+    saveCurrent();
+    statusBar()->showMessage(hadAttachment
+        ? tr("Question remise dans la zone de saisie. Joignez de nouveau le fichier si besoin, puis envoyez.")
+        : tr("Question remise dans la zone de saisie : corrigez-la puis envoyez."), 7000);
 }
 
 void MainWindow::logAssistantText(int turn, const QString& markdown, const QString& thinking)
@@ -2117,6 +2502,30 @@ void MainWindow::setTurnActions(int turn)
     if (!t.prompt.isEmpty())
         actions << tr("<a href=\"seldon://prompt/%1\" title=\"Enregistrer exactement ce qui a été envoyé au modèle (JSON ou Markdown)\">📄 Exporter le prompt</a>").arg(turn);
     if (!actions.isEmpty()) chat_->setActions(t.view, actions);
+    // Suites proposées : seulement sous la dernière réponse ; un clic recopie la phrase dans la zone de question.
+    QString suites;
+    if (turn == turns_.size() - 1 && !t.suites.isEmpty()) {
+        QStringList links;
+        for (const QString& q : t.suites)
+            links << QStringLiteral("<a href=\"seldon://insert?q=%1\">%2</a>").arg(QString::fromLatin1(QUrl::toPercentEncoding(q)), q.toHtmlEscaped());
+        suites = tr("↪ Suites : %1").arg(links.join(QStringLiteral(" · ")));
+    }
+    chat_->setSuggestions(t.view, suites);
+}
+
+void MainWindow::computeSuites()
+{
+    if (turns_.isEmpty()) return;
+    Turn& t = turns_.last();
+    seldon::suggest::After a;
+    a.requests = turnRuns_;
+    QJsonObject spec;
+    a.modelBuilt = (ChrBuilder::extractSpec(t.answer, spec) && ChrBuilder::build(spec).ok)
+                   || std::any_of(turnRuns_.begin(), turnRuns_.end(), [](const QJsonObject& r) {
+                          return r.value("method").toString() == QLatin1String("table") && r.value("action").toString() == QLatin1String("model"); });
+    for (const seldon::TraceSet& ts : seldon::traces::loaded()) a.traceColumns << ts.columns;
+    if (turnHasResults_) a.log = &lastResults_;
+    t.suites = seldon::suggest::afterResult(a);
 }
 
 void MainWindow::saveCurrent()
@@ -2131,7 +2540,7 @@ void MainWindow::saveCurrent()
     for (const Turn& t : std::as_const(turns_)) {
         StoredTurn s;
         s.question = t.question; s.modelUser = t.modelUser; s.answer = t.answer; s.toolBlocks = t.toolBlocks; s.prompt = t.prompt;
-        s.skillIds = t.skillIds; s.followUp = t.followUp; s.synthetic = t.synthetic; s.calcOnly = t.calcOnly;
+        s.skillIds = t.skillIds; s.followUp = t.followUp; s.synthetic = t.synthetic; s.calcOnly = t.calcOnly; s.suites = t.suites;
         c.turns.append(s);
     }
     c.display = display_;
@@ -2188,7 +2597,7 @@ void MainWindow::openConversation(const QString& id)
     for (const StoredTurn& s : std::as_const(c.turns)) {
         Turn t;
         t.question = s.question; t.modelUser = s.modelUser; t.answer = s.answer; t.toolBlocks = s.toolBlocks; t.prompt = s.prompt;
-        t.skillIds = s.skillIds; t.followUp = s.followUp; t.synthetic = s.synthetic; t.calcOnly = s.calcOnly;
+        t.skillIds = s.skillIds; t.followUp = s.followUp; t.synthetic = s.synthetic; t.calcOnly = s.calcOnly; t.suites = s.suites;
         turns_.append(t);
     }
     for (const DisplayItem& d : std::as_const(c.display)) {
@@ -2207,6 +2616,8 @@ void MainWindow::openConversation(const QString& id)
             const int view = chat_->addAssistant();
             turns_[d.turn].view = view;
             chat_->setAssistant(view, d.text, d.thinking, false, true);
+            chat_->setModelLabel(view, d.model);
+            if (turns_[d.turn].calcOnly || d.text == calcRequestText()) chat_->setAppNote(view, true);
             setTurnActions(d.turn);
             break;
         }
@@ -2277,13 +2688,32 @@ void MainWindow::deleteAllConversations()
 
 // --------------------------------------------------------------------- divers
 
+// Export de la conversation : page HTML (un seul fichier, images intégrées) ou document Word (.docx), figures comprises.
 void MainWindow::saveTranscript()
 {
-    const QString path = QFileDialog::getSaveFileName(this, tr("Enregistrer la conversation"),
-                                                      QDir::homePath() + "/conversation_seldonh.html", tr("Page HTML (*.html)"));
+    const QString htmlFilter = tr("Page HTML (*.html)"), docxFilter = tr("Document Word (*.docx)");
+    QString filter = htmlFilter;
+    QString path = QFileDialog::getSaveFileName(this, tr("Exporter la conversation"),
+                                                QDir::homePath() + "/conversation_seldonh.html", htmlFilter + ";;" + docxFilter, &filter);
     if (path.isEmpty()) return;
-    QFile f(path);
-    if (f.open(QIODevice::WriteOnly)) f.write(chat_->exportHtml().toUtf8());
+    // Format : extension écrite par l'utilisateur, sinon le filtre choisi.
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    bool docx = suffix == QLatin1String("docx") || (suffix != QLatin1String("html") && suffix != QLatin1String("htm") && filter == docxFilter);
+    if (docx && suffix != QLatin1String("docx")) path += QStringLiteral(".docx");
+    if (!docx && suffix != QLatin1String("html") && suffix != QLatin1String("htm")) path += QStringLiteral(".html");
+    QString err;
+    bool ok = false;
+    if (docx) {
+        const QString title = tr("Conversation SeldonH du %1").arg(QLocale().toString(convCreated_.isValid() ? convCreated_ : QDateTime::currentDateTime(),
+                                                                                     QLocale::ShortFormat));
+        ok = chat_->exportDocx(path, title, &err);
+    } else {
+        QFile f(path);
+        ok = f.open(QIODevice::WriteOnly) && f.write(chat_->exportHtml().toUtf8()) >= 0;
+        if (!ok) err = f.errorString();
+    }
+    if (ok) statusBar()->showMessage(tr("Conversation exportée : %1").arg(QDir::toNativeSeparators(path)), 6000);
+    else QMessageBox::warning(this, tr("Exporter la conversation"), tr("Export impossible : %1").arg(err));
 }
 
 void MainWindow::openModelsFolder()
@@ -2301,7 +2731,7 @@ void MainWindow::openSkillsFolder()
 
 void MainWindow::openCurvesFolder()
 {
-    for (const char* m : { "c14", "f14c", "am" })
+    for (const char* m : { "c14", "f14c", "am", "gauss", "density" })
         QDir().mkpath(QDir(settings_.curvesDir).filePath(CurveStore::subdir(QString::fromLatin1(m))));
     QDesktopServices::openUrl(QUrl::fromLocalFile(settings_.curvesDir));
 }
@@ -2317,9 +2747,17 @@ void MainWindow::reloadCurves()
 // Liste des courbes par méthode, avec leur origine (dossier de l'utilisateur, ChronoModel ou intégrée).
 void MainWindow::showCurves()
 {
+    logNotice(curvesListHtml());
+}
+
+// Liste complète des courbes de référence (menu Courbes, et question « liste les courbes de réf ») : 14C, F14C,
+// archéomagnétisme, plugin Gauss (fichiers .csv « t, valeur, erreur ») et densités du plugin Density, avec leur origine.
+QString MainWindow::curvesListHtml(QString* plain) const
+{
     const QString cmDir = AppSettings::chronoModelCalibDir();
     auto origin = [&](const QString& path) {
         if (path.startsWith(QLatin1String(":/"))) return tr("intégrée");
+        if (path.startsWith(QStringLiteral("📎"))) return tr("jointe à la conversation");
         if (!cmDir.isEmpty() && path.startsWith(cmDir)) return tr("ChronoModel");
         return tr("utilisateur");
     };
@@ -2329,18 +2767,26 @@ void MainWindow::showCurves()
                             settings_.useChronoModelCurves ? cmDir.toHtmlEscaped() : tr("désactivé"));
     const struct { const char* id; const char* title; } methods[] = {
         { "c14", "Radiocarbone (14C, fichiers .14c)" }, { "f14c", "F14C post-bombe (fichiers .14c)" },
-        { "am", "Archéomagnétisme (fichiers .ref)" } };
+        { "am", "Archéomagnétisme (fichiers .ref)" },
+        { "gauss", "Plugin Gauss : courbes de référence (fichiers .csv « t, valeur, erreur », dossier Gauss)" },
+        { "density", "Plugin Density : densités tabulées (fichiers .csv, dossier Density)" } };
+    QString text = QStringLiteral("Courbes de référence disponibles (liste complète) :\n");
     // Une courbe par ligne (liste à puces), avec son origine.
     for (const auto& m : methods) {
         const QStringList names = CurveStore::names(QString::fromLatin1(m.id));
         html += QStringLiteral("<p><b>%1</b> — %2</p><ul>").arg(tr(m.title), tr("%n courbe(s)", nullptr, int(names.size())));
-        for (const QString& n : names)
-            html += QStringLiteral("<li><code>%1</code> <i>(%2)</i></li>")
-                        .arg(n.toHtmlEscaped(), origin(CurveStore::sourceOf(QString::fromLatin1(m.id), n)));
+        QStringList line;
+        for (const QString& n : names) {
+            const QString o = origin(CurveStore::sourceOf(QString::fromLatin1(m.id), n));
+            html += QStringLiteral("<li><code>%1</code> <i>(%2)</i></li>").arg(n.toHtmlEscaped(), o);
+            line << QStringLiteral("%1 (%2)").arg(n, o);
+        }
         if (names.isEmpty()) html += QStringLiteral("<li><i>%1</i></li>").arg(tr("aucune"));
         html += QStringLiteral("</ul>");
+        text += QStringLiteral("- %1 : %2\n").arg(tr(m.title), line.isEmpty() ? tr("aucune") : line.join(QStringLiteral(", ")));
     }
-    logNotice(html);
+    if (plain) *plain = text;
+    return html;
 }
 
 // Lien « Enregistrer le fichier… » d'une fiche de densité : la spécification est dans le lien, le fichier est recalculé.

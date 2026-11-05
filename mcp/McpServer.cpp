@@ -43,6 +43,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "DensityFile.h"
 #include "MethodRunner.h"
 #include "Tools.h"
+#include "CurveTraces.h"
 #include "Traces.h"
 
 namespace seldon {
@@ -56,17 +57,19 @@ QString toolTitle(const QString& name)
         { "calibrer_radiocarbone", "Calibrer une date radiocarbone (14C)" },
         { "calibrer_f14c", "Calibrer une fraction moderne F14C (post-bombe)" },
         { "dater_luminescence", "Datation par luminescence (TL/OSL)" },
-        { "densite_gauss", "Date gaussienne (années calendaires)" },
+        { "densite_gauss", "Date gaussienne (années calendaires, ou mesure sur une courbe du plugin Gauss)" },
+        { "densite_tabulee", "Densité tabulée du plugin Density de ChronoModel" },
         { "densite_uniforme", "Date uniforme (TPQ / TAQ)" },
         { "dater_archeomagnetisme", "Datation archéomagnétique" },
         { "calculer_evenement", "Événement ChronoModel (MCMC)" },
         { "combiner_dates", "Combiner des datations d'une même date" },
         { "comparer_dates", "Ordre de deux datations (laquelle est la plus ancienne)" },
         { "analyser_traces", "Calculs sur des traces MCMC de ChronoModel" },
+        { "courbe_chronomodel", "Courbe de ChronoModel : valeur, vitesse, accélération, tracé, date d'une valeur" },
         { "tableau", "Tableau de datations : sélection, extraction, datation, événement, modèle" },
         { "calibration_inverse", "Calibration inverse (mesure attendue pour une date)" },
         { "creer_densite", "Fichier de densité pour le plugin Density de ChronoModel" },
-        { "courbes_disponibles", "Courbes de référence disponibles" } };
+        { "courbes_disponibles", "Courbes de référence et densités disponibles" } };
     return t.value(name, name);
 }
 
@@ -101,6 +104,22 @@ QJsonArray McpServer::toolList()
                                                                          "(Chain_all_Events.csv, Chain_all_Phases.csv…). Obligatoire au "
                                                                          "premier appel ; le fichier reste chargé pour les appels suivants.") } };
             desc += QStringLiteral(" Avec ce serveur, indique le chemin du fichier de traces dans « file ».");
+        }
+        if (d.name == QLatin1String("comparer_dates")) {
+            props["file"] = QJsonObject{ { "type", "string" },
+                                         { "description", QStringLiteral("Chemin complet d'un fichier de traces exporté par ChronoModel, "
+                                                                         "seulement si un terme est une colonne de traces. Facultatif.") } };
+            desc += QStringLiteral(" Avec ce serveur, un terme colonne de traces demande le chemin du fichier dans « file ».");
+        }
+        if (d.name == QLatin1String("courbe_chronomodel")) {
+            props["file"] = QJsonObject{ { "type", "string" },
+                                         { "description", QStringLiteral("Chemin complet de la trace des splines exportée par ChronoModel "
+                                                                         "(Curve_X_Splines.csv), ou d'une carte de densité (Curve_X_Map.csv). "
+                                                                         "Obligatoire au premier appel ; le fichier reste chargé pour les appels suivants.") } };
+            props["traces_file"] = QJsonObject{ { "type", "string" },
+                                                { "description", QStringLiteral("Chemin de Chain_all_Events.csv du même calcul, facultatif : "
+                                                                                "chaînes MCMC (convergence) et dates des Events comme termes.") } };
+            desc += QStringLiteral(" Avec ce serveur, indique le chemin de la trace des splines dans « file ».");
         }
         if (d.name == QLatin1String("tableau")) {
             props["file"] = QJsonObject{ { "type", "string" },
@@ -142,6 +161,11 @@ QString McpServer::adaptText(const QString& promptBlock)
                                           QRegularExpression::DotMatchesEverythingOption);
     t.replace(drawn, QStringLiteral("Aucun graphique n'est affiché par ce serveur : les densités (abscisses et ordonnées) sont "
                                     "dans le résultat structuré « plot », si tu dois en tracer une. "));
+    // Courbes de ChronoModel : graphiques dans les onglets de l'application ; ici, dans « extra_plots ».
+    t.replace(QStringLiteral("Les graphiques (loi de la grandeur, courbe médiane et son intervalle de crédibilité à 95 %, quantiles 2,5 – 97,5 % date par date) sont DÉJÀ tracés."),
+              QStringLiteral("Les graphiques (loi de la grandeur, courbe médiane et son intervalle de crédibilité à 95 %, quantiles 2,5 – 97,5 % date par date) sont dans « extra_plots »."));
+    t.replace(QStringLiteral("sont DÉJÀ tracés dans des onglets à part : n'écris aucun bloc « plot »."),
+              QStringLiteral("sont dans le résultat structuré « extra_plots » (aucun graphique n'est affiché par ce serveur)."));
     t.replace(QStringLiteral("le graphique (à part) est sur l'axe de la mesure"), QStringLiteral("sa densité est sur l'axe de la mesure"));
     t.replace(QStringLiteral("L'utilisateur l'enregistre avec le lien « Enregistrer le fichier… » ; il doit être placé"),
               QStringLiteral("Il doit être placé"));
@@ -158,7 +182,7 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& argument
     if (!def) return failure(QStringLiteral("Outil inconnu : « %1 ».").arg(name));
 
     // Traces : le fichier est lu sur cet ordinateur (pas de pièce jointe comme dans l'application).
-    if (name == QLatin1String("analyser_traces")) {
+    if (name == QLatin1String("analyser_traces") || name == QLatin1String("comparer_dates")) {
         const QString file = args.take("file").toString().trimmed();
         if (!file.isEmpty()) {
             QFile f(QDir::fromNativeSeparators(file));
@@ -170,9 +194,49 @@ QJsonObject McpServer::callTool(const QString& name, const QJsonObject& argument
                 return failure(QStringLiteral("« %1 » n'est pas un fichier de traces de ChronoModel : %2.").arg(file, err));
             traces::add(set);
         }
-        if (traces::loaded().isEmpty())
+        if (traces::loaded().isEmpty() && name == QLatin1String("analyser_traces"))
             return failure(QStringLiteral("Aucune trace chargée : donne dans « file » le chemin du fichier exporté par ChronoModel "
                                           "(Résultats > Export, Chain_all_Events.csv ou Chain_all_Phases.csv)."));
+    }
+    // Courbe de ChronoModel : trace des splines ou carte de densité, lue sur cet ordinateur (et les traces des Events).
+    if (name == QLatin1String("courbe_chronomodel")) {
+        const QString tfile = args.take("traces_file").toString().trimmed();
+        if (!tfile.isEmpty()) {
+            QFile f(QDir::fromNativeSeparators(tfile));
+            if (!f.open(QIODevice::ReadOnly))
+                return failure(QStringLiteral("Impossible de lire le fichier de traces « %1 » : %2.").arg(tfile, f.errorString()));
+            TraceSet set;
+            QString err;
+            if (!traces::parse(QString::fromUtf8(f.readAll()), QFileInfo(tfile).fileName(), set, &err))
+                return failure(QStringLiteral("« %1 » n'est pas un fichier de traces de ChronoModel : %2.").arg(tfile, err));
+            traces::add(set);
+        }
+        const QString file = args.value("file").toString().trimmed();
+        if (!file.isEmpty()) {
+            QFile f(QDir::fromNativeSeparators(file));
+            if (!f.open(QIODevice::ReadOnly))
+                return failure(QStringLiteral("Impossible de lire la courbe « %1 » : %2.").arg(file, f.errorString()));
+            const QString text = QString::fromUtf8(f.readAll());
+            QString err;
+            if (curves::looksLikeSplines(text)) {
+                SplineTrace st;
+                if (!curves::parseSplines(text, QFileInfo(file).fileName(), st, &err))
+                    return failure(QStringLiteral("« %1 » : trace des splines illisible : %2.").arg(file, err));
+                curves::add(st);
+            } else if (curves::looksLikeMap(text)) {
+                CurveMap cm;
+                if (!curves::parseMap(text, QFileInfo(file).fileName(), cm, &err))
+                    return failure(QStringLiteral("« %1 » : carte de densité illisible : %2.").arg(file, err));
+                curves::add(cm);
+            } else {
+                return failure(QStringLiteral("« %1 » n'est ni une trace des splines (Curve_X_Splines.csv) ni une carte de densité "
+                                              "(Curve_X_Map.csv) exportée par ChronoModel.").arg(file));
+            }
+            args["file"] = QFileInfo(file).fileName();
+        }
+        if (!curves::anyLoaded())
+            return failure(QStringLiteral("Aucune courbe chargée : donne dans « file » le chemin de la trace des splines exportée par "
+                                          "ChronoModel (Curve_X_Splines.csv)."));
     }
     // Tableau de datations : lu sur cet ordinateur et gardé pour les appels suivants (QtCore seul : CSV, TSV, texte).
     QString tableDigest;

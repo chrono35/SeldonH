@@ -52,6 +52,7 @@ struct StoredTurn {
     bool        followUp = false;   // pas de calcul à relancer pour ce tour
     bool        synthetic = false;  // tour créé par l'application (résultat d'un calcul), pas par une question de l'utilisateur
     bool        calcOnly = false;   // résultat de SeldonH affiché seul, sans réponse du modèle (mode calculatrice)
+    QStringList suites;             // suites proposées sous la réponse (affichage seulement, jamais envoyées au modèle)
     // Prompt envoyé au modèle pour ce tour (moteur, paramètres, messages ; les messages des tours sont des renvois
     // {"role","turn"} pour ne pas recopier la conversation) : export pour la reproductibilité. Vide si inconnu.
     QJsonObject prompt;
@@ -64,6 +65,7 @@ struct DisplayItem {
     QString     thinking;     // Assistant : réflexion du modèle (facultative)
     int         turn = -1;    // Assistant : indice du tour
     QJsonObject plot;         // Plot : JSON de courbes pour le panneau de graphiques
+    QString     model;        // Assistant : modèle qui a répondu (libellé affiché, « qwen35 4B Q4_K_M (local) »)
 };
 
 struct Conversation {

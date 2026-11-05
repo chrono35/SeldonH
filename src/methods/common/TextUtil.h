@@ -37,6 +37,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QRegularExpression>
 #include <QVector>
 #include <cmath>
+#include <limits>
 #include <QString>
 
 namespace seldon {
@@ -57,6 +58,7 @@ inline QString fold(QString s)
 inline double toNumber(QString s)
 {
     s.replace(',', '.').replace(QChar(0x2212), '-');
+    s.remove(QChar(' ')).remove(QChar(0x00A0)).remove(QChar(0x202F));      // séparateur de milliers « 12 500 »
     return s.toDouble();
 }
 
@@ -106,8 +108,12 @@ struct ValueError {
 // Toutes les paires « valeur ± erreur » d'un texte (déjà passé par fold()).
 inline QVector<ValueError> findValueErrors(const QString& folded)
 {
+    // Séparateur de milliers accepté (« 12 500 ± 1 200 ans ») : groupes d'exactement trois chiffres après une espace
+    // (ordinaire, insécable ou fine) ; sans lui, « 12 500 ± 1 200 » se lisait « 500 ± 1 ».
+    static const QString grouped = QStringLiteral("\\d{1,3}(?:[ \\x{00A0}\\x{202F}]\\d{3}(?!\\d))+");
     static const QRegularExpression re(
-        QStringLiteral("(?<![\\d.,])(-?\\d{1,7}(?:[.,]\\d+)?)\\s*") + plusMinus() + QStringLiteral("\\s*(\\d{1,6}(?:[.,]\\d+)?)"));
+        QStringLiteral("(?<![\\d.,])(-?(?:") + grouped + QStringLiteral("|\\d{1,7})(?:[.,]\\d+)?)\\s*") + plusMinus()
+        + QStringLiteral("\\s*((?:") + grouped + QStringLiteral("|\\d{1,6})(?:[.,]\\d+)?)"));
     QVector<ValueError> out;
     auto it = re.globalMatch(folded);
     while (it.hasNext()) {
@@ -120,6 +126,43 @@ inline QVector<ValueError> findValueErrors(const QString& folded)
         if (v.error > 0) out << v;
     }
     return out;
+}
+
+// ------------------------------------------------------------------ unités d'âge des géologues (05/11/2026)
+// Unité écrite juste après une paire « valeur ± erreur » (texte passé par fold()) : ka, kyr, milliers d'années (× 1000),
+// Ma, Myr, millions d'années (× 10⁶), Ga (× 10⁹), et l'origine éventuelle des âges : « BP » / « cal BP » (1950),
+// « b2k » (2000). scale = 1 et origin = NaN si rien n'est écrit. `length` : longueur reconnue.
+struct AgeUnit { double scale = 1.0; double origin = std::numeric_limits<double>::quiet_NaN(); QString label; int length = 0; };
+inline AgeUnit ageUnitAt(const QString& folded, qsizetype pos)
+{
+    static const QRegularExpression re(QStringLiteral(
+        R"RX(^\s*(?:(ka|k\.a\.|kyr|ky|kans|milliers?\s+d'annees|milliers?\s+d'ans|milliers?|thousand\s+years|thousands\s+of\s+years)|(ma|m\.a\.|myr|millions?\s+d'annees|millions?\s+d'ans|millions?\s+of\s+years|millions?)|(ga|gyr)|(ans|annees|years|yrs?|a)(?=\s*(?:cal\.?\s*bp|bp|b2k)))\b(?:\s*(cal\.?\s*bp|bp|b2k|before\s+present|avant\s+le\s+present))?)RX"));
+    AgeUnit u;
+    const auto m = re.match(folded.mid(pos, 60));
+    if (!m.hasMatch()) return u;
+    if (!m.captured(1).isEmpty()) { u.scale = 1e3; u.label = QStringLiteral("ka"); }
+    else if (!m.captured(2).isEmpty()) { u.scale = 1e6; u.label = QStringLiteral("Ma"); }
+    else if (!m.captured(3).isEmpty()) { u.scale = 1e9; u.label = QStringLiteral("Ga"); }
+    else { u.scale = 1.0; u.label = QStringLiteral("ans"); }
+    const QString o = m.captured(5);
+    if (o.contains(QLatin1String("b2k"))) { u.origin = 2000.0; u.label += QStringLiteral(" b2k"); }
+    else if (!o.isEmpty()) { u.origin = 1950.0; u.label += QStringLiteral(" BP"); }
+    u.length = int(m.capturedLength());
+    return u;
+}
+
+// Échelle des mesures d'une question : 1000 si toutes ses paires « valeur ± erreur » sont suivies de ka (ou équivalent),
+// 10⁶ pour Ma, 0 sinon (aucune paire, ou unités mélangées). Sert à afficher les résultats dans l'unité de la question.
+inline double questionAgeScale(const QString& folded)
+{
+    double s = 0.0;
+    for (const ValueError& v : findValueErrors(folded)) {
+        const AgeUnit u = ageUnitAt(folded, v.start + v.length);
+        if (u.scale == 1.0) return 0.0;
+        if (s != 0.0 && s != u.scale) return 0.0;
+        s = u.scale;
+    }
+    return s;
 }
 
 // ------------------------------------------------------------------ années av. J.-C. et année 0

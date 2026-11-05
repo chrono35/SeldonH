@@ -57,6 +57,14 @@ struct CurveSeries {
     QColor           color;          // facultatif ("color": "#rrggbb") ; sinon bleu de ChronoModel (1re série, ou toutes en lignes)
     bool             fill = true;    // "fill": false -> trait seul, même si le graphique remplit les HPD
     double           width = 1.8;    // épaisseur du trait ("width")
+    bool             points = false; // "points": true -> nuage de points (pas de trait ni de remplissage)
+    bool             dash = false;   // "dash": true -> trait en tirets (droite de référence)
+    // "y2" (même longueur que y) -> bande remplie entre y et y2 (enveloppe d'une courbe de référence, erreur d'une mesure),
+    // semi-transparente ("alpha", 0,25 par défaut), sans trait sauf "width" donné.
+    QVector<double>  y2;
+    QVector<double>  x2;             // "x2" : abscisses du bord y2 (défaut : x) ; densité verticale d'une mesure sur l'axe
+    double           alpha = 0.25;
+    bool             bandLine = false;
 };
 
 struct CurveSpec {
@@ -70,6 +78,8 @@ struct CurveSpec {
     bool                 showYAxis = true;
     // Axe horizontal inversé (les valeurs décroissent vers la droite) : formats d'âge (cal BP…) en ordre chronologique.
     bool                 xReverse = false;
+    // Axe vertical inversé ("yreverse") : nuage de points de deux dates en format d'âge.
+    bool                 yReverse = false;
     // Échelle verticale partant de 0 (densités) ; "yzero": false -> ajustée aux données (traces MCMC…).
     bool                 yFromZero = true;
     // Une série par ligne ("layout": "rows").

@@ -240,8 +240,12 @@ bool parseRefCurve14C(const std::string& text, bool asF14C, RefCurve& out, std::
     return finishCurve(rows, out, err);
 }
 
-bool parseRefCurveSimple(const std::string& text, RefCurve& out, std::string* err)
+bool parseRefCurveSimple(const std::string& text0, RefCurve& out, std::string* err)
 {
+    // Fins de ligne « \r » seules (exports de ChronoModel : Curve_X_Gauss_ref.csv) : ramenées à « \n ».
+    std::string text = text0;
+    for (size_t i = 0; i < text.size(); ++i)
+        if (text[i] == '\r') text[i] = (i + 1 < text.size() && text[i + 1] == '\n') ? ' ' : '\n';
     std::vector<Row> rows;
     std::istringstream in(text);
     std::string line;

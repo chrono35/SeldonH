@@ -78,6 +78,15 @@ struct ToolOutcome {
 // un texte explicatif dans `content`, que le modèle peut lire pour corriger son appel ou poser la question à l'utilisateur.
 ToolOutcome execute(const QString& name, const QString& argumentsJson, DateFormat format);
 
+// Demande de calcul d'un appel d'outil, sans le lancer : mêmes contrôles que execute() (arguments, valeurs manquantes).
+// Vide si l'outil est inconnu, sans méthode (outil d'information) ou si un argument manque (`error` dit lequel).
+QJsonObject requestFor(const QString& name, QJsonObject args, QString* error = nullptr);
+
+// Appel d'outil écrit par l'utilisateur dans sa question (05/11/2026) : « calibrer_radiocarbone(age=2500, error=30) »,
+// « courbe_chronomodel {"op":"plot"} », « utilise l'outil courbe_chronomodel avec op=calibrate, y=45, error=1 ».
+// Nom d'un outil connu, puis un objet JSON ou des paires clé = valeur (« : » accepté). Faux s'il n'y en a pas.
+bool callFromText(const QString& text, QString& name, QJsonObject& args);
+
 // Réunit plusieurs courbes (même format de dates) en un seul graphique pour comparer.
 // Superpose les courbes de plusieurs blocs « plot » (une datation déjà présente, de même nom, n'est pas répétée).
 // Les graphiques de datation (clé « dates » = noms des datations) reçoivent un titre refait avec tous les noms.

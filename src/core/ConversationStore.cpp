@@ -130,6 +130,7 @@ QJsonObject ConversationStore::toJson(const Conversation& c)
                        { "followUp", t.followUp }, { "synthetic", t.synthetic } };
         if (!t.toolBlocks.isEmpty()) o["toolBlocks"] = t.toolBlocks;
         if (t.calcOnly)              o["calcOnly"] = true;
+        if (!t.suites.isEmpty())     o["suites"] = QJsonArray::fromStringList(t.suites);
         if (!t.skillIds.isEmpty())   o["skills"] = QJsonArray::fromStringList(t.skillIds);
         if (!t.prompt.isEmpty())     o["prompt"] = t.prompt;
         turns.append(o);
@@ -144,6 +145,7 @@ QJsonObject ConversationStore::toJson(const Conversation& c)
             if (d.kind == DisplayItem::Assistant) {
                 o["turn"] = d.turn;
                 if (!d.thinking.isEmpty()) o["thinking"] = d.thinking;
+                if (!d.model.isEmpty()) o["model"] = d.model;
             }
         }
         display.append(o);
@@ -174,6 +176,7 @@ bool ConversationStore::fromJson(const QJsonObject& o, Conversation& out, QStrin
         s.followUp = t.value("followUp").toBool();
         s.synthetic = t.value("synthetic").toBool();
         s.calcOnly = t.value("calcOnly").toBool();
+        for (const QJsonValue& q : t.value("suites").toArray()) s.suites << q.toString();
         for (const QJsonValue& id : t.value("skills").toArray()) s.skillIds << id.toString();
         s.prompt = t.value("prompt").toObject();
         c.turns.append(s);
@@ -186,6 +189,7 @@ bool ConversationStore::fromJson(const QJsonObject& o, Conversation& out, QStrin
         it.thinking = d.value("thinking").toString();
         it.turn = d.value("turn").toInt(-1);
         it.plot = d.value("plot").toObject();
+        it.model = d.value("model").toString();
         if (it.kind == DisplayItem::Assistant && (it.turn < 0 || it.turn >= c.turns.size())) continue;
         if (it.kind == DisplayItem::Plot && it.plot.isEmpty()) continue;
         c.display.append(it);

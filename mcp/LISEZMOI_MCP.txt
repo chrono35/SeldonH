@@ -3,6 +3,7 @@ SeldonH - utiliser ses calculs depuis un autre assistant (serveur MCP)
 
 seldonh-mcp met les outils de calcul de SeldonH (calibration 14C et F14C, TL/OSL,
 archéomagnétisme, Event MCMC, combinaison, ordre de deux dates, traces ChronoModel,
+courbes de ChronoModel (valeur, vitesse, date d'atteinte),
 calibration inverse, fichiers de densité) à disposition d'autres assistants par le
 protocole MCP (Model Context Protocol).
 

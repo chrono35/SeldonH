@@ -14,6 +14,7 @@
         <file alias="20_combinaison_traces_inverse.md">skills/20_combinaison_traces_inverse.md</file>
         <file alias="21_ordre_des_dates.md">skills/21_ordre_des_dates.md</file>
         <file alias="22_tableaux.md">skills/22_tableaux.md</file>
+        <file alias="23_courbes_chronomodel.md">skills/23_courbes_chronomodel.md</file>
         <file alias="04_chronomodel_interpreter.md">skills/04_chronomodel_interpreter.md</file>
         <file alias="05_radiocarbone.md">skills/05_radiocarbone.md</file>
         <file alias="06_archeomagnetisme.md">skills/06_archeomagnetisme.md</file>
@@ -30,6 +31,14 @@
     <qresource prefix="/help">
         <file alias="aide.html">help/aide.html</file>
     </qresource>
+    <qresource prefix="/fonts">
+        <file alias="SourceSans3-Regular.ttf">fonts/SourceSans3-Regular.ttf</file>
+        <file alias="SourceSans3-It.ttf">fonts/SourceSans3-It.ttf</file>
+        <file alias="SourceSans3-Semibold.ttf">fonts/SourceSans3-Semibold.ttf</file>
+        <file alias="SourceSans3-Bold.ttf">fonts/SourceSans3-Bold.ttf</file>
+        <file alias="SourceSans3-BoldIt.ttf">fonts/SourceSans3-BoldIt.ttf</file>
+        <file alias="SourceCodePro-Regular.ttf">fonts/SourceCodePro-Regular.ttf</file>
+    </qresource>
     <qresource prefix="/icons">
         <file alias="seldonh_16.png">icons/seldonh_16.png</file>
         <file alias="nouvelle_conversation.svg">icons/nouvelle_conversation.svg</file>
@@ -39,5 +48,8 @@
         <file alias="seldonh_128.png">icons/seldonh_128.png</file>
         <file alias="seldonh_256.png">icons/seldonh_256.png</file>
         <file alias="seldonh_512.png">icons/seldonh_512.png</file>
+        <file alias="mini_seldonh_16.png">icons/mini_seldonh_16.png</file>
+        <file alias="mini_seldonh_32.png">icons/mini_seldonh_32.png</file>
+        <file alias="mini_seldonh_64.png">icons/mini_seldonh_64.png</file>
     </qresource>
 </RCC>

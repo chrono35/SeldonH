@@ -35,6 +35,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "../am/AmMethod.h"
 #include "../c14/C14Method.h"
+#include "../density/DensityMethod.h"
 #include "../f14c/F14cMethod.h"
 #include "../gauss/GaussMethod.h"
 #include "../tl/TlMethod.h"
@@ -51,7 +52,7 @@ namespace seldon {
 MethodRegistry::MethodRegistry()
 {
     // Ordre = priorité de reconnaissance (du plus spécifique au plus général).
-    methods_ << new F14cMethod << new TlMethod << new AmMethod << new UnifMethod << new GaussMethod << new C14Method;
+    methods_ << new DensityMethod << new F14cMethod << new TlMethod << new AmMethod << new UnifMethod << new GaussMethod << new C14Method;
 }
 
 const MethodRegistry& MethodRegistry::instance()

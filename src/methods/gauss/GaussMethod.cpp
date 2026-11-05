@@ -37,6 +37,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <cmath>
 #include <limits>
 
+#include "../common/CurveStore.h"
 #include "../common/TextUtil.h"
 
 namespace seldon {
@@ -62,6 +63,19 @@ std::pair<double, double> solveQuadratic(double y, double a, double b, double c)
     return { 0.0, 0.0 };
 }
 
+// Âge des géologues (« 12 ± 1 ka », « 1,2 ± 0,1 Ma », « 850 ± 70 ans BP ») : la loi gaussienne de ChronoModel est en années
+// calendaires signées : année = origine − âge, origine 1950 (ka BP, usage des géologues ; résultats affichés en ka BP) ou
+// 2000 avec « b2k ». L'écart-type est mis à l'échelle. Le texte saisi est gardé.
+void applyAgeUnit(QJsonObject& o, const text::AgeUnit& u)
+{
+    if (u.scale == 1.0 && !std::isfinite(u.origin)) return;
+    const double v = o.value("age").toDouble(), e = o.value("error").toDouble();
+    const double origin = std::isfinite(u.origin) ? u.origin : 1950.0;
+    o["input"] = QStringLiteral("%1 ± %2 %3").arg(text::numAuto(v, 4), text::numAuto(e, 4), u.label);
+    o["age"] = origin - v * u.scale;
+    o["error"] = e * u.scale;
+}
+
 } // namespace
 
 // Mots-clés qui signalent cette méthode dans une question (texte passé par fold()).
@@ -78,6 +92,9 @@ QVector<QJsonObject> GaussMethod::parse(const QString& question) const
 
     const QRegularExpression ctx = context();
     if (!ctx.match(q).hasMatch()) return out;
+    // Courbe de référence du plugin Gauss nommée dans la question (« avec la courbe curve_x_gauss_ref.csv ») : mode curve ;
+    // la valeur est alors une mesure, pas un âge (pas de conversion ka, Ma).
+    const QString curve = CurveStore::findNamed(id(), q);
 
     // N(1200, 50) ou N(1200; 50)
     static const QRegularExpression nform(R"(\bn\s*\(\s*(-?\d+(?:[.,]\d+)?)\s*[,;]\s*(\d+(?:[.,]\d+)?)\s*\))");
@@ -88,19 +105,32 @@ QVector<QJsonObject> GaussMethod::parse(const QString& question) const
         o["age"] = text::toNumber(m.captured(1));
         o["error"] = text::toNumber(m.captured(2));
         o["mode"] = "none";
+        if (curve.isEmpty()) applyAgeUnit(o, text::ageUnitAt(q, m.capturedEnd()));
         if (o["error"].toDouble() > 0) out << o;
     }
-    if (!out.isEmpty()) return out;
-
-    for (const text::ValueError& ve : text::findValueErrors(q)) {
-        if (out.size() >= 6) break;
-        QJsonObject o;
-        o["age"] = ve.value;
-        o["error"] = ve.error;
-        o["mode"] = "none";
-        out << o;
-    }
+    if (out.isEmpty())
+        for (const text::ValueError& ve : text::findValueErrors(q)) {
+            if (out.size() >= 6) break;
+            QJsonObject o;
+            o["age"] = ve.value;
+            o["error"] = ve.error;
+            o["mode"] = "none";
+            if (curve.isEmpty()) applyAgeUnit(o, text::ageUnitAt(q, ve.start + ve.length));
+            out << o;
+        }
+    if (!curve.isEmpty())
+        for (QJsonObject& o : out) { o["mode"] = "curve"; o["curve"] = curve; }
     return out;
+}
+
+QStringList GaussMethod::curveNames() const { return CurveStore::names(id()); }
+
+QStringList GaussMethod::referenceCurves(const QJsonObject& p) const
+{
+    if (p.value("mode").toString() != QLatin1String("curve")) return {};
+    QString c = p.value("curve").toString().toLower();
+    if (c.endsWith(QLatin1String(".csv"))) c.chop(4);
+    return { QStringLiteral("|gauss|") + c };
 }
 
 MethodResult GaussMethod::compute(const QJsonObject& p) const
@@ -117,6 +147,34 @@ MethodResult GaussMethod::compute(const QJsonObject& p) const
     double tmin, tmax, step;
     std::function<double(double)> g;
 
+    if (mode == "curve") {
+        QString name = p.value("curve").toString().trimmed().toLower();
+        if (name.endsWith(QLatin1String(".csv"))) name.chop(4);
+        if (name.isEmpty()) return MethodResult::failure(QStringLiteral("mode « curve » sans courbe de référence (« curve »)"));
+        const RefCurve* c = CurveStore::get(id(), name, CurveFormat::Simple);
+        if (!c) {
+            const QStringList known = curveNames();
+            return MethodResult::failure(QStringLiteral("courbe de référence Gauss inconnue : « %1 » (%2)")
+                                             .arg(name, known.isEmpty() ? QStringLiteral("aucune courbe dans le dossier Gauss ; joindre le fichier "
+                                                                                         "ou le placer dans Calib/Gauss de ChronoModel")
+                                                                        : QStringLiteral("disponibles : ") + known.join(", ")));
+        }
+        const double var0 = error * error;
+        const auto L = [=](double t) -> long double {
+            double mu, sg;
+            c->at(t, mu, sg);
+            const long double v = static_cast<long double>(sg) * sg + var0;
+            const long double d = age - mu;
+            return expl(-0.5L * d * d / v) / sqrtl(v);
+        };
+        const double span = c->tmax() - c->tmin();
+        const double st = std::clamp(c->minStep / 3.0, span / 50000.0, std::max(span / 2000.0, 1e-9));
+        const Density d = buildDensity(c->tmin(), c->tmax(), st, L, !untruncated);
+        if (!d.valid())
+            return MethodResult::failure(QStringLiteral("mesure %1 ± %2 incompatible avec la courbe « %3 »")
+                                             .arg(text::numAuto(age, 4), text::numAuto(error, 4), name));
+        return MethodResult::fromDensity(d, {}, true);
+    }
     if (mode == "eq") {
         const double a = p.value("a").toDouble(), b = p.value("b").toDouble(), c = p.value("c").toDouble();
         g = [=](double t) { return a * std::abs(t) * std::abs(t) + b * t + c; };
@@ -149,7 +207,16 @@ QString GaussMethod::describe(const QJsonObject& p) const
 {
     auto n = [](double v) { return text::numAuto(v, 3); };
     QString s = QStringLiteral("Gauss : N(%1 ; %2)").arg(n(p.value("age").toDouble()), n(p.value("error").toDouble()));
-    if (p.value("mode").toString() == "eq")
+    if (p.contains("input")) s = QStringLiteral("Gauss : âge %1 → N(%2 ; %3)").arg(p.value("input").toString(), n(p.value("age").toDouble()),
+                                                                                  n(p.value("error").toDouble()));
+    if (p.contains("input") && p.value("mode").toString() != QLatin1String("curve"))
+        return p.value("input").toString().contains(QLatin1String("b2k")) || p.value("input").toString().contains(QLatin1String("BP"))
+                   ? s : s + QStringLiteral(" (âge compté avant 1950)");
+    if (p.value("mode").toString() == "curve") {
+        QString c = p.value("curve").toString();
+        if (c.endsWith(QLatin1String(".csv"), Qt::CaseInsensitive)) c.chop(4);
+        s += QStringLiteral(" — courbe de référence %1").arg(c);
+    } else if (p.value("mode").toString() == "eq")
         s += QStringLiteral(" — calibration g(t) = %1·t² + %2·t + %3")
                  .arg(n(p.value("a").toDouble()), n(p.value("b").toDouble()), n(p.value("c").toDouble()));
     else

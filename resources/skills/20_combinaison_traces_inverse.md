@@ -13,13 +13,14 @@ Ces calculs sont faits par SeldonH : écris un bloc de code « calcul » (JSON) 
 Facultatifs : `level`, `tmin`, `tmax`. « Combine », « combinaison » → `combine` ; « événement » → `event` (MCMC, dispersion propre à chaque date). Le test de Ward et Wilson renvoyé n'est qu'une **information** sur l'accord des mesures : jamais une condition pour combiner, ni une preuve.
 
 **Traces MCMC** (outil `analyser_traces`) : sur les chaînes exportées par ChronoModel et jointes par l'utilisateur (Chain_all_Events.csv, Chain_all_Phases.csv), tirage par tirage. Noms de colonnes EXACTEMENT ceux de la liste du fichier joint ; bornes de phase « X Begin » et « X End ».
-- durée de A à B (B − A, en années, avec P(B postérieur à A)) : `{"method":"traces","op":"duration","from":"US 12","to":"US 14"}` ; durée d'une phase : from « X Begin », to « X End » ;
-- date entre deux colonnes (uniforme entre les deux à chaque tirage) : `{"method":"traces","op":"between","from":"Phase A End","to":"Phase B Begin"}` ;
-- densité d'une colonne (début, fin de phase, Event) : `{"method":"traces","op":"value","of":"Phase A Begin"}` ;
-- antéro-postérité (A antérieur à B ?) : `{"method":"traces","op":"order","from":"US 12","to":"US 14"}` ;
-- appartenance de C à un intervalle (deux Events, début et fin d'une phase, ou années) : `{"method":"traces","op":"inside","of":"US 5","from":"Phase A Begin","to":"Phase A End"}`.
+- durée de A à B (B − A, en années, avec P(B postérieur à A)) : `{"method":"relation","op":"duration","from":"US 12","to":"US 14"}` ; durée d'une phase : from « X Begin », to « X End » ;
+- date entre deux colonnes (uniforme entre les deux à chaque tirage) : `{"method":"relation","op":"between","from":"Phase A End","to":"Phase B Begin"}` ;
+- densité d'une colonne (début, fin de phase, Event) : `{"method":"relation","op":"value","of":"Phase A Begin"}` ;
+- antéro-postérité (A antérieur à B ?) : `{"method":"relation","op":"order","from":"US 12","to":"US 14"}` ;
+- appartenance de C à un intervalle (deux Events, début et fin d'une phase, ou années) : `{"method":"relation","op":"inside","of":"US 5","from":"Phase A Begin","to":"Phase A End"}`.
 Ces probabilités sont des proportions de tirages a posteriori, dans le modèle de l'utilisateur : pas un test de signification, pas une p-value.
-Facultatif : `level`. Sans fichier de traces joint, demande-le (Results > Export dans ChronoModel). Une durée ou une date entre des Events de traces jointes n'est JAMAIS un `event` à calculer : c'est `traces`.
+Facultatif : `level`. Sans fichier de traces joint, demande-le (Results > Export dans ChronoModel). Une durée ou une date entre des Events de traces jointes n'est JAMAIS un `event` à calculer : c'est `relation`.
+Un terme peut être une **datation hors du modèle** (objet `{"method":"c14","name":…,"age":…,"error":…}`) : `{"method":"relation","op":"duration","from":"Phase A End","to":{"method":"c14","name":"<nom>","age":<âge>,"error":<erreur>}}`. Elle est supposée indépendante du modèle : si elle en fait déjà partie, utiliser sa trace (sinon elle compte deux fois).
 
 **Calibration inverse** (outil `calibration_inverse`) : mesure attendue pour un échantillon d'une date calendaire.
 ```calcul

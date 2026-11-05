@@ -103,6 +103,7 @@ private slots:
     void showCurves();
     void saveDensityFile(const QUrl& url);
     QVector<QJsonObject> lastDatingRequests() const;
+    QVector<QJsonObject> recentDatings() const;              // datations des dernières questions, de la plus ancienne à la plus récente
     void showAbout();
     void showHelp();
     void openHelpInBrowser();
@@ -140,15 +141,25 @@ private:
         bool        drewModel = false;  // SeldonH a dessiné le modèle pour ce tour (bloc plot du modèle de langage ignoré)
         QJsonObject prompt;             // dernier prompt envoyé pour ce tour (voir promptSnapshot)
         bool        calcOnly = false;   // résultat de SeldonH affiché seul, sans réponse du modèle (lien « Demander un commentaire »)
+        bool        help = false;       // question sur l'utilisation de SeldonH : réponse en phrases, sans code ni calcul
+        QStringList suites;             // suites proposées sous la réponse (affichage seulement ; montrées sous la dernière réponse)
     };
+    QVector<QJsonObject> turnRuns_;
+    bool turnHasResults_ = false;       // journaux de ChronoModel joints à la question en cours     // demandes calculées par SeldonH pendant le tour en cours (pour les suites)
+    void computeSuites();               // suites du dernier tour, d'après turnRuns_, le modèle préparé et les traces
     bool thinkingSupported() const;                         // le modèle chargé sait réfléchir (local, gabarit « enable_thinking »)
     void updateThinkButton();
     bool wantsCalcComment(const QString& question) const;   // réglage « Commentaire après un calcul » appliqué à la question
+    bool helpTurn() const;
+    QString curvesListHtml(QString* plain = nullptr) const;  // liste complète des courbes de référence (menu, question)                                  // la question en cours porte sur l'utilisation de SeldonH
     void finishCalcOnly(const QString& shown = QString());  // termine le dernier tour sans génération (mode calculatrice)
     void applyRunExtras(const seldon::RunOutcome& out);           // modèle ChronoModel préparé par SeldonH (tableau) : dessiné, gardé
     bool saveChrSpec(const QJsonObject& spec);              // enregistre un modèle (spécification du bloc chronomodel) en .chr
     void saveTableCsv(const QUrl& url);                     // lien « Enregistrer ces lignes en CSV… »
     void requestComment(int turn);                          // « Demander un commentaire » sous un résultat affiché seul
+    void editLastQuestion();                                // « ✎ Modifier » : la dernière question revient dans la zone de saisie
+    QString modelLabel() const;
+    QString calcRequestText() const;                        // note à la place d'une réponse réduite à une demande de calcul                             // libellé court du modèle qui répond (« qwen35 4B Q4_K_M (local) »)
 
     void buildUi();
     void buildMenus();
@@ -164,6 +175,7 @@ private:
     QString truncationNotice(const Turn& t) const;
     void rememberChrDates(const QJsonObject& chr);
     static QString historyUser(const Turn& t);          // message d'un tour passé, sans ses fiches de connaissances
+    static QString calcOnlyContext(const Turn& t);      // tour « calcul seul » mis en contexte du message suivant
     QString shownAnswer(const QString& answer) const;   // bloc de modèle remplacé par un résumé (JSON seulement sur demande)
     bool modelExpected() const;                           // la conversation demande un modèle ChronoModel (bloc chronomodel admis)
     // Messages envoyés au modèle. `refs` (facultatif) : les mêmes messages sous forme compacte, pour l'instantané du prompt.
@@ -270,8 +282,17 @@ private:
     bool                 modelReady_ = false;
     bool                 loading_ = false;
     bool                 generating_ = false;
-    QString              attachName_, attachText_;
+    // Pièces jointes de la prochaine question : plusieurs fichiers possibles (sélection multiple ou 📎 répété ; un fichier
+    // de même nom remplace l'ancien). attachName_ : leurs noms, séparés par des virgules (affichage, historique).
+    struct Attachment { QString name, text; bool data = false; };   // data : lu par SeldonH (tableau, traces, courbe)
+    QVector<Attachment>  attachments_;
+    QString              attachName_;
+    QString              attachChrName_, attachResultsName_;   // fichier du .chr et des résultats joints
+    bool attachOnlyData() const;                   // aucune pièce jointe, ou seulement des données lues par SeldonH
+    void attachOne(const QString& path);
+    void updateAttachLabel();
     bool                 attachChronoResults_ = false;   // pièce jointe = résultats de ChronoModel (résumé extrait)
+    bool                 attachTraces_ = false;          // pièce jointe = traces MCMC lues par SeldonH (gardées pour les calculs)
     bool                 attachTable_ = false;           // pièce jointe = tableau de datations lu par SeldonH (tableau courant)
     QString              attachTableHtml_;               // fiche « tableau lu » montrée à l'envoi
     seldon::chronoresults::Report attachResults_;         // résultats joints, lus
@@ -288,6 +309,7 @@ private:
     seldon::ModelInfo    modelInfo_;            // modèle local chargé (pour « Optimiser pour ce modèle »)
     double               lastLocalTps_ = 0;     // vitesse de génération mesurée sur la dernière réponse locale
     bool                 continuing_ = false;   // génération en cours = suite d'une réponse coupée
+    bool                 calcCut_ = false;      // génération arrêtée par SeldonH juste après un bloc de calcul (pas par l'utilisateur)
 };
 
 #endif // MAINWINDOW_H

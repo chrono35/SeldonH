@@ -33,6 +33,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontMetrics>
+#include <QHash>
 #include <QSvgGenerator>
 
 #include "ChrScene.h"
@@ -71,6 +73,7 @@ bool CurveSpec::fromJson(const QJsonObject& o, CurveSpec& out, QString* err)
     }
 
     out.xReverse = o.value("xreverse").toBool(false);
+    out.yReverse = o.value("yreverse").toBool(false);
     out.yFromZero = o.value("yzero").toBool(true);
     out.showYAxis = o.contains("yaxis") ? o.value("yaxis").toBool(true) : !out.fill;
     const QString layout = o.value("layout").toString().trimmed().toLower();
@@ -92,10 +95,23 @@ bool CurveSpec::fromJson(const QJsonObject& o, CurveSpec& out, QString* err)
         }
         cs.fill = s.value("fill").toBool(true);
         cs.width = std::clamp(s.value("width").toDouble(1.8), 0.3, 6.0);
+        cs.points = s.value("points").toBool(false);
+        cs.dash = s.value("dash").toBool(false);
         cs.y = toVec(s.value("y"));
+        if (s.contains("y2")) {
+            cs.y2 = toVec(s.value("y2"));
+            if (s.contains("x2")) cs.x2 = toVec(s.value("x2"));
+            cs.alpha = std::clamp(s.value("alpha").toDouble(0.25), 0.02, 1.0);
+            cs.bandLine = s.contains("width");
+        }
         cs.x = s.contains("x") ? toVec(s.value("x")) : sharedX;
         if (cs.x.isEmpty() && !cs.y.isEmpty()) {            // sans x : indices
             for (int i = 0; i < cs.y.size(); ++i) cs.x.append(i);
+        }
+        if (!cs.x2.isEmpty() && cs.x2.size() != cs.y2.size()) cs.x2.clear();
+        if (!cs.y2.isEmpty() && cs.y2.size() != cs.y.size()) {
+            if (err) *err = QObject::tr("Série « %1 » : y2 doit avoir la même longueur que y.").arg(cs.name);
+            return false;
         }
         if (cs.x.size() != cs.y.size() || cs.y.size() < 2) {
             if (err) *err = QObject::tr("Série « %1 » : x et y doivent avoir la même longueur (≥ 2).").arg(cs.name);
@@ -254,6 +270,8 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
             if (std::isnan(s.x[i]) || std::isnan(s.y[i])) continue;
             xmin = std::min(xmin, s.x[i]); xmax = std::max(xmax, s.x[i]);
             ymin = std::min(ymin, s.y[i]); ymax = std::max(ymax, s.y[i]);
+            if (i < s.y2.size() && !std::isnan(s.y2[i])) { ymin = std::min(ymin, s.y2[i]); ymax = std::max(ymax, s.y2[i]); }
+            if (i < s.x2.size() && !std::isnan(s.x2[i])) { xmin = std::min(xmin, s.x2[i]); xmax = std::max(xmax, s.x2[i]); }
         }
     if (!(xmax > xmin)) { xmax = xmin + 1; }
     if (!(ymax > ymin)) { ymax = ymin + 1; }
@@ -262,7 +280,31 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
 
     const bool stacked = spec_.stacked();
     const bool showY = spec_.showYAxis && !stacked;            // en lignes : une échelle par ligne, pas d'axe commun
-    const int left = showY ? 56 : 26, right = 26, top = spec_.title.isEmpty() ? 14 : 34, bottom = 46;
+    // Légende sous le titre, hors de la zone des courbes (05/11/2026 : elle gênait la lecture), en petits caractères, sur une
+    // ou plusieurs lignes : chaque série nommée = symbole + nom, à la suite. Pas de légende en lignes (nom sur chaque ligne).
+    QFont legendFont = p.font();
+    legendFont.setPointSizeF(std::max(6.0, p.font().pointSizeF() * 0.82));
+    const QFontMetrics lfm(legendFont);
+    struct LegendItem { int series; QString text; int width; QRect box; };
+    QVector<LegendItem> legend;
+    int legendH = 0;
+    if (!stacked) {
+        const int avail = std::max(80, r.width() - 52);
+        const int rowH = lfm.height() + 3;
+        int x = 0, rows = 0;
+        for (int k = 0; k < spec_.series.size(); ++k) {
+            const QString& n = spec_.series[k].name;
+            if (n.isEmpty()) continue;
+            const QString t = lfm.elidedText(n, Qt::ElideRight, avail - 26);
+            const int w = 22 + lfm.horizontalAdvance(t) + 14;
+            if (rows == 0) rows = 1;
+            if (x > 0 && x + w > avail) { x = 0; ++rows; }
+            legend.append({ k, t, w, QRect(x, (rows - 1) * rowH, w, rowH) });
+            x += w;
+        }
+        legendH = rows * rowH + (rows ? 4 : 0);
+    }
+    const int left = showY ? 56 : 26, right = 26, top = (spec_.title.isEmpty() ? 14 : 34) + legendH, bottom = 46;
     const QRect pr(r.left() + left, r.top() + top, r.width() - left - right, r.height() - top - bottom);
     if (pr.width() < 20 || pr.height() < 20) return;
 
@@ -270,7 +312,10 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
         const double t = (x - xmin) / (xmax - xmin);
         return pr.left() + (spec_.xReverse ? 1.0 - t : t) * pr.width();
     };
-    auto Y = [&](double y) { return pr.bottom() - (y - ymin) / (ymax - ymin) * pr.height(); };
+    auto Y = [&](double y) {
+        const double t = (y - ymin) / (ymax - ymin);
+        return pr.bottom() - (spec_.yReverse ? 1.0 - t : t) * pr.height();
+    };
 
     QFont f = p.font();
     p.setPen(fg);
@@ -287,12 +332,13 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     for (double x = std::ceil(xmin / sx) * sx; x <= xmax + 1e-9; x += sx) {
         p.setPen(grid); p.drawLine(QPointF(X(x), pr.top()), QPointF(X(x), pr.bottom()));
         p.setPen(fg);
-        p.drawText(QRectF(X(x) - 30, pr.bottom() + 4, 60, 16), Qt::AlignCenter, QString::number(x, 'g', 6));
+        p.drawText(QRectF(X(x) - 30, pr.bottom() + 4, 60, 16), Qt::AlignCenter, QString::number(std::abs(x) < 1e-9 * sx ? 0.0 : x, 'g', 6));
     }
     for (double y = std::ceil(ymin / sy) * sy; showY && y <= ymax + 1e-9; y += sy) {
         p.setPen(grid); p.drawLine(QPointF(pr.left(), Y(y)), QPointF(pr.right(), Y(y)));
         p.setPen(fg);
-        p.drawText(QRectF(r.left() + 2, Y(y) - 8, left - 8, 16), Qt::AlignRight | Qt::AlignVCenter, QString::number(y, 'g', 4));
+        p.drawText(QRectF(r.left() + 2, Y(y) - 8, left - 8, 16), Qt::AlignRight | Qt::AlignVCenter,
+                   QString::number(std::abs(y) < 1e-9 * sy ? 0.0 : y, 'g', 4));      // pas de « 4e-20 » à la place de 0
     }
     p.setPen(fg);
     p.drawRect(pr);
@@ -310,6 +356,40 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     auto drawSeries = [&](const CurveSeries& s, int ci, const std::function<double(double)>& Yf) {
         QColor c, bc;
         seriesColors(s, ci, c, bc, stacked);
+        if (!s.y2.isEmpty()) {                             // bande entre y et y2
+            QPainterPath band;
+            bool first = true;
+            for (int i = 0; i < s.x.size(); ++i) {
+                if (std::isnan(s.x[i]) || std::isnan(s.y[i])) continue;
+                const QPointF pt(X(s.x[i]), Yf(s.y[i]));
+                if (first) { band.moveTo(pt); first = false; } else band.lineTo(pt);
+            }
+            for (int i = s.x.size() - 1; i >= 0; --i) {
+                const double xb = s.x2.isEmpty() ? s.x[i] : s.x2[i];
+                if (!std::isnan(xb) && !std::isnan(s.y2[i])) band.lineTo(QPointF(X(xb), Yf(s.y2[i])));
+            }
+            band.closeSubpath();
+            QColor fc = c;
+            fc.setAlphaF(s.alpha);
+            p.fillPath(band, fc);
+            if (s.bandLine) {
+                p.setPen(QPen(c, s.width, s.dash ? Qt::DashLine : Qt::SolidLine));
+                p.setBrush(Qt::NoBrush);
+                p.drawPath(band);
+            }
+            return;
+        }
+        if (s.points) {                                    // nuage de points : petits disques semi-transparents
+            QColor dc = c;
+            dc.setAlphaF(s.x.size() > 800 ? 0.35 : 0.7);
+            p.setPen(Qt::NoPen);
+            p.setBrush(dc);
+            const double rad = s.x.size() > 800 ? 1.6 : 2.4;
+            for (int i = 0; i < s.x.size(); ++i)
+                if (!std::isnan(s.x[i]) && !std::isnan(s.y[i])) p.drawEllipse(QPointF(X(s.x[i]), Yf(s.y[i])), rad, rad);
+            p.setBrush(Qt::NoBrush);
+            return;
+        }
         QPainterPath path;
         bool started = false;
         for (int i = 0; i < s.x.size(); ++i) {
@@ -343,7 +423,7 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
                 }
             }
         }
-        p.setPen(QPen(c, s.width));
+        p.setPen(QPen(c, s.width, s.dash ? Qt::DashLine : Qt::SolidLine));
         p.setBrush(Qt::NoBrush);
         p.drawPath(path);
     };
@@ -383,24 +463,36 @@ void CurveWidget::paintTo(QPainter& p, const QRect& r) const
     for (const CurveSeries& s : spec_.series) drawSeries(s, ci++, Y);
     p.setClipping(false);
 
-    // Légende (séries nommées), largeur adaptée au texte le plus long
-    int legendW = 60;
-    for (const CurveSeries& s : spec_.series)
-        legendW = std::max(legendW, p.fontMetrics().horizontalAdvance(s.name));
-    legendW = std::min(legendW, pr.width() / 2);
-    int ly = pr.top() + 6;
-    ci = 0;
-    for (const CurveSeries& s : spec_.series) {
-        QColor c, bc;
-        seriesColors(s, ci++, c, bc);
-        if (s.name.isEmpty()) continue;
-        const int x0 = pr.right() - legendW - 30;
-        p.setPen(QPen(c, 3));
-        p.drawLine(x0, ly + 7, x0 + 18, ly + 7);
-        p.setPen(fg);
-        p.drawText(QRect(x0 + 22, ly, legendW + 4, 14), Qt::AlignLeft | Qt::AlignVCenter,
-                   p.fontMetrics().elidedText(s.name, Qt::ElideRight, legendW));
-        ly += 16;
+    // Légende : sous le titre, centrée ligne par ligne
+    if (!legend.isEmpty()) {
+        p.save();
+        p.setFont(legendFont);
+        const int y0 = r.top() + (spec_.title.isEmpty() ? 6 : 30);
+        QHash<int, int> rowWidth;
+        for (const LegendItem& it : legend) rowWidth[it.box.y()] = std::max(rowWidth.value(it.box.y()), it.box.right() + 1);
+        for (const LegendItem& it : legend) {
+            const CurveSeries& s = spec_.series[it.series];
+            QColor c, bc;
+            seriesColors(s, it.series, c, bc);
+            const int xr = r.left() + (r.width() - rowWidth.value(it.box.y())) / 2 + it.box.x();
+            const int yc = y0 + it.box.y() + it.box.height() / 2;
+            if (s.points) {
+                p.setPen(Qt::NoPen);
+                p.setBrush(c);
+                p.drawEllipse(QPointF(xr + 9, yc), 2.5, 2.5);
+                p.setBrush(Qt::NoBrush);
+            } else if (!s.y2.isEmpty()) {
+                QColor fc = c;
+                fc.setAlphaF(std::max(0.35, s.alpha));
+                p.fillRect(QRectF(xr, yc - 4, 18, 8), fc);
+            } else {
+                p.setPen(QPen(c, 2, s.dash ? Qt::DashLine : Qt::SolidLine));
+                p.drawLine(xr, yc, xr + 18, yc);
+            }
+            p.setPen(fg);
+            p.drawText(QRect(xr + 22, y0 + it.box.y(), it.width - 22, it.box.height()), Qt::AlignLeft | Qt::AlignVCenter, it.text);
+        }
+        p.restore();
     }
 }
 
@@ -424,7 +516,9 @@ FigurePanel::FigurePanel(QWidget* parent) : QWidget(parent)
     tabs_->setDocumentMode(true);
     lay->addWidget(tabs_, 1);
 
-    placeholder_ = new QLabel(tr("Aucune figure.\nLes courbes calculées par SeldonH s'ouvrent ici (clic sur une figure de la conversation)."));
+    placeholder_ = new QLabel(tr("Aucune figure pour l'instant.\n\nIci s'ouvrent les graphiques calculés par SeldonH : densités calibrées et régions HPD, "
+                                 "Events, durées, nuages de points de corrélation, scènes d'un modèle .chr, et l'aide (F1).\n\n"
+                                 "Un clic sur une vignette de la conversation la rouvre ici ; « Enregistrer… » l'exporte en PNG ou SVG."));
     static_cast<QLabel*>(placeholder_)->setAlignment(Qt::AlignCenter);
     static_cast<QLabel*>(placeholder_)->setWordWrap(true);
     lay->addWidget(placeholder_, 1);

@@ -68,6 +68,13 @@ public:
     // Nom d'une courbe connue de la méthode écrit dans un texte (minuscules, sans accents), en mot entier ; le plus
     // long l'emporte (« intcal98_fix » plutôt que « intcal98 »). `pos` reçoit sa position. Vide si aucun.
     static QString findNamed(const QString& methodId, const QString& foldedText, int* pos = nullptr);
+    // Courbe jointe à la conversation (05/11/2026 : courbe de référence du plugin Gauss, ex. Curve_X_Gauss_ref.csv exporté
+    // par ChronoModel) : prioritaire sur les dossiers, gardée pour la session. Faux si le texte n'est pas une courbe lisible.
+    static bool addSession(const QString& methodId, const QString& fileName, const QByteArray& text, QString* error = nullptr);
+    static void clearSession();
+    // Courbe de référence au format du plugin Gauss (« t, valeur, erreur », virgules, point décimal) ? En-tête « X Axis,G,err »
+    // des exports de ChronoModel ou nom « …gauss_ref… » ; pas une courbe de vitesse (« _GP_ »).
+    static bool looksLikeGaussRef(const QString& fileName, const QString& text);
 };
 
 } // namespace seldon

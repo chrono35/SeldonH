@@ -29,6 +29,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QFont>
+#include <QFontDatabase>
 #include <QIcon>
 #include <QHostAddress>
 #include <QLocale>
@@ -72,6 +74,19 @@ int main(int argc, char *argv[])
     for (int s : { 16, 32, 48, 64, 128, 256, 512 })
         icon.addFile(QString(":/icons/seldonh_%1.png").arg(s), QSize(s, s));
     a.setWindowIcon(icon);
+
+    // Polices intégrées (SIL Open Font License) : même rendu sous macOS, Windows et Linux, sans dépendre des polices
+    // installées. Source Sans 3 pour l'interface et le dialogue, Source Code Pro pour le code. Taille : celle du système,
+    // un peu agrandie (Source Sans a un œil plus petit que les polices système).
+    for (const char* f : { "SourceSans3-Regular", "SourceSans3-It", "SourceSans3-Semibold", "SourceSans3-Bold", "SourceSans3-BoldIt",
+                           "SourceCodePro-Regular" })
+        QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/%1.ttf").arg(QLatin1String(f)));
+    if (QFontDatabase::hasFamily(QStringLiteral("Source Sans 3"))) {
+        QFont f(QStringLiteral("Source Sans 3"));
+        const QFont sys = QApplication::font();
+        if (sys.pointSizeF() > 0) f.setPointSizeF(sys.pointSizeF() * 1.08);
+        QApplication::setFont(f);
+    }
 
     QTranslator translator;
     const QStringList uiLanguages = QLocale::system().uiLanguages();

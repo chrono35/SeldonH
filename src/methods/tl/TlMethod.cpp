@@ -55,18 +55,19 @@ QVector<QJsonObject> TlMethod::parse(const QString& question) const
     if (!ctx.match(q).hasMatch()) return out;
 
     static const QRegularExpression refRe(
-        R"((?:annee\s+(?:de\s+)?(?:reference|mesure)|mesure[e]?\s+en|reference\s*[:=]?|refyear\s*[=:]?)"
+        R"((?:annee\s+(?:de\s+)?(?:reference|mesure)|mesure(?:e|s|es)?\s+en|reference\s*[:=]?|refyear\s*[=:]?)"
         R"(|measured\s+in|measurement\s+(?:year|in)|year\s+of\s+(?:measurement|reference)|reference\s+year|ref\.?\s+year)\s*[:=]?\s*(\d{4}))");
     const auto rm = refRe.match(q);
 
     for (const text::ValueError& ve : text::findValueErrors(q)) {
         if (out.size() >= 6) break;
-        double scale = 1.0;
-        const QString after = q.mid(ve.start + ve.length, 12);
-        if (QRegularExpression(R"(^\s*(ka|k\.a\.|kyr|milliers|thousand))").match(after).hasMatch()) scale = 1000.0;
+        // Âge en ka, Ma… (« OSL 12,5 ± 1,2 ka », « TL 1,2 ± 0,1 Ma ») : ramené en années avant l'année de mesure.
+        const text::AgeUnit unit = text::ageUnitAt(q, ve.start + ve.length);
+        const double scale = unit.scale;
         QJsonObject o;
         o["age"] = ve.value * scale;
         o["error"] = ve.error * scale;
+        if (scale != 1.0) o["input"] = QStringLiteral("%1 ± %2 %3").arg(text::numAuto(ve.value, 4), text::numAuto(ve.error, 4), unit.label);
         if (rm.hasMatch()) {
             o["ref_year"] = rm.captured(1).toInt();
         } else {
@@ -102,6 +103,9 @@ MethodResult TlMethod::compute(const QJsonObject& p) const
 
 QString TlMethod::describe(const QJsonObject& p) const
 {
+    const QString yrs = QStringLiteral("%1 ± %2 ans").arg(text::num(p.value("age").toDouble(), 0), text::num(p.value("error").toDouble(), 0));
+    if (p.contains("input"))                       // âge saisi en ka, Ma : rappelé, avec sa valeur en années
+        return QStringLiteral("TL/OSL : %1 (%2) avant %3").arg(p.value("input").toString(), yrs, QString::number(p.value("ref_year").toInt()));
     return QStringLiteral("TL/OSL : %1 ± %2 ans avant %3")
         .arg(text::numAuto(p.value("age").toDouble(), 1), text::numAuto(p.value("error").toDouble(), 1),
              QString::number(p.value("ref_year").toInt()));

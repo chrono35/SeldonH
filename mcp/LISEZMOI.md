@@ -12,17 +12,20 @@ parle en JSON-RPC, un message par ligne, sur l'entrée et la sortie standard.
 
 ## Outils
 
-Les 14 outils de SeldonH : `calibrer_radiocarbone`, `calibrer_f14c`, `dater_luminescence`, `densite_gauss`,
+Les 15 outils de SeldonH : `calibrer_radiocarbone`, `calibrer_f14c`, `dater_luminescence`, `densite_gauss`,
 `densite_uniforme`, `dater_archeomagnetisme`, `calculer_evenement` (MCMC, avec notifications de progression),
-`combiner_dates`, `comparer_dates` (laquelle de deux dates est la plus ancienne), `analyser_traces`, `tableau`
+`combiner_dates`, `courbe_chronomodel` (courbe estimée par ChronoModel : valeur, vitesse, accélération, date d'atteinte d'une valeur, date d'une mesure sur la courbe ou sur sa vitesse, tracé des courbes de vitesse et d'accélération dans `extra_plots`), `comparer_dates` (ordre, durée, date entre, appartenance ou corrélation de dates ; la corrélation renvoie aussi les nuages de points dans `extra_plots`), `analyser_traces`, `tableau`
 (tableau de datations : sélection, extraction, datation, événement, modèle),
 `calibration_inverse`, `creer_densite`, `courbes_disponibles`. `seldonh-mcp --list` les affiche.
 
 Différences avec l'application :
 - `tableau` + `file` : chemin d'un tableau CSV, TSV ou texte (lu et gardé). Les .xlsx et .ods sont lus par l'application,
   pas par ce serveur (QtCore seul) : enregistrez-les d'abord en CSV. Les lignes extraites et le modèle préparé sont rendus dans le texte.
-- `analyser_traces` : argument supplémentaire `file`, chemin du fichier de traces exporté par ChronoModel
+- `analyser_traces` : argument supplémentaire `file`, chemin du fichier de traces exporté par ChronoModel (aussi accepté par `comparer_dates` quand un terme est une colonne de traces)
   (`Chain_all_Events.csv`…), lu sur le disque ; il reste chargé pour les appels suivants.
+- `courbe_chronomodel` : arguments supplémentaires `file` (trace des splines `Curve_X_Splines.csv`, ou carte de densité
+  `Curve_X_Map.csv`) et `traces_file` (facultatif : `Chain_all_Events.csv` du même calcul, pour les chaînes et les noms
+  des Events) ; lus sur le disque et gardés pour les appels suivants. Les graphiques sont dans `extra_plots`.
 - `creer_densite` : argument supplémentaire `dossier` ; le fichier CSV y est écrit (par exemple le dossier
   `Calib/Density` de ChronoModel). Sans `dossier`, rien n'est écrit.
 - Pas de panneau de graphiques : le texte du résultat le dit, et les densités tabulées (x, y) sont dans

@@ -7,12 +7,14 @@ INCLUDEPATH += $$METHODS_DIR
 SOURCES += \
     $$METHODS_DIR/common/Combination.cpp \
     $$METHODS_DIR/common/DataTable.cpp \
+    $$METHODS_DIR/common/FuzzyWords.cpp \
     $$METHODS_DIR/common/Density.cpp \
     $$METHODS_DIR/common/DensityFile.cpp \
     $$METHODS_DIR/common/EventMcmc.cpp \
     $$METHODS_DIR/common/InverseCalibration.cpp \
     $$METHODS_DIR/common/RefCurve.cpp \
     $$METHODS_DIR/common/CurveStore.cpp \
+    $$METHODS_DIR/common/CurveTraces.cpp \
     $$METHODS_DIR/common/Method.cpp \
     $$METHODS_DIR/common/MethodRegistry.cpp \
     $$METHODS_DIR/common/MethodRunner.cpp \
@@ -23,17 +25,20 @@ SOURCES += \
     $$METHODS_DIR/gauss/GaussMethod.cpp \
     $$METHODS_DIR/unif/UnifMethod.cpp \
     $$METHODS_DIR/tl/TlMethod.cpp \
-    $$METHODS_DIR/am/AmMethod.cpp
+    $$METHODS_DIR/am/AmMethod.cpp \
+    $$METHODS_DIR/density/DensityMethod.cpp
 
 HEADERS += \
     $$METHODS_DIR/common/Combination.h \
     $$METHODS_DIR/common/DataTable.h \
+    $$METHODS_DIR/common/FuzzyWords.h \
     $$METHODS_DIR/common/Density.h \
     $$METHODS_DIR/common/DensityFile.h \
     $$METHODS_DIR/common/EventMcmc.h \
     $$METHODS_DIR/common/InverseCalibration.h \
     $$METHODS_DIR/common/RefCurve.h \
     $$METHODS_DIR/common/CurveStore.h \
+    $$METHODS_DIR/common/CurveTraces.h \
     $$METHODS_DIR/common/Method.h \
     $$METHODS_DIR/common/MethodRegistry.h \
     $$METHODS_DIR/common/MethodRunner.h \
@@ -46,7 +51,8 @@ HEADERS += \
     $$METHODS_DIR/gauss/GaussMethod.h \
     $$METHODS_DIR/unif/UnifMethod.h \
     $$METHODS_DIR/tl/TlMethod.h \
-    $$METHODS_DIR/am/AmMethod.h
+    $$METHODS_DIR/am/AmMethod.h \
+    $$METHODS_DIR/density/DensityMethod.h
 
 # Courbes de référence de ChronoModel, un fichier .qrc par méthode
 RESOURCES += \

@@ -56,6 +56,8 @@ public:
     // bloc ```calcul). Le moteur le désactive de lui-même si le serveur le refuse (toolsUnavailable).
     void setTools(const QJsonArray& tools) { tools_ = tools; }
     bool toolsActive() const { return !tools_.isEmpty() && !toolsUnsupported_; }
+    // Outils retirés de la prochaine requête seulement (question d'aide) ; la déclaration et le message système restent.
+    void setToolsSuspended(bool s) { toolsSuspended_ = s; }
     static constexpr int kMaxToolRounds = 4;      // allers-retours outil -> modèle pour une même question
 
 public slots:
@@ -109,6 +111,7 @@ private:
 
     // Appel d'outils
     QJsonArray            tools_;
+    bool                  toolsSuspended_ = false;     // question d'aide : requête sans outils
     bool                  toolsUnsupported_ = false;
     bool                  toolsRetried_ = false;
     bool                  sentTools_ = false;    // la requête en cours déclare des outils

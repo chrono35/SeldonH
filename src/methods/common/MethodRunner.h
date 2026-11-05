@@ -56,6 +56,9 @@ struct RunOutcome {
     QJsonObject plot;               // bloc « plot » (vide si rien à tracer)
     QVector<QJsonObject> extraPlots; // figures supplémentaires dans leur propre onglet (traces MCMC d'un événement)
     QJsonObject chrSpec;            // modèle ChronoModel préparé par SeldonH (tableau, action « model ») : à proposer à l'enregistrement
+    QVector<QJsonObject> requests;  // demandes exécutées (normalisées) : suites proposées sous la réponse
+    QString     title;              // opération(s) réellement calculée(s), en clair (« Calibration 14C », « Durée entre … ») :
+                                    // titre de la fiche, pour que l'utilisateur contrôle le choix de l'outil
 };
 
 // Ordre de deux dates INDÉPENDANTES (densités calibrées) : densité de l'écart B − A, f(x) = ∫ f_A(a) f_B(a + x) da,
@@ -80,7 +83,11 @@ public:
     // Une demande de création de modèle ne déclenche aucun calcul automatique (résultat vide).
     static RunOutcome analyzeQuestion(const QString& question, DateFormat format = DateFormat::BcAd);
     // Datations (demandes de calcul) lues dans une question, sans les calculer ; vide pour une demande de modèle.
-    static QVector<QJsonObject> requestsFromQuestion(const QString& question);
+    // Si rien n'est reconnu, les mots déclencheurs mal orthographiés sont corrigés (FuzzyWords) et la question corrigée est
+    // relue ; `fixes` (facultatif) décrit alors les corrections (« « nivau » → « niveau » »), vide sinon.
+    static QVector<QJsonObject> requestsFromQuestion(const QString& question, QString* fixes = nullptr);
+    // Même lecture, sans correction des mots.
+    static QVector<QJsonObject> requestsFromQuestionExact(const QString& question);
     // Question de suivi qui demande seulement un autre niveau de confiance (« et à 50 % ? ») : les datations
     // précédentes (`previous`), avec ce niveau. Vide si la question contient ses propres datations ou pas de niveau.
     static QVector<QJsonObject> followUpRequests(const QString& question, const QVector<QJsonObject>& previous,
@@ -111,23 +118,50 @@ public:
     // Vrai si la question demande de combiner ses datations (« combine », « combinaison ») sans parler d'événement
     // (« événement » → MCMC, voir asksEvent).
     static bool asksCombine(const QString& question);
-    // Ordre de deux datations (« laquelle est la plus ancienne ? », « A est-elle antérieure à B ? », « quelle date est
-    // avant l'autre ? ») : avec exactement deux datations dans la question, une seule demande
-    //   {"method":"order", "a":{"method":"c14",…}, "b":{"method":"c14",…}}
-    // qui donne P(A antérieure à B), P(B antérieure à A) et la densité de l'écart B − A (datations indépendantes ; chacune
-    // peut être une datation, un « combine » ou un « event »). Sert aussi à imposer la fiche « Ordre de deux dates ».
+    // Relation entre deux ou trois termes : un seul calcul « relation »
+    //   {"method":"relation", "op":"duration"|"between"|"value"|"order"|"inside", "from":A, "to":B, "of":C, "level":95}
+    // où chaque terme est une colonne des traces MCMC chargées (« US 12 », « Phase A End »), une datation indépendante
+    // (objet {"method":"c14",…}, « combine » ou « event ») ou une année fixe. Densité d'un terme (value : of), durée
+    // B − A (duration), date uniforme entre A et B (between), P(A antérieur à B) (order), P(C dans [A ; B]) (inside).
+    // Calcul exact sur les densités s'il n'y a ni colonne ni « between », sinon tirage par tirage (colonnes : leurs
+    // tirages ; datations : tirées par inverse de leur fonction de répartition). Les anciens noms « order » (a, b) et
+    // « traces » sont des alias, avec leur opération par défaut (order ; duration, ou value avec « of »).
+    // asksOrder : la question compare deux dates (« laquelle est la plus ancienne ? », « A est-elle antérieure à B ? »,
+    // « quelle date est avant l'autre ? ») ; avec deux datations dans la question, demande « relation » op « order ».
     static bool asksOrder(const QString& question);
-    // Traces MCMC chargées (traces::loaded) et colonnes citées dans la question : demande « traces » (durée, date entre
-    // deux colonnes, densité d'une colonne). Vide si aucune trace chargée ou rien de reconnu.
-    //   « durée entre N(500) et N(200) » -> {"method":"traces","op":"duration","from":"N(500)","to":"N(200)"}
+    // La question relie des dates : ordre, durée ou écart, date entre deux termes, appartenance à un intervalle.
+    static bool asksRelation(const QString& question);
+    // Traces MCMC chargées (traces::loaded) et colonnes citées dans la question, éventuellement avec des datations
+    // écrites dans la question (relation mixte) : demande « relation ». Vide si aucune trace chargée ou rien de reconnu.
+    //   « durée entre N(500) et N(200) » -> {"method":"relation","op":"duration","from":"N(500)","to":"N(200)"}
+    //   « durée entre la fin de la phase A et Ly-1 2450 ± 30 BP » -> {"method":"relation","op":"duration",
+    //      "from":"Phase A End","to":{"method":"c14","age":2450,"error":30,"name":"Ly-1"}}
     static QVector<QJsonObject> tracesFromQuestion(const QString& question);
+    // Courbe de ChronoModel chargée (curves::splines ou curves::maps) et question sur cette courbe : demande « curve ».
+    //   « vitesse entre -500 et 300 » -> {"method":"curve","op":"rate","from":"-500","to":"300"}
+    //   « vitesse entre Y=1,5 et Y=24,2 » -> {"method":"curve","op":"rate_values","y1":1.5,"y2":24.2,"dim":"Y"}
+    //   « probabilité que X = 10 en 200 » -> {"method":"curve","op":"value","t":"200","y":10}
+    //   « à quelle date la courbe atteint 0 ? » -> {"method":"curve","op":"crossing","y":0}
+    // Objet vide si aucune courbe n'est chargée ou si la question n'est pas reconnue (le modèle de langage s'en charge).
+    static QJsonObject curveFromQuestion(const QString& question);
+    // Relation avec des datations des questions précédentes : « combien de temps sépare la date précédente de 14C
+    // 3660 ± 25 ? » (une datation dans la question + la dernière de la conversation), « quelle durée entre ces deux
+    // dates ? » (les deux dernières). `previous` : datations de la conversation, de la plus ancienne à la plus récente.
+    // Il faut un mot qui renvoie à ces dates (précédente, dernière, ces deux, les deux…) et une relation reconnue
+    // (durée, ordre, date entre) ; vide sinon.
+    // `previous` : datations des questions précédentes ; un objet {"_column": "<nom>"} désigne une colonne des traces jointes.
+    static QVector<QJsonObject> relationWithPrevious(const QString& question, const QVector<QJsonObject>& previous);
     // Calibration inverse demandée dans la question : « quel âge 14C attendre pour un échantillon de 6300 av. J.-C. ? »,
     // « quelle inclinaison pour l'an 1200 ± 20 ? », « calibration inverse entre 800 et 900 ». Année en BC/AD lue comme
     // l'affichage (N av. J.-C. = 1 − N) ; t_error seulement s'il est écrit. Objet vide si ce n'en est pas une.
     static QJsonObject inverseFromQuestion(const QString& question);
     // Réponse du modèle à l'écran : blocs « calcul », blocs json de calcul et JSON de calcul écrit dans le texte
-    // remplacés par une mention (« 🧮 Calcul confié à SeldonH ») ; tout est montré si l'utilisateur a demandé le JSON.
+    // remplacés par une mention (« Calcul confié à SeldonH ») ; tout est montré si l'utilisateur a demandé le JSON.
     static QString hideCalcBlocks(const QString& markdown, bool showJson);
+    // Dernier bloc de calcul COMPLET d'une réponse (```calcul, ou ```json qui contient une demande de calcul) : position de
+    // début et de fin (après la clôture). Faux s'il n'y en a pas. Sert à arrêter la génération après la demande de calcul :
+    // ce que le modèle écrit ensuite (résultat supposé) serait inventé.
+    static bool lastCalcBlock(const QString& markdown, qsizetype* start, qsizetype* end);
     // Vrai si la question demande de superposer les densités (« sur le même graphe », « superposées ») : sinon
     // chaque densité est tracée sur sa propre ligne.
     static bool asksOverlay(const QString& question);
@@ -135,9 +169,27 @@ public:
     // « que penser de », « est-ce cohérent », « why », « interpret »…). Sinon, un calcul fait par SeldonH est affiché seul
     // (mode calculatrice), sans réponse du modèle de langage.
     static bool asksCommentary(const QString& question);
+    // Question sur l'utilisation de SeldonH (« comment faire une datation ? », « que sais-tu faire ? », « how do I… »).
+    // L'appelant vérifie qu'elle ne contient pas de calcul (requestsFromQuestion vide). Réponse attendue : phrases en
+    // langage naturel que l'utilisateur peut taper, ou renvoi à l'aide ; ni code, ni outil, ni calcul (05/11/2026).
+    static bool asksHowTo(const QString& question);
+    // Unité d'âge d'une datation TL/OSL ou gaussienne écrite en JSON (« "unit":"ka" », « "origin":"BP" ») : âge et erreur
+    // ramenés en années (TL : avant l'année de mesure ; Gauss : année calendaire, origine 1950 (ka BP) ou 2000 avec
+    // « "origin":"b2k" »). Les clés « unit » et « origin » sont retirées ; « input » garde la saisie.
+    static QJsonObject withAgeUnit(QJsonObject d, const QString& method);
+    // « Liste les courbes de réf », « quelles courbes de calibration sont disponibles ? » : SeldonH affiche lui-même la liste
+    // complète (le modèle n'en recopiait qu'une partie, 05/11/2026).
+    static bool asksCurveList(const QString& question);
+    static QString helpHint();         // consigne ajoutée au message pour une telle question
+    // Retire les blocs de code (```…```) d'une réponse : réponse d'aide, où un bloc ne serait qu'un exemple.
+    static QString stripCodeBlocks(const QString& answer);
     // En-tête du bloc de résultat envoyé au modèle : les valeurs sont déjà affichées dans la fiche de SeldonH, le modèle
     // ne les recopie pas. externalResultHeader() : pour un assistant qui ne voit pas la fiche (serveur MCP).
     static QString shownResultHeader();
+    // Titre lisible d'une demande de calcul (« Calibration 14C », « Event « Four » (MCMC, 3 datations) »), sans code.
+    static QString operationTitle(const QJsonObject& request);
+    // Marque placée en tête d'une fiche de calcul (commentaire HTML lu par ChatView, qui en fait le bandeau de la fiche).
+    static QString cardMarker(const QString& title);
     static QString externalResultHeader();
     // La question demande explicitement les traces des chaînes MCMC (« avec les traces », « trace de θ », « trace plot »…).
     static bool asksTraces(const QString& question);

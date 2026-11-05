@@ -39,6 +39,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QRegularExpression>
 
 #include <memory>
 #include <vector>
@@ -52,7 +53,13 @@ QStringList gRoots;                                              // dossiers sup
 QHash<QString, std::shared_ptr<RefCurve>> gCache;
 std::vector<std::shared_ptr<RefCurve>> gRetired;                 // courbes remplacées : gardées en vie (pointeurs en cours d'usage)
 
-QString extOf(const QString& methodId) { return methodId == QLatin1String("am") ? QStringLiteral("ref") : QStringLiteral("14c"); }
+QHash<QString, QString> gSessionPaths;                           // « méthode/nom » -> nom du fichier joint
+QString extOf(const QString& methodId)
+{
+    if (methodId == QLatin1String("am")) return QStringLiteral("ref");
+    if (methodId == QLatin1String("gauss") || methodId == QLatin1String("density")) return QStringLiteral("csv");   // Calib/Gauss, Calib/Density
+    return QStringLiteral("14c");
+}
 
 QStringList dirsOf(const QString& methodId)
 {
@@ -86,6 +93,11 @@ QString findFile(const QString& methodId, const QString& name)
 QStringList CurveStore::names(const QString& methodId)
 {
     QStringList out;
+    {
+        QMutexLocker lock(&gMutex);
+        for (auto it = gSessionPaths.cbegin(); it != gSessionPaths.cend(); ++it)
+            if (it.key().startsWith(methodId + '/')) out << it.key().mid(methodId.size() + 1);
+    }
     for (const QString& dir : dirsOf(methodId))
         for (const QFileInfo& fi : curveFiles(dir, methodId)) {
             const QString n = fi.completeBaseName().toLower();
@@ -100,6 +112,8 @@ QString CurveStore::subdir(const QString& methodId)
     if (methodId == QLatin1String("c14")) return QStringLiteral("14C");
     if (methodId == QLatin1String("f14c")) return QStringLiteral("F14C");
     if (methodId == QLatin1String("am")) return QStringLiteral("AM");
+    if (methodId == QLatin1String("gauss")) return QStringLiteral("Gauss");
+    if (methodId == QLatin1String("density")) return QStringLiteral("Density");
     return methodId;
 }
 
@@ -107,9 +121,13 @@ void CurveStore::setExtraRoots(const QStringList& roots)
 {
     QMutexLocker lock(&gMutex);
     gRoots = roots;
-    for (auto it = gCache.begin(); it != gCache.end(); ++it)
+    // Courbes jointes à la conversation : gardées (elles ne viennent d'aucun dossier).
+    QHash<QString, std::shared_ptr<RefCurve>> keep;
+    for (auto it = gCache.begin(); it != gCache.end(); ++it) {
+        if (gSessionPaths.contains(it.key().left(it.key().size() - 2))) { keep.insert(it.key(), it.value()); continue; }
         if (it.value()) gRetired.push_back(it.value());
-    gCache.clear();
+    }
+    gCache = keep;
 }
 
 QStringList CurveStore::extraRoots()
@@ -139,12 +157,57 @@ QString CurveStore::findNamed(const QString& methodId, const QString& text, int*
 
 QString CurveStore::sourceOf(const QString& methodId, const QString& name)
 {
+    {
+        QString n = name.toLower();
+        if (n.endsWith(QLatin1String(".csv"))) n.chop(4);
+        QMutexLocker lock(&gMutex);
+        if (gSessionPaths.contains(methodId + '/' + n)) return QStringLiteral("📎 ") + gSessionPaths.value(methodId + '/' + n);
+    }
     return findFile(methodId, name);
 }
 
-const RefCurve* CurveStore::get(const QString& methodId, const QString& name, CurveFormat fmt, bool asF14C)
+bool CurveStore::addSession(const QString& methodId, const QString& fileName, const QByteArray& text, QString* error)
 {
-    const QString key = methodId + '/' + name.toLower() + (asF14C ? "#f" : "#a");
+    auto c = std::make_shared<RefCurve>();
+    std::string err;
+    if (!parseRefCurveSimple(text.toStdString(), *c, &err)) { if (error) *error = QString::fromStdString(err); return false; }
+    const QString n = QFileInfo(fileName).completeBaseName().toLower();
+    c->name = n.toStdString();
+    QMutexLocker lock(&gMutex);
+    const QString key = methodId + '/' + n;
+    for (const char* suffix : { "#a", "#f" })
+        if (auto it = gCache.find(key + QLatin1String(suffix)); it != gCache.end()) { if (it.value()) gRetired.push_back(it.value()); gCache.erase(it); }
+    gCache.insert(key + QStringLiteral("#a"), c);
+    gSessionPaths.insert(key, QFileInfo(fileName).fileName());
+    return true;
+}
+
+void CurveStore::clearSession()
+{
+    QMutexLocker lock(&gMutex);
+    for (auto it = gSessionPaths.cbegin(); it != gSessionPaths.cend(); ++it)
+        for (const char* suffix : { "#a", "#f" })
+            if (auto c = gCache.find(it.key() + QLatin1String(suffix)); c != gCache.end()) { if (c.value()) gRetired.push_back(c.value()); gCache.erase(c); }
+    gSessionPaths.clear();
+}
+
+bool CurveStore::looksLikeGaussRef(const QString& fileName, const QString& text)
+{
+    const QString f = QFileInfo(fileName).fileName().toLower();
+    if (f.contains(QLatin1String("_gp_")) || f.contains(QLatin1String("_gs_"))) return false;     // vitesse, accélération
+    const bool named = f.contains(QLatin1String("gauss_ref")) || f.contains(QLatin1String("gaussref"));
+    const bool header = text.left(600).contains(QRegularExpression(QStringLiteral("(?:^|[\r\n])\s*X Axis\s*,\s*G\s*,\s*err"),
+                                                                  QRegularExpression::CaseInsensitiveOption));
+    if (!named && !header) return false;
+    RefCurve c;
+    return parseRefCurveSimple(text.toStdString(), c);
+}
+
+const RefCurve* CurveStore::get(const QString& methodId, const QString& name0, CurveFormat fmt, bool asF14C)
+{
+    QString name = name0.toLower();
+    if (name.endsWith(QLatin1String(".csv"))) name.chop(4);     // plugin Gauss du .chr : « courbe.csv »
+    const QString key = methodId + '/' + name + (asF14C ? "#f" : "#a");
     {
         QMutexLocker lock(&gMutex);
         const auto it = gCache.constFind(key);

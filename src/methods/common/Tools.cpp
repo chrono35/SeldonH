@@ -34,6 +34,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "Tools.h"
 
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QStringList>
 
 #include "CurveStore.h"
@@ -97,15 +98,27 @@ QVector<ToolDef> build()
                               "avant l'année de mesure, avec son erreur (« TL 800 ± 60 ans, mesuré en 2015 », « OSL 12,3 ± 0,8 ka »). L'année de mesure est obligatoire : demande-la à l'utilisateur si elle manque."),
                schema({ { "age", num(QStringLiteral("Âge de luminescence, en années avant l'année de mesure.")) },
                         { "error", num(QStringLiteral("Erreur (écart-type) de l'âge, en années, strictement positive.")) },
-                        { "ref_year", num(QStringLiteral("Année de la mesure (ex. 2015).")) } },
+                        { "ref_year", num(QStringLiteral("Année de la mesure (ex. 2015).")) },
+                        { "unit", str(QStringLiteral("Unité de l'âge et de l'erreur telle que l'utilisateur l'écrit : ans (défaut), ka (milliers "
+                                                     "d'années), Ma (millions d'années). Recopie les valeurs sans les convertir : SeldonH convertit."),
+                                      { "ans", "ka", "Ma" }) } },
                       { "age", "error", "ref_year" }),
                "tl" });
 
     v.append({ "densite_gauss",
-               QStringLiteral("Densité calendaire et intervalles HPD pour une date donnée directement en années calendaires par une loi "
-                              "normale (moyenne, écart-type), sans calibration. Années astronomiques (0 = 1 av. J.-C.)."),
-               schema({ { "age", num(QStringLiteral("Moyenne, en année calendaire. %1").arg(QStringLiteral("Année astronomique (l'année 0 existe : 0 = 1 av. J.-C., -499 = 500 av. J.-C.) ; pour une année av. J.-C., écris-la plutôt en texte, « 500 av. J.-C. » : SeldonH convertit."))) },
-                        { "error", num(QStringLiteral("Écart-type, en années, strictement positif.")) } },
+               QStringLiteral("Densité calendaire et intervalles HPD pour une mesure gaussienne (valeur, écart-type) : sans calibration, "
+                              "la valeur est une année calendaire (années astronomiques, 0 = 1 av. J.-C.) ; avec « curve », la valeur est "
+                              "une mesure datée sur une courbe de référence du plugin Gauss de ChronoModel (fichier du dossier Gauss, "
+                              "« t, valeur, erreur », ex. un export Curve_X_Gauss_ref.csv), comme une calibration."),
+               schema({ { "age", num(QStringLiteral("Moyenne : année calendaire sans courbe (%1), ou valeur mesurée avec « curve ».").arg(QStringLiteral("Année astronomique (l'année 0 existe : 0 = 1 av. J.-C., -499 = 500 av. J.-C.) ; pour une année av. J.-C., écris-la plutôt en texte, « 500 av. J.-C. » : SeldonH convertit."))) },
+                        { "error", num(QStringLiteral("Écart-type (années, ou unité de la mesure avec « curve »), strictement positif.")) },
+                        { "curve", str(QStringLiteral("Courbe de référence du plugin Gauss (nom du fichier du dossier Gauss, voir courbes_disponibles). "
+                                                      "Facultatif : seulement si l'utilisateur la nomme.")) },
+                        { "unit", str(QStringLiteral("Âge des géologues : unité telle que l'utilisateur l'écrit, ka ou Ma (« 12 ± 1 ka ») ; "
+                                                     "recopie les valeurs sans les convertir, SeldonH les ramène en années calendaires. "
+                                                     "Sans courbe seulement. Facultatif."), { "ans", "ka", "Ma" }) },
+                        { "origin", str(QStringLiteral("Origine de l'âge si l'utilisateur la donne : BP (1950, défaut) ou b2k (2000). Facultatif."),
+                                        { "BP", "b2k" }) } },
                       { "age", "error" }),
                "gauss" });
 
@@ -116,6 +129,13 @@ QVector<ToolDef> build()
                         { "max", num(QStringLiteral("Borne supérieure, en année calendaire (même convention).")) } },
                       { "min", "max" }),
                "unif" });
+
+    v.append({ "densite_tabulee",
+               QStringLiteral("Datation par une densité tabulée du plugin Density de ChronoModel (fichier .csv du dossier Density : "
+                              "tmin, tmax, puis les valeurs) : HPD, médiane, graphique. Voir courbes_disponibles pour les fichiers."),
+               schema({ { "curve", str(QStringLiteral("Nom du fichier de densité (dossier Density), tel que l'utilisateur le donne.")) } },
+                      { "curve" }),
+               "density" });
 
     v.append({ "dater_archeomagnetisme",
                QStringLiteral("Datation archéomagnétique par comparaison à une courbe de référence de la variation séculaire : "
@@ -185,43 +205,122 @@ QVector<ToolDef> build()
                "combine" });
 
     {
-        const QString item = QStringLiteral("Datation : objet avec « method » (c14, f14c, tl, gauss, unif, am) et les paramètres de cette "
-                                            "méthode (mêmes noms que les autres outils, ex. {\"method\":\"c14\",\"age\":2500,\"error\":30}), "
-                                            "et facultativement « name » (ex. « US 12 », « Ly-1234 ») et « wiggle ». Peut aussi être un "
-                                            "événement {\"method\":\"event\",\"name\":…,\"dates\":[…]} ou une combinaison "
-                                            "{\"method\":\"combine\",\"dates\":[…]}.");
+        // Deux outils pour le même calcul « relation » : « comparer » (datations) et « traces » (colonnes d'un export de
+        // ChronoModel). Chacun accepte les deux sortes de termes, et des années fixes : un petit modèle choisit l'outil
+        // d'après les mots de la question.
+        const QString dating = QStringLiteral("objet avec « method » (c14, f14c, tl, gauss, unif, am, density) et les paramètres de cette "
+                                              "méthode (mêmes noms que les autres outils, ex. {\"method\":\"c14\",\"age\":2500,\"error\":30,"
+                                              "\"name\":\"Ly-1234\"}), facultativement « wiggle » ; ou un événement {\"method\":\"event\","
+                                              "\"name\":…,\"dates\":[…]} ou une combinaison {\"method\":\"combine\",\"dates\":[…]}");
+        const QString column = QStringLiteral("nom d'une colonne des traces MCMC jointes (ex. « US 12 », « Phase A Begin », « Phase A End »)");
+        const QJsonObject terms{ { "type", "array" },
+                                 { "description", QStringLiteral("Pour « correlation » seulement : liste de 2 à 8 termes (colonnes des traces ou "
+                                                                 "datations, comme A et B) dont on veut la matrice de corrélation.") },
+                                 { "items", QJsonObject{ { "anyOf", QJsonArray{ QJsonObject{ { "type", "object" } }, QJsonObject{ { "type", "string" } } } } } } };
+        auto term = [&](const QString& what) {
+            return QJsonObject{ { "anyOf", QJsonArray{ QJsonObject{ { "type", "object" } }, QJsonObject{ { "type", "string" } } } },
+                                { "description", QStringLiteral("%1 : soit une datation (%2), soit le %3, soit une année fixe (« -500 », "
+                                                                "« 500 av. J.-C. »).").arg(what, dating, column) } };
+        };
+        const QString ops = QStringLiteral("Opérations : « order » (défaut) : P(A antérieur à B) et l'inverse, avec l'écart B − A ; « duration » : "
+                                           "durée B − A en années, ses HPD et P(B postérieur à A) ; « between » : date d'un niveau compris "
+                                           "entre A et B (uniforme entre les deux) ; « inside » : P(C dans [A ; B]) ; « value » : densité de C ; « correlation » : "
+                                           "corrélation tirage par tirage (r de Pearson, ρ de Spearman, matrice et nuage de points) de 2 à 8 "
+                                           "termes donnés dans « terms » (ou A et B).");
         v.append({ "comparer_dates",
-                   QStringLiteral("Ordre chronologique de DEUX datations indépendantes : probabilité que A soit antérieure à B (et "
-                                  "l'inverse), calculée exactement sur leurs densités calibrées, et densité de l'écart B − A en années "
-                                  "avec ses HPD. À utiliser quand l'utilisateur demande laquelle est la plus ancienne, si A est avant "
-                                  "B, ou l'écart entre deux dates. Ne PAS l'utiliser pour des colonnes de traces MCMC jointes (Events "
-                                  "d'un modèle ChronoModel, liés par des contraintes) : utiliser analyser_traces avec op « order »."),
-                   schema({ { "a", QJsonObject{ { "type", "object" }, { "description", QStringLiteral("Première datation (A). %1").arg(item) } } },
-                            { "b", QJsonObject{ { "type", "object" }, { "description", QStringLiteral("Seconde datation (B). %1").arg(item) } } },
-                            { "name", str(QStringLiteral("Nom de la comparaison, repris dans le titre du graphique. Facultatif.")) } },
+                   QStringLiteral("Relation entre DEUX datations (ou trois pour « inside ») : laquelle est la plus ancienne, l'écart ou la "
+                                  "durée entre elles, la date d'un niveau situé entre les deux, ou si une datation tombe dans un intervalle. "
+                                  "Datations simples supposées indépendantes : calcul exact sur leurs densités calibrées. %1 Un terme peut aussi "
+                                  "être une colonne des traces MCMC jointes (Event ou borne de phase d'un modèle ChronoModel) : le calcul se fait "
+                                  "alors tirage par tirage. Si les deux termes sont des colonnes de traces, préférer analyser_traces.").arg(ops),
+                   schema({ { "op", str(QStringLiteral("Opération : order (défaut), duration, between, inside, value ou correlation."),
+                                        { "order", "duration", "between", "inside", "value", "correlation" }) },
+                            { "a", term(QStringLiteral("Premier terme (A), le plus ancien supposé ; borne ancienne pour « inside »")) },
+                            { "b", term(QStringLiteral("Second terme (B) ; borne récente pour « inside »")) },
+                            { "of", term(QStringLiteral("Terme testé (C) pour « inside », ou terme analysé pour « value »")) },
+                            { "terms", terms },
+                            { "name", str(QStringLiteral("Nom du résultat, repris dans le titre du graphique. Facultatif.")) } },
                           { "a", "b" }),
-                   "order" });
-    }
+                   "relation" });
 
-    v.append({ "analyser_traces",
-               QStringLiteral("Calcule a posteriori, sur les traces MCMC exportées par ChronoModel et jointes par l'utilisateur "
-                              "(Chain_all_Events.csv, Chain_all_Phases.csv…), tirage par tirage : la durée entre deux colonnes "
-                              "(op « duration » : to − from, en années, avec la probabilité que « to » soit postérieur à « from »), "
-                              "une date comprise entre deux colonnes (op « between » : uniforme entre les deux à chaque tirage), ou la "
-                              "densité d'une colonne (op « value », ex. début ou fin d'une phase), l'antéro-postérité de deux colonnes "
-                              "(op « order » : P(from antérieur à to) et l'inverse), ou l'appartenance d'une colonne « of » à l'intervalle "
-                              "[from ; to] (op « inside » : deux Events, début et fin d'une phase, ou années fixes). Renvoie la densité, ses HPD "
-                              "et la convergence, ou les probabilités avec leur erreur Monte-Carlo. Les noms de colonnes sont ceux du fichier joint (ex. « US 12 », « Phase A Begin », "
-                              "« Phase A End ») ; durée d'une phase : from = « X Begin », to = « X End »."),
-               schema({ { "op", str(QStringLiteral("Opération : duration, between, value, order ou inside."),
-                                    { "duration", "between", "value", "order", "inside" }) },
-                        { "from", str(QStringLiteral("Colonne A (duration, between, order) ou borne ancienne de l'intervalle (inside : "
-                                                     "colonne, « X Begin » pour une phase, ou année fixe).")) },
-                        { "to", str(QStringLiteral("Colonne B (duration, between, order) ou borne récente de l'intervalle (inside).")) },
-                        { "of", str(QStringLiteral("Colonne à analyser (value) ou colonne testée (inside).")) },
-                        { "name", str(QStringLiteral("Nom du résultat, repris dans le titre du graphique. Facultatif.")) } },
-                      { "op" }),
-               "traces" });
+        v.append({ "analyser_traces",
+                   QStringLiteral("Calcule a posteriori, sur les traces MCMC exportées par ChronoModel et jointes par l'utilisateur "
+                                  "(Chain_all_Events.csv, Chain_all_Phases.csv…), tirage par tirage : la durée entre deux colonnes "
+                                  "(op « duration » : to − from, en années, avec la probabilité que « to » soit postérieur à « from »), "
+                                  "une date comprise entre deux colonnes (op « between » : uniforme entre les deux à chaque tirage), ou la "
+                                  "densité d'une colonne (op « value », ex. début ou fin d'une phase), l'antéro-postérité de deux colonnes "
+                                  "(op « order » : P(from antérieur à to) et l'inverse), ou l'appartenance de « of » à l'intervalle "
+                                  "[from ; to] (op « inside » : deux Events, début et fin d'une phase, ou années fixes). Un terme peut aussi être "
+                                  "une datation simple hors du modèle (ex. durée entre la fin d'une phase et une date 14C) : elle est tirée à "
+                                  "chaque tirage, supposée indépendante du modèle. Renvoie la densité, ses HPD et la convergence, ou les "
+                                  "probabilités avec leur erreur Monte-Carlo. Les noms de colonnes sont ceux du fichier joint (ex. « US 12 », "
+                                  "« Phase A Begin », « Phase A End ») ; durée d'une phase : from = « X Begin », to = « X End ». "
+                                  "Op « correlation » : corrélation entre 2 à 8 colonnes ou datations (« terms »), avec la matrice "
+                                  "(r de Pearson, ρ de Spearman) et le nuage de points de chaque paire."),
+                   schema({ { "op", str(QStringLiteral("Opération : duration, between, value, order, inside ou correlation."),
+                                        { "duration", "between", "value", "order", "inside", "correlation" }) },
+                            { "from", term(QStringLiteral("Terme A (duration, between, order) ou borne ancienne de l'intervalle (inside)")) },
+                            { "to", term(QStringLiteral("Terme B (duration, between, order) ou borne récente de l'intervalle (inside)")) },
+                            { "of", term(QStringLiteral("Terme analysé (value) ou testé (inside)")) },
+                            { "terms", terms },
+                            { "name", str(QStringLiteral("Nom du résultat, repris dans le titre du graphique. Facultatif.")) } },
+                          { "op" }),
+                   "relation" });
+
+        v.append({ "courbe_chronomodel",
+                   QStringLiteral("Calcule a posteriori sur une COURBE estimée par ChronoModel (mode courbe : 1 à 3 composantes X, Y, Z en "
+                                  "fonction du temps, par exemple inclinaison, déclinaison, intensité), à partir de la trace des splines "
+                                  "jointe par l'utilisateur (Curve_X_Splines.csv), tirage par tirage, exactement comme ChronoModel évalue "
+                                  "ses splines. Opérations : « value » : loi de la valeur de la courbe à la date t (avec y : P(courbe < y) "
+                                  "et P(courbe > y) ; avec ymin et ymax : P(ymin ≤ courbe ≤ ymax)) ; « derivative » : vitesse instantanée "
+                                  "à la date t ; « rate » : vitesse moyenne entre les dates from et to ; « crossing » : date où la courbe "
+                                  "atteint la valeur y (which : first, last ou all) ; « calibrate » : densité de la date d'une mesure y ± error "
+                                  "(comme une calibration, sur la courbe a posteriori ; « probabilité de date pour X = 0 ± 1 ») ; « rate_values » : temps mis et vitesse moyenne pour "
+                                  "aller de la valeur y1 à la valeur y2 ; « acceleration » : accélération (dérivée seconde) à la date t ; "
+                                  "« plot » : trace les courbes de la valeur, de la vitesse et de l'accélération (médiane et intervalle de crédibilité à 95 %, quantiles 2,5 – 97,5 %, "
+                                  "liste « quantities ») ; « extremum » : date où la grandeur est extrême dans chaque courbe tirée "
+                                  "(« où / quand la variation est la plus forte », « vitesse maximale », « maximum de la courbe » ; "
+                                  "quantity derivative par défaut, sense abs, max, min ou absmin ; aucune date à donner). « quantity » choisit la courbe sur laquelle portent crossing, calibrate et derivative : "
+                                  "value (défaut), derivative (vitesse ; taux d'accumulation d'une courbe âge-profondeur) ou acceleration "
+                                  "(ex. date d'une vitesse mesurée, date où la vitesse s'annule). Une date peut être une année, une colonne des "
+                                  "traces jointes (date d'un Event, ex. « US 12 ») ou une datation. Vitesses en unités de la composante par an, "
+                                  "accélérations par an² (per : 100 pour par siècle, par siècle²). Une carte de densité (Curve_X_Map.csv) suffit "
+                                  "pour « value » à une année fixe."),
+                   schema({ { "op", str(QStringLiteral("Opération : value, derivative, acceleration, rate, crossing, calibrate, rate_values, extremum ou plot. "
+                                                   "Date de la variation la plus forte : extremum (sans t), jamais derivative sans t."),
+                                        { "value", "derivative", "acceleration", "rate", "crossing", "calibrate", "rate_values", "extremum", "plot" }) },
+                            { "quantity", str(QStringLiteral("Courbe visée par crossing, calibrate, value : value (la courbe, défaut), derivative "
+                                                             "(sa vitesse) ou acceleration (son accélération). La valeur y est alors une vitesse "
+                                                             "(ou une accélération), dans l'unité donnée par per. Facultatif."),
+                                              { "value", "derivative", "acceleration" }) },
+                            { "quantities", QJsonObject{ { "type", "array" }, { "items", QJsonObject{ { "type", "string" }, { "enum", QJsonArray{ "value", "derivative", "acceleration" } } } },
+                                                         { "description", QStringLiteral("plot : courbes à tracer (défaut : les trois).") } } },
+                            { "dim", str(QStringLiteral("Composante : X (défaut), Y, Z ; pour une courbe archéomagnétique I (inclinaison), D (déclinaison), "
+                                                        "F (intensité). Défaut : la première composante."),
+                                         { "X", "Y", "Z", "I", "D", "F" }) },
+                            { "t", term(QStringLiteral("Date (value, derivative)")) },
+                            { "from", term(QStringLiteral("Première date (rate)")) },
+                            { "to", term(QStringLiteral("Seconde date (rate)")) },
+                            { "y", num(QStringLiteral("Valeur de la composante : seuil (value) ou valeur à atteindre (crossing).")) },
+                            { "ymin", num(QStringLiteral("Borne basse d'un intervalle de valeurs (value). Facultatif.")) },
+                            { "ymax", num(QStringLiteral("Borne haute d'un intervalle de valeurs (value). Facultatif.")) },
+                            { "error", num(QStringLiteral("calibrate : erreur (1σ) de la valeur mesurée y. Seulement si l'utilisateur la donne : sans elle, la valeur est prise exacte.")) },
+                            { "y1", num(QStringLiteral("Valeur de départ (rate_values).")) },
+                            { "y2", num(QStringLiteral("Valeur d'arrivée (rate_values).")) },
+                            { "sense", str(QStringLiteral("extremum : abs (la plus forte en valeur absolue, défaut pour une vitesse), max "
+                                                          "(défaut pour la courbe elle-même), min, absmin (la plus faible, courbe la plus plate)."),
+                                           { "abs", "max", "min", "absmin" }) },
+                            { "which", str(QStringLiteral("crossing : première (first, défaut), dernière (last) ou toutes (all) les atteintes."),
+                                           { "first", "last", "all" }) },
+                            { "per", num(QStringLiteral("Vitesse pour combien d'années : 1 (défaut, par an), 100 (par siècle). Facultatif.")) },
+                            { "speed", num(QStringLiteral("derivative, rate : seuil de vitesse (même unité que la vitesse, donc par siècle si per = 100) ; "
+                                                          "donne P(vitesse > seuil) et P(|vitesse| > |seuil|). Facultatif.")) },
+                            { "tmin", num(QStringLiteral("crossing, calibrate, rate_values, extremum, plot : début de la fenêtre (défaut : période d'étude). Facultatif.")) },
+                            { "tmax", num(QStringLiteral("crossing, calibrate, rate_values, plot : fin de la fenêtre. Facultatif.")) },
+                            { "name", str(QStringLiteral("Nom du résultat, repris dans le titre du graphique. Facultatif.")) } },
+                          { "op" }),
+                   "curve" });
+    }
 
     v.append({ "calibration_inverse",
                QStringLiteral("Calibration inverse : mesure attendue (âge 14C en BP, F14C, inclinaison, déclinaison ou intensité) pour un "
@@ -311,9 +410,10 @@ QVector<ToolDef> build()
     }
 
     v.append({ "courbes_disponibles",
-               QStringLiteral("Liste les courbes de référence intégrées à SeldonH (calibration 14C, F14C bombe, archéomagnétisme). "
-                              "À appeler avant un calcul quand l'utilisateur nomme une courbe dont tu n'es pas sûr."),
-               schema({ { "method", str(QStringLiteral("Méthode : c14, f14c ou am. Vide = toutes."), { "c14", "f14c", "am" }) } }, {}),
+               QStringLiteral("Liste les courbes de référence connues de SeldonH (calibration 14C, F14C bombe, archéomagnétisme, plugin "
+                              "Gauss) et les densités du plugin Density. À appeler avant un calcul quand l'utilisateur nomme une courbe "
+                              "dont tu n'es pas sûr."),
+               schema({ { "method", str(QStringLiteral("Méthode : c14, f14c, am, gauss ou density. Vide = toutes."), { "c14", "f14c", "am", "gauss", "density" }) } }, {}),
                QString() });
 
     // Niveau de confiance facultatif, commun à toutes les datations.
@@ -321,7 +421,8 @@ QVector<ToolDef> build()
         if (d.methodId.isEmpty() || d.methodId == QLatin1String("density_file")) continue;
         QJsonObject props = d.parameters.value("properties").toObject();
         // Calculs qui ne sont pas des datations : seulement le niveau de confiance.
-        const bool notDating = d.methodId == QLatin1String("traces") || d.methodId == QLatin1String("inverse")
+        const bool notDating = d.name == QLatin1String("analyser_traces") || d.methodId == QLatin1String("inverse")
+                               || d.methodId == QLatin1String("curve")
                                || d.methodId == QLatin1String("table");
         props["level"] = num(QStringLiteral("Niveau de confiance des intervalles HPD, en % (défaut 95). À donner seulement si "
                                             "l'utilisateur demande un autre niveau (ex. 99 ou 90) ; les HPD à 95 % et 68 % sont toujours fournies."));
@@ -335,10 +436,10 @@ QVector<ToolDef> build()
                                                "une : la densité est calculée sur [tmin ; tmax] puis renormalisée. Défaut : toute la courbe."));
             props["tmax"] = num(QStringLiteral("Fin de la période d'étude (année astronomique, ou en texte « 500 av. J.-C. »). Facultatif."));
         }
-        if (d.methodId != "event" && d.methodId != "combine" && d.methodId != "order")
+        if (d.methodId != "event" && d.methodId != "combine" && d.methodId != "relation")
             props["name"] = str(QStringLiteral("Nom de la datation (ex. « Ly-1234 », ou le « name » de la date dans un fichier .chr), "
                                                "repris dans le titre du graphique. Facultatif."));
-        if (d.methodId != "event" && d.methodId != "combine" && d.methodId != "order")
+        if (d.methodId != "event" && d.methodId != "combine" && d.methodId != "relation")
             props["wiggle"] = QJsonObject{ { "type", "object" },
                                            { "description", QStringLiteral("Facultatif, seulement si l'utilisateur donne un décalage δ (wiggle-matching) entre "
                                                                            "l'échantillon et ce qu'on veut dater : {\"type\":\"fixed\",\"value\":20}, "
@@ -392,10 +493,24 @@ QStringList missing(const ToolDef& def, const QJsonObject& a)
     QStringList m;
     for (const QJsonValue& r : def.parameters.value("required").toArray())
         if (!a.contains(r.toString())) m << r.toString();
-    if (def.methodId == "traces") {
+    if (def.methodId == "relation") {
+        // Termes nécessaires selon l'opération (« comparer_dates » : a, b ; « analyser_traces » : from, to ; « of » pour C).
+        const bool cmp = def.name == QLatin1String("comparer_dates");
+        const QString A = cmp ? QStringLiteral("a") : QStringLiteral("from"), B = cmp ? QStringLiteral("b") : QStringLiteral("to");
         const QString op = a.value("op").toString();
+        m.removeAll(A);
+        m.removeAll(B);
         if ((op == QLatin1String("value") || op == QLatin1String("inside")) && !a.contains("of")) m << "of";
-        if (op != QLatin1String("value")) { if (!a.contains("from")) m << "from"; if (!a.contains("to")) m << "to"; }
+        const bool listed = op == QLatin1String("correlation") && a.value("terms").toArray().size() >= 2;
+        if (op != QLatin1String("value") && !listed) { if (!a.contains(A)) m << A; if (!a.contains(B)) m << B; }
+    }
+    if (def.methodId == "curve") {
+        const QString op = a.value("op").toString();
+        // derivative / acceleration sans t : SeldonH donne la date de la vitesse (accélération) la plus forte (op extremum).
+        if (op == QLatin1String("value") && !a.contains("t")) m << "t";
+        if (op == QLatin1String("rate")) { if (!a.contains("from")) m << "from"; if (!a.contains("to")) m << "to"; }
+        if ((op == QLatin1String("crossing") || op == QLatin1String("calibrate")) && !a.contains("y")) m << "y";
+        if (op == QLatin1String("rate_values")) { if (!a.contains("y1")) m << "y1"; if (!a.contains("y2")) m << "y2"; }
     }
     if (def.methodId == "inverse" && !a.contains("t") && !(a.contains("t_min") && a.contains("t_max"))) m << "t";
     if (def.methodId == "inverse" && a.value("type").toString() == QLatin1String("am") && !a.contains("component")) m << "component";
@@ -417,15 +532,18 @@ QString curvesText(const QString& which)
     struct Row { const char* id; const char* title; const char* def; };
     const Row rows[] = { { "c14", "Calibration radiocarbone (calibrer_radiocarbone)", "intcal20" },
                          { "f14c", "F14C post-bombe (calibrer_f14c ; accepte aussi les courbes 14C)", "bomb21nhz1" },
-                         { "am", "Archéomagnétisme (dater_archeomagnetisme)", "gal2002sph2014_i / _d, gwh2013uni_f" } };
+                         { "am", "Archéomagnétisme (dater_archeomagnetisme)", "gal2002sph2014_i / _d, gwh2013uni_f" },
+                         { "gauss", "Plugin Gauss : courbes de référence (densite_gauss avec curve)", "aucune" },
+                         { "density", "Plugin Density : densités tabulées (densite_tabulee)", "aucune" } };
     QString t;
     for (const Row& r : rows) {
         if (!which.isEmpty() && which != r.id) continue;
         QStringList n = CurveStore::names(r.id);
         if (QString(r.id) == "f14c") n += CurveStore::names("c14");
-        t += QStringLiteral("%1 — défaut : %2\n  %3\n").arg(QString::fromUtf8(r.title), QString::fromUtf8(r.def), n.join(", "));
+        t += QStringLiteral("%1 — défaut : %2\n  %3\n").arg(QString::fromUtf8(r.title), QString::fromUtf8(r.def),
+                                                              n.isEmpty() ? QStringLiteral("(aucune)") : n.join(", "));
     }
-    return t.isEmpty() ? QStringLiteral("Méthode inconnue : « %1 » (c14, f14c ou am).").arg(which) : t.trimmed();
+    return t.isEmpty() ? QStringLiteral("Méthode inconnue : « %1 » (c14, f14c, am, gauss ou density).").arg(which) : t.trimmed();
 }
 
 } // namespace
@@ -477,13 +595,30 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
         args = d.object();
     }
 
-    const QString bad = coerce(*def, args);
-    if (!bad.isEmpty()) { r.content = QStringLiteral("Arguments invalides pour %1 : %2.").arg(def->name, bad); return r; }
-
     if (def->methodId.isEmpty()) {              // outil d'information
+        const QString bad = coerce(*def, args);
+        if (!bad.isEmpty()) { r.content = QStringLiteral("Arguments invalides pour %1 : %2.").arg(def->name, bad); return r; }
         r.content = curvesText(args.value("method").toString().toLower());
         return r;
     }
+    QString why;
+    const QJsonObject req = requestFor(def->name, args, &why);
+    if (req.isEmpty()) { r.content = why; return r; }
+    r.run = MethodRunner::run({ req }, format);
+    r.executed = r.run.found;
+    r.request = req;
+    r.content = r.run.promptBlock;
+    return r;
+}
+
+QJsonObject requestFor(const QString& name, QJsonObject args, QString* error)
+{
+    const ToolDef* def = find(name);
+    auto failWith = [&](const QString& why) { if (error) *error = why; return QJsonObject(); };
+    if (!def) return failWith(QStringLiteral("Outil inconnu : %1.").arg(name));
+    if (def->methodId.isEmpty()) return failWith(QStringLiteral("%1 est un outil d'information, pas un calcul.").arg(def->name));
+    const QString bad = coerce(*def, args);
+    if (!bad.isEmpty()) return failWith(QStringLiteral("Arguments invalides pour %1 : %2.").arg(def->name, bad));
 
     if (def->methodId == "event" || def->methodId == "combine") {
         // Datations normalisées (alias de méthode, format .chr, nombres en texte) avant la vérification.
@@ -492,51 +627,104 @@ ToolOutcome execute(const QString& name, const QString& argumentsJson, DateForma
             ds.append(v.isObject() ? QJsonValue(MethodRunner::normalizeRequest(v.toObject())) : v);
         args["dates"] = ds;
         if (ds.isEmpty()) {
-            r.content = QStringLiteral("Calcul non lancé : « dates » doit contenir au moins une datation (objets avec « method »).");
-            return r;
+            return failWith(QStringLiteral("Calcul non lancé : « dates » doit contenir au moins une datation (objets avec « method »)."));
         }
         for (int i = 0; i < ds.size(); ++i)
             if (!ds[i].isObject() || ds[i].toObject().value("method").toString().isEmpty()) {
-                r.content = QStringLiteral("Calcul non lancé : la datation %1 n'a pas de « method » (c14, f14c, tl, gauss, unif ou am).").arg(i + 1);
-                return r;
+                return failWith(QStringLiteral("Calcul non lancé : la datation %1 n'a pas de « method » (c14, f14c, tl, gauss, unif ou am).").arg(i + 1));
             }
     }
-    if (def->methodId == "order") {
-        for (const char* k : { "a", "b" }) {
+    if (def->methodId == "relation") {
+        // Terme : datation (objet, ou objet JSON écrit en texte), colonne des traces ou année fixe (texte).
+        for (const char* k : { "a", "b", "from", "to", "of" }) {
             const QJsonValue v = args.value(k);
-            if (v.isString()) {                       // objet écrit comme une chaîne JSON
+            if (v.isString() && v.toString().trimmed().startsWith('{')) {
                 const QJsonDocument d = QJsonDocument::fromJson(v.toString().toUtf8());
                 if (d.isObject()) args[k] = d.object();
             }
-            if (args.value(k).isObject()) args[k] = MethodRunner::normalizeRequest(args.value(k).toObject());
-        }
-        for (const char* k : { "a", "b" })
-            if (args.contains(k) && (!args.value(k).isObject() || args.value(k).toObject().value("method").toString().isEmpty())) {
-                r.content = QStringLiteral("Calcul non lancé : « %1 » doit être une datation avec « method » (c14, f14c, tl, gauss, unif, am, "
-                                           "event ou combine) et ses valeurs.").arg(QString::fromLatin1(k));
-                return r;
+            if (args.value(k).isObject()) {
+                args[k] = MethodRunner::normalizeRequest(args.value(k).toObject());
+                if (args.value(k).toObject().value("method").toString().isEmpty()) {
+                    return failWith(QStringLiteral("Calcul non lancé : « %1 » doit être une datation avec « method » (c14, f14c, tl, gauss, unif, am, "
+                                               "density, event ou combine) et ses valeurs, une colonne des traces jointes ou une année.")
+                                    .arg(QString::fromLatin1(k)));
+                }
             }
+        }
+        if (args.value("terms").isArray()) {                        // « correlation » : termes en liste
+            QJsonArray t;
+            for (QJsonValue x : args.value("terms").toArray()) {
+                if (x.isString() && x.toString().trimmed().startsWith('{')) {
+                    const QJsonDocument d = QJsonDocument::fromJson(x.toString().toUtf8());
+                    if (d.isObject()) x = d.object();
+                }
+                t.append(x.isObject() ? QJsonValue(MethodRunner::normalizeRequest(x.toObject())) : x);
+            }
+            args["terms"] = t;
+        }
+        if (def->name == QLatin1String("comparer_dates") && args.value("op").toString().trimmed().isEmpty()) args["op"] = QStringLiteral("order");
     }
     if (def->methodId == "am" && args.contains("process")) args["process"] = args.value("process").toString().toUpper();
     if (args.contains("curve")) args["curve"] = args.value("curve").toString().toLower();
 
     const QStringList miss = missing(*def, args);
     if (!miss.isEmpty()) {
-        r.content = QStringLiteral("Calcul non lancé : il manque %1. Demande ces valeurs à l'utilisateur ; n'en invente aucune.")
-                        .arg(miss.join(", "));
-        return r;
+        return failWith(QStringLiteral("Calcul non lancé : il manque %1. Demande ces valeurs à l'utilisateur ; n'en invente aucune.")
+                            .arg(miss.join(", ")));
     }
 
     QJsonObject req = args;
     req["method"] = def->methodId;
     if (def->methodId == "c14" && req.contains("delta_r")) req["has_delta_r"] = true;
+    if (def->methodId == "gauss" && !req.value("curve").toString().trimmed().isEmpty()) req["mode"] = QStringLiteral("curve");
     if (def->methodId == "am") req["integration_steps"] = 500;
 
-    r.run = MethodRunner::run({ req }, format);
-    r.executed = r.run.found;
-    r.request = req;
-    r.content = r.run.promptBlock;
-    return r;
+    return req;
+}
+
+bool callFromText(const QString& text, QString& name, QJsonObject& args)
+{
+    // Nom d'un outil en mot entier, avec un « _ » (« tableau » seul est un mot ordinaire) ; le premier trouvé.
+    static const QRegularExpression word(QStringLiteral(R"(\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b)"));
+    qsizetype after = -1;
+    for (auto it = word.globalMatch(text); it.hasNext();) {
+        const auto m = it.next();
+        if (const ToolDef* d = find(m.captured(1)); d && !d->methodId.isEmpty()) { name = d->name; after = m.capturedEnd(); break; }
+    }
+    if (after < 0) return false;
+    args = QJsonObject();
+    const QString rest = text.mid(after);
+    // Objet JSON après le nom : du premier « { » à l'accolade fermante correspondante.
+    if (const qsizetype b = rest.indexOf('{'); b >= 0) {
+        int depth = 0;
+        bool inStr = false;
+        for (qsizetype i = b; i < rest.size(); ++i) {
+            const QChar c = rest[i];
+            if (c == '"' && (i == 0 || rest[i - 1] != '\\')) inStr = !inStr;
+            if (inStr) continue;
+            if (c == '{') ++depth;
+            else if (c == '}' && --depth == 0) {
+                const QJsonDocument d = QJsonDocument::fromJson(rest.mid(b, i - b + 1).toUtf8());
+                if (d.isObject()) { args = d.object(); return true; }
+                break;
+            }
+        }
+    }
+    // Paires clé = valeur (ou clé : valeur) : nombre, texte entre guillemets ou mot.
+    static const QRegularExpression kv(QStringLiteral(
+        R"RX(\b([a-z_][a-z0-9_]*)\s*[=:]\s*(?:"([^"]*)"|'([^']*)'|(-?\d+(?:[.,]\d+)?)(?![\w.,]*\w)|([A-Za-z_][\w.\-]*)))RX"));
+    for (auto it = kv.globalMatch(rest); it.hasNext();) {
+        const auto m = it.next();
+        const QString k = m.captured(1);
+        if (!m.captured(4).isEmpty()) { QString n = m.captured(4); n.replace(',', '.'); args[k] = n.toDouble(); }
+        else if (!m.captured(2).isEmpty() || !m.captured(3).isEmpty()) args[k] = m.captured(2).isEmpty() ? m.captured(3) : m.captured(2);
+        else {
+            const QString v = m.captured(5);
+            if (v == QLatin1String("true") || v == QLatin1String("false")) args[k] = v == QLatin1String("true");
+            else args[k] = v;
+        }
+    }
+    return true;
 }
 
 QJsonObject mergePlots(const QVector<QJsonObject>& plots)

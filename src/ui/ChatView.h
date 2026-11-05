@@ -31,6 +31,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QHash>
 #include <QImage>
+#include <QMimeData>
 #include <QString>
 #include <QStringList>
 #include <QTextBrowser>
@@ -52,17 +53,41 @@ public:
     void setAssistant(int index, const QString& markdown, const QString& thinking,
                       bool thinkingOpen, bool final);
     void setActions(int index, const QStringList& linksHtml);   // liens sous la bulle
+    void setSuggestions(int index, const QString& html);       // suites proposées (petit, gris), sous les liens ; vide = retirées
     // Raisonnement du modèle : affiché pendant qu'il s'écrit puis replié (lien seldon://thinking/<index> pour le déplier).
     void setShowThinking(bool on);
     void toggleThinking(int index);
 
     // Rappel d'une figure du panneau de droite : vignette cliquable (lien seldon://figure/<id>). setFigure remplace
     // l'image d'une figure déjà rappelée (datations ajoutées à la même figure).
+    // La vignette rejoint la fiche de calcul qui la précède (même boîte) ; sinon (tracé demandé par le modèle, dessin du
+    // modèle) elle est placée dans une boîte « Graphique SeldonH », partagée par les vignettes qui se suivent.
     void addFigure(int id, const QImage& img, const QString& caption);
     void setFigure(int id, const QImage& img);
 
+    // Réponse du modèle : libellé « Modèle d'IA · <nom> (local / distant) » (nom raccourci).
+    void setModelLabel(int index, const QString& label);
+    // Bulle de réponse remplie par SeldonH sans le modèle (mode calculatrice) : simple note sous la fiche, sans la boîte
+    // de l'IA. Retirée dès que le modèle écrit dans la bulle (« Demander un commentaire »).
+    void setAppNote(int index, bool on);
+    // Lien « ✎ Modifier » sous la dernière question (seldon://edit) ; désactivé pendant une réponse.
+    void setEditEnabled(bool on);
+    int  lastUserIndex() const;               // -1 s'il n'y a aucune question
+    QString userText(int index) const;        // texte brut d'une question affichée
+    void truncate(int from);                  // retire les éléments à partir de `from` (modifier la dernière question)
+    int  count() const { return int(items_.size()); }
+    // Copie d'une fiche « Calcul SeldonH » (ou d'une boîte de graphiques) telle qu'affichée, en thème clair : HTML (images
+    // intégrées, police précisée) et texte brut. Lien « Copier » de la fiche.
+    bool copyCard(int index) const;
+    QMimeData* cardMimeData(int index) const;     // (exposé pour les tests ; nullptr si ce n'est pas une fiche)
+    static QString shortModelName(const QString& name, int maxChars = 32);   // « Mistral-Small-3.2-24B-Inst… »
+
     void clearAll();
-    QString exportHtml() const;                // conversation complète (pour sauvegarde)
+    QString exportHtml() const;                // conversation complète (pour sauvegarde), thème clair, figures intégrées
+    // Conversation complète en document Word (.docx) : fiches, tableaux et graphiques compris, thème clair, sans les liens
+    // d'action (Copier, Relancer…). `title` : titre du document (propriétés).
+    bool exportDocx(const QString& path, const QString& title, QString* error = nullptr) const;
+    QTextDocument* exportDocument(QObject* parent) const;   // document Qt de l'export (exposé pour les tests)
 
     static QString markdownToHtml(const QString& md);
 
@@ -74,22 +99,31 @@ private:
         enum Kind { User, Assistant, Notice, Figure } kind = Notice;
         QString html;          // contenu rendu
         QString actions;       // liens sous la bulle
+        QString suggestions;   // suites proposées (affichage seulement, pas dans l'export)
         QString thinking;
         bool    thinkingOpen = false;
         bool    final = false;           // réponse terminée (le raisonnement est alors replié)
         bool    thinkingShown = false;   // raisonnement déplié par l'utilisateur (lien « ▸ Raisonnement »)
-        int     figure = -1;   // Figure : identifiant de l'image
+        int     figure = -1;   // Figure : identifiant de la première image
+        QVector<int> figs;     // vignettes de la boîte (fiche de calcul ou boîte « Graphique »)
+        QString plain;         // User : texte brut de la question
+        QString model;         // Assistant : modèle qui a répondu (libellé déjà raccourci)
+        bool    appNote = false;    // Assistant : note de SeldonH (pas de réponse du modèle)
     };
     struct FigureImage { QImage img; int version = 0; QString caption; };
     void scheduleRender();
     void render();
-    QString bubble(const Item& it, bool forExport = false) const;
+    QString bubble(const Item& it, bool forExport = false, bool last = false, bool firstAi = false) const;
+    QString figuresHtml(const Item& it, bool forExport, const QString& muted) const;
 
     QVector<Item> items_;
     QHash<int, FigureImage> figures_;
     QTimer        timer_;
     bool          dirty_ = false;
     bool          showThinking_ = false;
+    bool          editEnabled_ = true;
+    mutable bool  forceLight_ = false;     // copie d'une fiche : couleurs du thème clair
+    mutable bool  plainFigUrls_ = false;   // copie d'une fiche : images nommées « fig_<id>.png » (ressources du document)
 };
 
 } // namespace seldon

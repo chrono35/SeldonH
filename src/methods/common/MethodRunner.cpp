@@ -35,6 +35,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <QLocale>
 
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QJsonDocument>
@@ -44,17 +46,22 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <random>
 
 #include "Combination.h"
 #include "CurveStore.h"
+#include "CurveTraces.h"
 #include "DataTable.h"
 #include "DensityFile.h"
 #include "../c14/C14Method.h"
+#include "../f14c/F14cMethod.h"
+#include "../density/DensityMethod.h"
 #include "EventMcmc.h"
 #include "InverseCalibration.h"
 #include "MethodRegistry.h"
 #include "TextUtil.h"
+#include "FuzzyWords.h"
 #include "Tools.h"
 #include "Traces.h"
 
@@ -115,6 +122,168 @@ QStringList curveLabels(const QStringList& refs)
         out << (p[0].isEmpty() ? QString() : p[0] + QStringLiteral(" : ")) + QStringLiteral("%1 (%2)").arg(title, origin);
     }
     out.removeDuplicates();
+    return out;
+}
+
+// Graphiques des courbes de référence d'une datation simple (14C, F14C, archéomagnétisme I, D, F) : la courbe (moyenne et
+// enveloppe à 95 %, ± 1,96 σ) sur la plage utile de la datation, la mesure (trait) et son erreur à 1σ (bande et tirets),
+// et la densité calibrée en bas du graphique (échelle libre), comme la vue de calibration de ChronoModel. Une figure par
+// courbe ; vide pour une datation sans courbe (Gauss, uniforme, TL) ou si « curve_plot » vaut false.
+QVector<QJsonObject> referenceCurvePlots(const QJsonObject& rq, const Density& calib, const QString& head, DateFormat fmt)
+{
+    QVector<QJsonObject> out;
+    if (rq.contains("curve_plot") && !rq.value("curve_plot").toBool(true)) return out;
+    if (!calib.valid()) return out;
+    const MethodRegistry& reg = MethodRegistry::instance();
+    const QString method = rq.value("method").toString().toLower();
+    const QStringList refs = reg.referenceCurves(rq);
+    if (refs.isEmpty()) return out;
+
+    // Plage utile de la datation : densité ≥ 1e-3 du maximum, élargie d'un quart (au moins 30 ans de chaque côté).
+    const double vmax = *std::max_element(calib.v.begin(), calib.v.end());
+    size_t i0 = 0, i1 = calib.v.size() - 1;
+    while (i0 < i1 && calib.v[i0] < vmax * 1e-3) ++i0;
+    while (i1 > i0 && calib.v[i1] < vmax * 1e-3) --i1;
+    const double pad = std::max(30.0, 0.25 * (calib.t[i1] - calib.t[i0]));
+    const double inc = rq.value("inc").toDouble();
+    constexpr double kRad = 3.14159265358979323846 / 180.0;
+
+    for (const QString& ref : refs) {
+        const QStringList p = ref.split('|');
+        if (p.size() != 3) continue;
+        const QString role = p[0], dir = p[1], name = p[2];
+        const RefCurve* c = nullptr;
+        double m = std::nan(""), e = std::nan("");
+        QString what, meas;
+        auto n = [](double v, int d) { return text::numAuto(v, d); };
+        if (method == "c14") {
+            c = CurveStore::get("c14", name, CurveFormat::Radiocarbon, false);
+            const double dR = rq.value("delta_r").toDouble(), dRe = rq.value("delta_r_error").toDouble();
+            m = rq.value("age").toDouble() - dR;
+            e = std::sqrt(std::pow(rq.value("error").toDouble(), 2) + dRe * dRe);
+            what = QStringLiteral("Âge 14C (BP)");
+            meas = dR != 0.0 || dRe != 0.0 ? QStringLiteral("Mesure − ΔR = %1 ± %2 BP").arg(n(m, 1), n(e, 1))
+                                           : QStringLiteral("Mesure %1 ± %2 BP").arg(n(m, 1), n(e, 1));
+        } else if (method == "f14c") {
+            c = F14cMethod::resolveCurve(name);
+            m = rq.value("f14c").toDouble();
+            e = rq.value("error").toDouble();
+            what = QStringLiteral("F14C");
+            meas = QStringLiteral("Mesure F14C = %1 ± %2").arg(n(m, 4), n(e, 4));
+        } else if (method == "gauss") {
+            c = CurveStore::get("gauss", name, CurveFormat::Simple);
+            m = rq.value("age").toDouble();
+            e = rq.value("error").toDouble();
+            what = QStringLiteral("Mesure (courbe %1)").arg(name);
+            meas = QStringLiteral("Mesure %1 ± %2").arg(n(m, 4), n(e, 4));
+        } else if (method == "am") {
+            c = CurveStore::get("am", name, CurveFormat::Simple);
+            const double a95 = rq.value("alpha95").toDouble();
+            if (role == "I") {
+                m = inc; e = a95 / 2.448;
+                what = QStringLiteral("Inclinaison (°)");
+                meas = QStringLiteral("I = %1° ± %2° (α95 / 2,448)").arg(n(m, 2), n(e, 2));
+            } else if (role == "D") {
+                m = rq.value("dec").toDouble(); e = a95 / (2.448 * std::cos(inc * kRad));
+                what = QStringLiteral("Déclinaison (°)");
+                meas = QStringLiteral("D = %1° ± %2° (α95 / (2,448 cos I))").arg(n(m, 2), n(e, 2));
+            } else if (role == "F") {
+                m = rq.value("field").toDouble(); e = rq.value("error_f").toDouble();
+                what = QStringLiteral("Intensité (µT)");
+                meas = QStringLiteral("F = %1 ± %2 µT").arg(n(m, 2), n(e, 2));
+            }
+        }
+        if (!c || !c->valid() || !std::isfinite(m) || !(e >= 0)) continue;
+        const double a = std::max(c->tmin(), calib.t[i0] - pad), b = std::min(c->tmax(), calib.t[i1] + pad);
+        if (!(b > a)) continue;
+
+        // Courbe : ses nœuds dans la fenêtre (≤ 600 points), plus les deux bords interpolés.
+        std::vector<double> ts;
+        ts.push_back(a);
+        size_t k0 = size_t(std::lower_bound(c->t.begin(), c->t.end(), a) - c->t.begin());
+        const size_t k1 = size_t(std::upper_bound(c->t.begin(), c->t.end(), b) - c->t.begin());
+        const size_t stride = std::max<size_t>(1, (k1 - std::min(k0, k1)) / 600);
+        for (size_t k = k0; k < k1; k += stride) if (c->t[k] > a && c->t[k] < b) ts.push_back(c->t[k]);
+        ts.push_back(b);
+        QJsonArray xs, mean, lo, hi;
+        double ylo = m - e, yhi = m + e;
+        for (double t : ts) {
+            double mu, sg;
+            c->at(t, mu, sg);
+            xs.append(dateformat::convert(t, fmt));
+            mean.append(mu); lo.append(mu - 1.96 * sg); hi.append(mu + 1.96 * sg);
+            ylo = std::min(ylo, mu - 1.96 * sg);
+            yhi = std::max(yhi, mu + 1.96 * sg);
+        }
+        const double span = yhi - ylo > 0 ? yhi - ylo : std::max(1.0, std::abs(m));
+        // Densité calibrée en bas : 25 % de la hauteur, sous la courbe.
+        const double base = ylo - 0.32 * span, top = ylo - 0.04 * span;
+        QJsonArray dx, dy;
+        const size_t dstep = std::max<size_t>(1, (i1 - i0 + 1) / 400);
+        for (size_t k = 0; k < calib.t.size(); k += dstep) {
+            if (calib.t[k] < a || calib.t[k] > b) continue;
+            dx.append(dateformat::convert(calib.t[k], fmt));
+            dy.append(base + (top - base) * calib.v[k] / vmax);
+        }
+        const QJsonArray xEnds{ dateformat::convert(a, fmt), dateformat::convert(b, fmt) };
+        QString curveTitle = curveLabels({ ref }).value(0, name);
+        if (!role.isEmpty() && curveTitle.startsWith(role + QStringLiteral(" : "))) curveTitle = curveTitle.mid(role.size() + 3);
+        const QString shortCurve = curveTitle.section(QStringLiteral(" ("), 0, 0);       // sans l'origine
+        // Charte de ChronoModel (Plugin14CRefView, CalibrationView) : courbe G en mainColorDark, enveloppe ± 1,96 σ grise en
+        // tirets (180, 180, 180 ; fond alpha 30), mesure en gris-bleu (98, 113, 123) : trait, tirets à ± σ et densité gaussienne
+        // de la mesure sur l'axe vertical (fond alpha 50) ; densité calibrée en mainColorDark, région HPD 95 % remplie en
+        // mainColorLight (alpha 100).
+        const QString cG = QStringLiteral("#1f5080"), cLight = QStringLiteral("#3170b0"), cEnv = QStringLiteral("#b4b4b4"),
+                      cMeas = QStringLiteral("#62717b");
+        QJsonArray S{
+            QJsonObject{ { "name", QStringLiteral("Courbe ± 1,96 σ") }, { "x", xs }, { "y", lo }, { "y2", hi }, { "fill", false },
+                         { "color", cEnv }, { "alpha", 30.0 / 255.0 }, { "width", 1.0 }, { "dash", true } },
+            QJsonObject{ { "name", shortCurve }, { "x", xs }, { "y", mean }, { "fill", false }, { "width", 1.6 }, { "color", cG } },
+            QJsonObject{ { "name", meas }, { "x", xEnds }, { "y", QJsonArray{ m, m } }, { "fill", false }, { "width", 1.4 }, { "color", cMeas } },
+            QJsonObject{ { "name", QString() }, { "x", xEnds }, { "y", QJsonArray{ m - e, m - e } }, { "fill", false },
+                         { "dash", true }, { "width", 1.0 }, { "color", cMeas } },
+            QJsonObject{ { "name", QString() }, { "x", xEnds }, { "y", QJsonArray{ m + e, m + e } }, { "fill", false },
+                         { "dash", true }, { "width", 1.0 }, { "color", cMeas } } };
+        // Densité de la mesure, verticale, sur le bord gauche du graphique (± 3σ, 10 % de la largeur), comme ChronoModel.
+        if (e > 0) {
+            const double xa = dateformat::convert(a, fmt), xb = dateformat::convert(b, fmt);
+            const bool rev = dateformat::isAge(fmt);                      // axe inversé : le bord gauche est la plus grande valeur
+            const double x0 = rev ? std::max(xa, xb) : std::min(xa, xb), w = 0.10 * std::abs(xb - xa) * (rev ? -1.0 : 1.0);
+            QJsonArray gx, gy, gx0;
+            for (int k = 0; k <= 120; ++k) {
+                const double yy = m - 3.0 * e + 6.0 * e * k / 120.0;
+                gy.append(yy);
+                gx.append(x0 + w * std::exp(-0.5 * std::pow((yy - m) / e, 2)));
+                gx0.append(x0);
+            }
+            S.append(QJsonObject{ { "name", QString() }, { "x", gx }, { "y", gy }, { "x2", gx0 }, { "y2", gy }, { "fill", false },
+                                  { "color", cMeas }, { "alpha", 50.0 / 255.0 }, { "width", 1.0 } });
+        }
+        if (dx.size() >= 2) {
+            S.append(QJsonObject{ { "name", method == "am" && refs.size() > 1 ? QStringLiteral("Densité calibrée (%1)").arg(rq.value("process").toString())
+                                                                             : QStringLiteral("Densité calibrée") },
+                                  { "x", dx }, { "y", dy }, { "fill", false }, { "width", 1.2 }, { "color", cG } });
+            // Région HPD à 95 % remplie
+            for (const Interval& iv : hpdIntervals(calib, 95.0)) {
+                QJsonArray hx, hy, hb;
+                for (size_t k = 0; k < calib.t.size(); ++k) {
+                    if (calib.t[k] < std::max(a, iv.from) || calib.t[k] > std::min(b, iv.to)) continue;
+                    hx.append(dateformat::convert(calib.t[k], fmt));
+                    hy.append(base + (top - base) * calib.v[k] / vmax);
+                    hb.append(base);
+                }
+                if (hx.size() >= 2)
+                    S.append(QJsonObject{ { "name", QString() }, { "x", hx }, { "y", hb }, { "y2", hy }, { "fill", false },
+                                          { "color", cLight }, { "alpha", 100.0 / 255.0 } });
+            }
+        }
+        QJsonObject plot{ { "title", QStringLiteral("Courbe de référence %1%2%3").arg(role.isEmpty() ? QString() : role + QStringLiteral(" : "),
+                                                                                       curveTitle, head.isEmpty() ? QString() : QStringLiteral(" — ") + head) },
+                          { "xlabel", dateformat::axisLabel(fmt) }, { "ylabel", what }, { "fill", false }, { "yaxis", true }, { "yzero", false },
+                          { "layout", QStringLiteral("overlay") }, { "series", S }, { "kind", QStringLiteral("reference_curve") } };
+        if (dateformat::isAge(fmt)) plot["xreverse"] = true;
+        out << plot;
+    }
     return out;
 }
 
@@ -640,7 +809,7 @@ CombineRun runCombine(const QJsonObject& rq, DateFormat fmt)
     for (int k = 0; k < dates.size(); ++k) {
         QJsonObject d = MethodRunner::normalizeRequest(dates[k].toObject());
         const QString method = d.value("method").toString().toLower();
-        if (method.isEmpty() || method == "event" || method == "combine" || method == "traces" || method == "inverse" || method == "order"
+        if (method.isEmpty() || method == "event" || method == "combine" || method == "relation" || method == "inverse"
             || method == "density_file")
             return fail(QStringLiteral("la datation %1 n'a pas de « method » de datation valide (c14, f14c, tl, gauss, unif, am)").arg(k + 1));
         d["method"] = method;
@@ -738,7 +907,7 @@ CombineRun runCombine(const QJsonObject& rq, DateFormat fmt)
         for (const CompatibilityTest& x : tests) {
             const QString u = x.unit.isEmpty() ? QString() : QStringLiteral(" ") + x.unit;
             // Décimales selon la grandeur : années à l'unité, F14C à 4, degrés et µT à 2.
-            const int dec = x.group.contains(QLatin1String("F14C")) ? 4 : (x.unit == QLatin1String("°") || x.unit == QLatin1String("µT")) ? 2 : 0;
+            const int dec = x.group.contains(QLatin1String("F14C")) ? 4 : (x.unit == QStringLiteral("°") || x.unit == QStringLiteral("µT")) ? 2 : 0;
             const QString line = QStringLiteral("%1 (%2) : moyenne pondérée %3 ± %4%5 ; T = %6 pour χ²(%7) à 5 % = %8 (p = %9) → %10")
                                      .arg(x.group, x.names.join(", "), text::num(x.mean, dec), text::num(x.meanError, dec), u,
                                           text::numAuto(x.T, 2), QString::number(x.df), text::numAuto(x.threshold, 2),
@@ -770,374 +939,6 @@ CombineRun runCombine(const QJsonObject& rq, DateFormat fmt)
     return C;
 }
 
-// ------------------------------------------------------------------ traces MCMC exportées par ChronoModel
-
-struct TracesRun {
-    bool ok = false;
-    QString html, prompt;
-    QJsonArray series;               // densités de dates (graphique des datations)
-    QJsonObject durationPlot;        // densité d'une durée : graphique à part (axe en années, pas en dates)
-    QString name;
-    double level = MethodRunner::kDefaultLevel;
-};
-
-// Intervalles d'une densité de durée, en années (« 120 → 340 ans : 95,0 % »).
-QString durationIntervalsText(const std::vector<Interval>& v, DateFormat fmt)
-{
-    QStringList items;
-    for (const Interval& iv : v) {
-        if (iv.prob < 0.005) continue;
-        items << QStringLiteral("%1 → %2 : %3 %").arg(dateformat::spread(iv.from, fmt), dateformat::spread(iv.to, fmt),
-                                                       text::num(iv.prob * 100.0, 1));
-    }
-    return items.join("\n");
-}
-
-
-// Colonnes de traces (ou années fixes, pour une borne d'intervalle) alignées tirage par tirage.
-struct TraceColumns {
-    std::vector<std::vector<double>> constants;      // années fixes, répétées sur tous les tirages
-    std::vector<const std::vector<double>*> cols;
-    QStringList names;
-    std::vector<bool> isColumn;
-    const TraceSet* set = nullptr;
-};
-
-bool traceColumns(const QStringList& wanted, bool allowYears, DateFormat fmt, TraceColumns& C, QString& error)
-{
-    std::vector<double> years(size_t(wanted.size()), std::nan(""));
-    C.cols.assign(size_t(wanted.size()), nullptr);
-    C.names = wanted;
-    C.isColumn.assign(size_t(wanted.size()), false);
-    // Un même fichier qui contient toutes les colonnes est préféré (noms présents dans plusieurs exports).
-    QStringList columnNames;
-    for (const QString& w : wanted) { int s = -1, c = -1; if (traces::resolve(w, s, c)) columnNames << w; }
-    const int preferred = traces::setWithAll(columnNames);
-    for (int k = 0; k < wanted.size(); ++k) {
-        int s = -1, c = -1;
-        QString err;
-        if (traces::resolve(wanted[k], s, c, &err, preferred)) {
-            const TraceSet& ts = traces::loaded()[s];
-            if (C.set && (ts.rows() != C.set->rows() || ts.chainStarts != C.set->chainStarts)) {
-                error = QStringLiteral("« %1 » et « %2 » viennent d'exports différents (nombre de tirages ou chaînes différents) : "
-                                       "exporter les deux depuis le même calcul").arg(C.names.value(0), ts.columns[c]);
-                return false;
-            }
-            if (!C.set) C.set = &ts;
-            C.cols[size_t(k)] = &ts.values[size_t(c)];
-            C.names[k] = ts.columns[c];
-            C.isColumn[size_t(k)] = true;
-        } else if (allowYears && std::isfinite(text::yearFromText(wanted[k]))) {
-            years[size_t(k)] = text::yearFromText(wanted[k]);           // borne fixe : « -500 », « 500 av. J.-C. »
-            C.names[k] = dateformat::format(years[size_t(k)], fmt);
-        } else {
-            error = err;
-            return false;
-        }
-    }
-    if (!C.set) { error = QStringLiteral("aucune colonne des traces chargées n'est citée"); return false; }
-    C.constants.reserve(size_t(wanted.size()));
-    for (size_t k = 0; k < size_t(wanted.size()); ++k)
-        if (!C.cols[k]) { C.constants.emplace_back(C.set->rows(), years[k]); C.cols[k] = &C.constants.back(); }
-    return true;
-}
-
-// Probabilité estimée sur les tirages, avec son erreur Monte-Carlo sqrt(p(1 − p) / ESS) (ESS de l'indicatrice, toutes
-// chaînes) : dit si le nombre de tirages suffit pour la précision annoncée.
-QString probabilityText(double p, double ess)
-{
-    QString t = text::num(100.0 * p, 1) + QStringLiteral(" %");
-    if (ess > 0.0 && p > 0.0 && p < 1.0) t += QStringLiteral(" (± %1 %)").arg(text::num(100.0 * std::sqrt(p * (1.0 - p) / ess), 1));
-    else if (ess > 0.0) t += QStringLiteral(" (aucun tirage contraire : < %1 %)").arg(text::numAuto(100.0 / ess, 2));
-    return t;
-}
-
-// ESS d'une indicatrice (0/1) par chaîne ; nombre de tirages si une seule chaîne ou chaînes trop courtes.
-double indicatorEss(const std::vector<std::vector<double>>& byChain, size_t kept)
-{
-    size_t len = std::numeric_limits<size_t>::max();
-    for (const std::vector<double>& c : byChain) len = std::min(len, c.size());
-    if (byChain.size() < 2 || len < 4) return double(kept);
-    std::vector<std::vector<double>> eq;
-    for (const std::vector<double>& c : byChain) eq.emplace_back(c.begin(), c.begin() + std::ptrdiff_t(len));
-    const mcmcdiag::RhatEss re = mcmcdiag::computeRhatAndEss(eq);
-    return std::isfinite(re.bulkEss) && re.bulkEss > 0.0 ? re.bulkEss : double(kept);
-}
-
-// Tests sur les traces : antéro-postérité de A et B (« order »), appartenance de C à l'intervalle [A ; B] (« inside »).
-TracesRun runTracesProbability(const QJsonObject& rq, DateFormat fmt, const QString& op, const QString& from, const QString& to, const QString& of)
-{
-    TracesRun T;
-    auto fail = [&](const QString& why) {
-        T.html += QStringLiteral("<p><b>Traces MCMC</b></p><p><i>Calcul impossible : %1.</i></p>").arg(why.toHtmlEscaped());
-        T.prompt += QStringLiteral("\nTraces MCMC — calcul impossible : %1.\n").arg(why);
-        return T;
-    };
-    const bool inside = op == QLatin1String("inside");
-    if (from.isEmpty() || to.isEmpty() || (inside && of.isEmpty()))
-        return fail(inside ? QStringLiteral("il faut la colonne testée (« of ») et les deux bornes de l'intervalle (« from », « to »)")
-                           : QStringLiteral("il faut deux colonnes : « from » (A) et « to » (B)"));
-    TraceColumns C;
-    QString err;
-    if (!traceColumns(inside ? QStringList{ of, from, to } : QStringList{ from, to }, inside, fmt, C, err)) return fail(err);
-    if (inside && !C.isColumn[0]) return fail(QStringLiteral("« %1 » n'est pas une colonne des traces chargées").arg(of));
-    const TraceSet& S = *C.set;
-    const size_t N = S.rows();
-
-    // Indicatrices tirage par tirage
-    std::vector<std::vector<double>> byChain(S.chainStarts.size());
-    size_t chain = 0, kept = 0, n1 = 0, n2 = 0, n3 = 0;       // order : A<B, B<A, égaux ; inside : avant, dedans, après
-    for (size_t i = 0; i < N; ++i) {
-        while (chain + 1 < S.chainStarts.size() && i >= S.chainStarts[chain + 1]) ++chain;
-        bool finite = true;
-        for (const auto* c : C.cols) finite = finite && std::isfinite((*c)[i]);
-        if (!finite) continue;
-        ++kept;
-        double ind = 0.0;
-        if (!inside) {
-            const double a = (*C.cols[0])[i], b = (*C.cols[1])[i];
-            if (a < b) { ++n1; ind = 1.0; } else if (b < a) ++n2; else ++n3;
-        } else {
-            const double c = (*C.cols[0])[i];
-            const double lo = std::min((*C.cols[1])[i], (*C.cols[2])[i]), hi = std::max((*C.cols[1])[i], (*C.cols[2])[i]);
-            if (c < lo) ++n1; else if (c > hi) ++n3; else { ++n2; ind = 1.0; }
-        }
-        byChain[chain].push_back(ind);
-    }
-    if (kept < 10) return fail(QStringLiteral("moins de 10 tirages exploitables (valeurs vides dans les colonnes)"));
-    const double ess = indicatorEss(byChain, kept);
-    const QLocale fr(QLocale::French);
-
-    QString rows;
-    if (!inside) {
-        const QString& A = C.names[0]; const QString& B = C.names[1];
-        T.name = QStringLiteral("%1 / %2").arg(A, B);
-        const QString head = QStringLiteral("Traces MCMC « %1 » — antéro-postérité de « %2 » et « %3 »").arg(S.file, A, B);
-        T.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
-        T.prompt += QStringLiteral("\n%1\n").arg(head);
-        const double pAB = double(n1) / double(kept), pBA = double(n2) / double(kept);
-        rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td>%3</td></tr>").arg(A.toHtmlEscaped(), B.toHtmlEscaped(), probabilityText(pAB, ess));
-        rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td>%3</td></tr>").arg(B.toHtmlEscaped(), A.toHtmlEscaped(), probabilityText(pBA, ess));
-        if (n3 > 0) rows += QStringLiteral("<tr><td>Tirages égaux</td><td>%1</td></tr>").arg(fr.toString(qlonglong(n3)));
-        T.prompt += QStringLiteral("P(« %1 » antérieur à « %2 ») = %3 ; P(« %2 » antérieur à « %1 ») = %4 (proportion des tirages, erreur "
-                                   "Monte-Carlo entre parenthèses).%5\n")
-                        .arg(A, B, probabilityText(pAB, ess), probabilityText(pBA, ess),
-                             n3 > 0 ? QStringLiteral(" %1 tirages égaux.").arg(n3) : QString());
-    } else {
-        const QString& Cn = C.names[0];
-        const QString iv = QStringLiteral("[%1 ; %2]").arg(C.names[1], C.names[2]);
-        T.name = QStringLiteral("%1 dans %2").arg(Cn, iv);
-        const QString head = QStringLiteral("Traces MCMC « %1 » — appartenance de « %2 » à l'intervalle %3").arg(S.file, Cn, iv);
-        T.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
-        T.prompt += QStringLiteral("\n%1\n").arg(head);
-        const double pb = double(n1) / double(kept), pi = double(n2) / double(kept), pa = double(n3) / double(kept);
-        rows += QStringLiteral("<tr><td><b>P(« %1 » dans %2)</b></td><td>%3</td></tr>").arg(Cn.toHtmlEscaped(), iv.toHtmlEscaped(), probabilityText(pi, ess));
-        rows += QStringLiteral("<tr><td>P(« %1 » avant l'intervalle)</td><td>%2</td></tr>").arg(Cn.toHtmlEscaped(), probabilityText(pb, ess));
-        rows += QStringLiteral("<tr><td>P(« %1 » après l'intervalle)</td><td>%2</td></tr>").arg(Cn.toHtmlEscaped(), probabilityText(pa, ess));
-        T.prompt += QStringLiteral("P(« %1 » dans %2) = %3 ; P(avant) = %4 ; P(après) = %5 (proportions des tirages, bornes prises à chaque "
-                                   "tirage, la plus ancienne en premier ; erreur Monte-Carlo entre parenthèses).\n")
-                        .arg(Cn, iv, probabilityText(pi, ess), probabilityText(pb, ess), probabilityText(pa, ess));
-    }
-    T.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
-    const QString basis = QStringLiteral("%1 tirages a posteriori (%2 chaîne%3, ESS ≈ %4)")
-                              .arg(fr.toString(qlonglong(kept))).arg(S.chainStarts.size()).arg(S.chainStarts.size() > 1 ? "s" : "")
-                              .arg(fr.toString(qlonglong(std::llround(ess))));
-    T.html += QStringLiteral("<p><small>Proportion des tirages, calculée tirage par tirage sur %1 : probabilité a posteriori dans le "
-                             "modèle ChronoModel (contraintes et phases comprises), pas un test de signification.</small></p>")
-                  .arg(basis.toHtmlEscaped());
-    T.prompt += QStringLiteral("Calcul sur %1 (dépendance entre colonnes respectée).\n").arg(basis);
-
-    // Figure : densités des colonnes en jeu, une par ligne.
-    const double infv = std::numeric_limits<double>::infinity();
-    for (size_t k = 0; k < C.cols.size(); ++k) {
-        if (!C.isColumn[k]) continue;
-        std::vector<double> v;
-        for (double y : *C.cols[k]) if (std::isfinite(y)) v.push_back(y);
-        const Density dc = kernelDensity(v, -infv, infv, Bandwidth::SheatherJones);
-        if (dc.valid()) T.series.append(plotSeries(C.names[int(k)], dc, fmt));
-    }
-    QString lw;
-    T.level = readLevel(rq, lw);
-    T.ok = true;
-    return T;
-}
-
-TracesRun runTraces(const QJsonObject& rq, DateFormat fmt)
-{
-    TracesRun T;
-    auto fail = [&](const QString& why) {
-        T.html += QStringLiteral("<p><b>Traces MCMC</b></p><p><i>Calcul impossible : %1.</i></p>").arg(why.toHtmlEscaped());
-        T.prompt += QStringLiteral("\nTraces MCMC — calcul impossible : %1.\n").arg(why);
-        return T;
-    };
-    auto str = [&](std::initializer_list<const char*> keys) {
-        for (const char* k : keys) if (rq.value(k).isString() && !rq.value(k).toString().trimmed().isEmpty()) return rq.value(k).toString().trimmed();
-        return QString();
-    };
-    const QString from = str({ "from", "a", "start" }), to = str({ "to", "b", "end" }), of = str({ "of", "column", "variable" });
-    QString op = text::fold(rq.value("op").toString()).trimmed();
-    static const QHash<QString, QString> ops = {
-        { "duration", "duration" }, { "duree", "duration" }, { "ecart", "duration" }, { "difference", "duration" }, { "interval", "duration" },
-        { "between", "between" }, { "entre", "between" }, { "date entre", "between" }, { "date_between", "between" },
-        { "value", "value" }, { "valeur", "value" }, { "date", "value" }, { "densite", "value" }, { "density", "value" },
-        { "column", "value" }, { "colonne", "value" },
-        { "order", "order" }, { "anteriorite", "order" }, { "posteriorite", "order" }, { "antero-posteriorite", "order" },
-        { "before", "order" }, { "avant", "order" }, { "precedence", "order" },
-        { "inside", "inside" }, { "within", "inside" }, { "appartenance", "inside" }, { "dans", "inside" }, { "membership", "inside" } };
-    if (ops.contains(op)) op = ops.value(op);
-    else if (op.isEmpty()) op = !of.isEmpty() ? QStringLiteral("value") : QStringLiteral("duration");
-    else return fail(QStringLiteral("opération « %1 » inconnue (duration, between, value, order ou inside)").arg(rq.value("op").toString()));
-    if (op == QLatin1String("order") || op == QLatin1String("inside")) return runTracesProbability(rq, fmt, op, from, to, of);
-
-    QString levelWarning;
-    T.level = readLevel(rq, levelWarning);
-
-    // Colonnes désignées
-    const QStringList wanted = op == "value" ? QStringList{ of.isEmpty() ? from : of } : QStringList{ from, to };
-    if (wanted.contains(QString()))
-        return fail(op == "value" ? QStringLiteral("colonne à analyser absente (« of »)")
-                                  : QStringLiteral("il faut deux colonnes : « from » (A) et « to » (B)"));
-    std::vector<const std::vector<double>*> cols;
-    QStringList colNames;
-    const TraceSet* first = nullptr;
-    const int preferred = traces::setWithAll(wanted);     // un même fichier contenant toutes les colonnes, si possible
-    for (const QString& w : wanted) {
-        int s = -1, c = -1;
-        QString err;
-        if (!traces::resolve(w, s, c, &err, preferred)) return fail(err);
-        const TraceSet& ts = traces::loaded()[s];
-        if (first && (ts.rows() != first->rows() || ts.chainStarts != first->chainStarts))
-            return fail(QStringLiteral("« %1 » et « %2 » viennent d'exports différents (nombre de tirages ou chaînes différents) : "
-                                       "exporter les deux depuis le même calcul").arg(colNames.value(0), ts.columns[c]));
-        if (!first) first = &ts;
-        cols.push_back(&ts.values[size_t(c)]);
-        colNames << ts.columns[c];
-    }
-    const size_t N = first->rows();
-
-    // Quantité dérivée, tirage par tirage (tirages où une colonne est vide ignorés).
-    std::vector<double> x;
-    std::vector<std::vector<double>> byChain(first->chainStarts.size());
-    std::mt19937 rng(12345);                     // reproductible
-    std::uniform_real_distribution<double> unif(0.0, 1.0);
-    const int draws = op == "between" ? int(std::clamp<size_t>(200000 / std::max<size_t>(N, 1), 1, 10)) : 1;
-    size_t chain = 0, kept = 0, positive = 0;
-    for (size_t i = 0; i < N; ++i) {
-        while (chain + 1 < first->chainStarts.size() && i >= first->chainStarts[chain + 1]) ++chain;
-        const double a = (*cols[0])[i], b = cols.size() > 1 ? (*cols[1])[i] : 0.0;
-        if (!std::isfinite(a) || !std::isfinite(b)) continue;
-        ++kept;
-        if (op == "value") { x.push_back(a); byChain[chain].push_back(a); }
-        else if (op == "duration") { x.push_back(b - a); byChain[chain].push_back(b - a); if (b > a) ++positive; }
-        else {
-            const double lo = std::min(a, b), hi = std::max(a, b);
-            for (int k = 0; k < draws; ++k) x.push_back(lo + unif(rng) * (hi - lo));
-        }
-    }
-    if (kept < 10) return fail(QStringLiteral("moins de 10 tirages exploitables (valeurs vides dans les colonnes)"));
-
-    double h = 0.0;
-    Bandwidth rule = Bandwidth::SheatherJones;
-    const double inf = std::numeric_limits<double>::infinity();
-    const Density d = kernelDensity(x, -inf, inf, Bandwidth::SheatherJones, &h, &rule);
-    if (!d.valid()) return fail(QStringLiteral("densité impossible : tous les tirages ont la même valeur (colonne fixée ?)"));
-    const DensityStats st = densityStats(d);
-
-    const QString opText = op == "value" ? QStringLiteral("densité de « %1 »").arg(colNames[0])
-                         : op == "duration" ? QStringLiteral("durée de « %1 » à « %2 » (%2 − %1)").arg(colNames[0], colNames[1])
-                         : QStringLiteral("date comprise entre « %1 » et « %2 » (uniforme entre les deux, tirage par tirage)").arg(colNames[0], colNames[1]);
-    const QString name = rq.value("name").toString().trimmed();
-    T.name = name.isEmpty() ? (op == "value" ? colNames[0] : op == "duration" ? QStringLiteral("%1 → %2").arg(colNames[0], colNames[1])
-                                                                            : QStringLiteral("entre %1 et %2").arg(colNames[0], colNames[1]))
-                            : name;
-    const QString head = QStringLiteral("Traces MCMC « %1 » — %2").arg(first->file, opText);
-    T.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
-    T.prompt += QStringLiteral("\n%1\n").arg(head);
-    const QLocale fr(QLocale::French);
-    const QString basis = QStringLiteral("%1 tirages a posteriori (%2 chaîne%3)%4")
-                              .arg(fr.toString(qlonglong(kept))).arg(first->chainStarts.size()).arg(first->chainStarts.size() > 1 ? "s" : "")
-                              .arg(op == "between" ? QStringLiteral(", %1 dates tirées par tirage").arg(draws) : QString());
-    T.html += QStringLiteral("<p><i>Calcul tirage par tirage sur %1 : la dépendance entre les colonnes (contraintes, phases) est respectée.</i></p>")
-                  .arg(basis.toHtmlEscaped());
-    T.prompt += QStringLiteral("Calcul tirage par tirage sur %1 (dépendance entre colonnes respectée).\n").arg(basis);
-
-    if (op == "duration") {
-        // Durée : en années, pas une date.
-        const dateformat::PrecisionScope precision(st.sd);
-        QString rows, promptHpd;
-        for (double l : displayLevels(T.level)) {
-            const QString t = durationIntervalsText(hpdIntervals(d, l), fmt), lt = levelText(l);
-            const bool asked = std::abs(l - T.level) < 1e-9 && std::abs(T.level - MethodRunner::kDefaultLevel) > 1e-9;
-            rows += QStringLiteral("<tr><td valign='top'><b>HPD %1 %</b>%2</td><td>%3</td></tr>")
-                        .arg(lt, asked ? QStringLiteral(" <i>(demandé)</i>") : QString(), QString(t).replace('\n', "<br>"));
-            promptHpd += QStringLiteral("Intervalles HPD de la durée à %1 %%2 :\n- %3\n")
-                             .arg(lt, asked ? QStringLiteral(" (niveau demandé par l'utilisateur)") : QString(), QString(t).replace("\n", "\n- "));
-        }
-        const double pPos = double(positive) / double(kept);
-        T.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1"
-                                 "<tr><td><b>MAP (mode)</b></td><td>%2</td></tr>"
-                                 "<tr><td><b>Moyenne ; écart-type</b></td><td>%3 ; %4</td></tr>"
-                                 "<tr><td><b>Q1 ; Q2 (médiane) ; Q3</b></td><td>%5 ; %6 ; %7</td></tr>"
-                                 "<tr><td><b>P(« %8 » postérieur à « %9 »)</b></td><td>%10 %</td></tr></table>")
-                      .arg(rows, dateformat::spread(st.mode, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt),
-                           dateformat::spread(st.q1, fmt), dateformat::spread(st.median, fmt), dateformat::spread(st.q3, fmt),
-                           colNames[1].toHtmlEscaped(), colNames[0].toHtmlEscaped(), text::num(100.0 * pPos, 1));
-        T.prompt += promptHpd;
-        T.prompt += QStringLiteral("Durée : MAP %1, moyenne %2, écart-type %3, Q1 %4, médiane %5, Q3 %6. Une durée négative signifie que "
-                                   "« %7 » est antérieur à « %8 ». Probabilité que « %7 » soit postérieur à « %8 » : %9 %.\n")
-                        .arg(dateformat::spread(st.mode, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt),
-                             dateformat::spread(st.q1, fmt), dateformat::spread(st.median, fmt), dateformat::spread(st.q3, fmt),
-                             colNames[1], colNames[0], text::num(100.0 * pPos, 1));
-        QJsonArray xs, ys;
-        const size_t step = std::max<size_t>(1, d.t.size() / 400);
-        for (size_t k = 0; k < d.t.size(); k += step) { xs.append(d.t[k] / dateformat::unitYears(fmt)); ys.append(d.v[k]); }
-        T.durationPlot = QJsonObject{ { "title", QStringLiteral("Durée — %1").arg(T.name) },
-                                      { "xlabel", fmt == DateFormat::Ka ? QStringLiteral("Durée (ka)") : fmt == DateFormat::Ma ? QStringLiteral("Durée (Ma)")
-                                                                                                     : QStringLiteral("Durée (années)") },
-                                      { "ylabel", QStringLiteral("Densité de probabilité") }, { "fill", true }, { "yaxis", false },
-                                      { "hpd", T.level }, { "layout", QStringLiteral("rows") },
-                                      { "series", QJsonArray{ QJsonObject{ { "name", T.name }, { "x", xs }, { "y", ys } } } } };
-    } else {
-        appendSummary(T.html, T.prompt, d, hpdIntervals(d, 95.0), hpdIntervals(d, 68.0), st, T.level, fmt);
-        T.series.append(plotSeries(op == "between" ? QStringLiteral("Date entre %1 et %2").arg(colNames[0], colNames[1]) : colNames[0], d, fmt));
-        if (op == "between")
-            for (size_t c = 0; c < cols.size(); ++c) {
-                std::vector<double> v;
-                for (double y : *cols[c]) if (std::isfinite(y)) v.push_back(y);
-                const Density dc = kernelDensity(v, -inf, inf, Bandwidth::SheatherJones);
-                if (dc.valid()) T.series.append(plotSeries(colNames[int(c)], dc, fmt));
-            }
-    }
-    if (!levelWarning.isEmpty()) {
-        T.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(levelWarning.toHtmlEscaped());
-        T.prompt += QStringLiteral("Avertissement : %1.\n").arg(levelWarning);
-    }
-
-    // Lissage et convergence de la quantité calculée
-    const QString hRule = rule == Bandwidth::SheatherJones ? QStringLiteral("Sheather-Jones") : QStringLiteral("Silverman (repli)");
-    QString conv;
-    size_t len = std::numeric_limits<size_t>::max();
-    for (const std::vector<double>& c : byChain) len = std::min(len, c.size());
-    if (op != "between" && byChain.size() >= 2 && len >= 4) {
-        std::vector<std::vector<double>> eq;
-        for (const std::vector<double>& c : byChain) eq.emplace_back(c.begin(), c.begin() + std::ptrdiff_t(len));
-        const mcmcdiag::RhatEss re = mcmcdiag::computeRhatAndEss(eq);
-        const double M = double(eq.size());
-        const bool good = re.rhat < mcmcdiag::kRhatGood && std::min(re.bulkEss, re.tailEss) >= mcmcdiag::kEssGoodPerChain * M;
-        const bool warnc = re.rhat < mcmcdiag::kRhatWarning && std::min(re.bulkEss, re.tailEss) >= mcmcdiag::kEssWarningPerChain * M;
-        conv = QStringLiteral("%1 (R̂ = %2 ; ESS bulk = %3 ; ESS tail = %4)")
-                   .arg(good ? QStringLiteral("✅ satisfaisante") : warnc ? QStringLiteral("⚠️ à surveiller") : QStringLiteral("❌ insuffisante"),
-                        rhatText(re.rhat), essText(re.bulkEss), essText(re.tailEss));
-    }
-    T.html += QStringLiteral("<p><small>Densité lissée par noyau gaussien, h = %1 (règle de %2)%3.</small></p>")
-                  .arg(dateformat::spread(h, fmt).toHtmlEscaped(), hRule,
-                       conv.isEmpty() ? QString() : QStringLiteral(" ; convergence de cette quantité : %1").arg(conv.toHtmlEscaped()));
-    T.prompt += QStringLiteral("Densité lissée par noyau gaussien : h = %1 (règle de %2).%3\n")
-                    .arg(dateformat::spread(h, fmt), hRule, conv.isEmpty() ? QString() : QStringLiteral(" Convergence de cette quantité : %1.").arg(conv));
-    T.ok = true;
-    return T;
-}
-
 // ------------------------------------------------------------------ calibration inverse (mesure attendue pour une date)
 
 struct InverseRun {
@@ -1163,8 +964,8 @@ InverseRun runInverse(const QJsonObject& rq, DateFormat fmt)
         : std::isfinite(t) ? QStringLiteral("la date %1").arg(dateformat::format(t, fmt)) : QStringLiteral("une date non précisée");
     const QString head = QStringLiteral("Calibration inverse — %1 attendu%2 pour %3")
                              .arg(R.quantity.isEmpty() ? QStringLiteral("mesure") : R.quantity,
-                                  R.quantity == QLatin1String("Inclinaison") || R.quantity == QLatin1String("Déclinaison")
-                                      || R.quantity == QLatin1String("Intensité") ? QStringLiteral("e") : QString(), when);
+                                  R.quantity == QLatin1String("Inclinaison") || R.quantity == QStringLiteral("Déclinaison")
+                                      || R.quantity == QStringLiteral("Intensité") ? QStringLiteral("e") : QString(), when);
     V.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
     V.prompt += QStringLiteral("\n%1\n").arg(head);
     if (!R.ok) {
@@ -1237,6 +1038,15 @@ struct OrderItem {
     bool curves = false;
 };
 
+// Datation « density » (plugin Density de ChronoModel) : fichier tabulé cherché dans <racine>/Density des dossiers de
+// courbes (dossier de l'utilisateur, Calib de ChronoModel), nom comparé en minuscules, « .csv » ajouté s'il manque ;
+// un chemin absolu est accepté. Format de PluginDensity::loadRefFile : lignes « // » de description, tmin, tmax, puis
+// une valeur par ligne sur une grille régulière ; densité renormalisée, nulle hors de [tmin ; tmax].
+bool loadDensityDating(const QJsonObject& d, Density& out, QString& file, QString& error)
+{
+    return DensityMethod::load(d, out, file, error);
+}
+
 OrderItem orderItem(const QJsonObject& in, const QJsonObject& parent, const QString& fallback, DateFormat fmt)
 {
     OrderItem I;
@@ -1264,9 +1074,32 @@ OrderItem orderItem(const QJsonObject& in, const QJsonObject& parent, const QStr
         else I.d = C.combined;
         return I;
     }
+    if (m == QLatin1String("density")) {
+        const QString name = d.value("name").toString().trimmed();
+        I.label = name.isEmpty() ? fallback : name;
+        Density dd;
+        QString file, err;
+        if (!loadDensityDating(d, dd, file, err)) { I.error = QStringLiteral("%1 : %2").arg(I.label, err); return I; }
+        Wiggle w;
+        QString werr;
+        if (!wiggleFromJson(d.value("wiggle"), w, werr)) { I.error = QStringLiteral("%1 : %2").arg(I.label, werr); return I; }
+        QString head = QStringLiteral("%1 — Densité tabulée (plugin Density) : %2").arg(I.label, QFileInfo(file).fileName());
+        if (w.type != Wiggle::None) { dd = wiggleDensity(dd, w); head += QStringLiteral(" — avec %1 (densité de t + δ)").arg(wiggleText(w)); }
+        QString note;
+        double kept = 1.0;
+        I.d = restrictToPeriod(dd, d, fmt, note, kept);
+        if (!I.d.valid()) { I.error = QStringLiteral("%1 : aucune probabilité sur la %2").arg(I.label, note); return I; }
+        if (!note.isEmpty()) head += QStringLiteral(" — %1").arg(note);
+        const dateformat::PrecisionScope precision(densityStats(I.d).sd);
+        const QString hpd = intervalsText(hpdIntervals(I.d, 95.0), fmt);
+        I.html = QStringLiteral("<p><b>%1</b><br><small>HPD 95 % : %2</small></p>")
+                     .arg(head.toHtmlEscaped(), hpd.toHtmlEscaped().replace('\n', QStringLiteral(" ; ")));
+        I.prompt = QStringLiteral("%1. HPD à 95 % : %2.\n").arg(head, QString(hpd).replace('\n', QStringLiteral(" ; ")));
+        return I;
+    }
     if (m.isEmpty() || !reg.byId(m)) {
         I.label = fallback;
-        I.error = QStringLiteral("« %1 » n'a pas de « method » de datation valide (c14, f14c, tl, gauss, unif, am, event ou combine)").arg(fallback);
+        I.error = QStringLiteral("« %1 » n'a pas de « method » de datation valide (c14, f14c, tl, gauss, unif, am, density, event ou combine)").arg(fallback);
         return I;
     }
     d["method"] = m;
@@ -1365,15 +1198,51 @@ double probabilityBefore(const Density& A, const Density& B)
 
 namespace {
 
-struct OrderRun {
-    bool ok = false;
-    QString html, prompt;
-    QJsonArray series;
-    QJsonObject gapPlot;             // écart B − A : graphique à part (axe en années)
-    QString name;
-    bool curves = false;
-    double level = MethodRunner::kDefaultLevel;
-};
+// ------------------------------------------------------------------ relation entre datations et traces MCMC
+//
+// Un seul calcul (« relation ») pour toutes les questions sur deux ou trois termes : densité d'un terme (« value »),
+// durée B − A (« duration »), date comprise entre A et B (« between »), antéro-postérité (« order »), appartenance de
+// C à [A ; B] (« inside »). Chaque terme est :
+//   - une colonne de traces MCMC exportées par ChronoModel (tirages liés aux autres colonnes du même export) ;
+//   - une datation indépendante (c14, f14c, tl, gauss, unif, am, density, combinaison, événement calculé par SeldonH) ;
+//   - une année fixe (borne d'intervalle, origine d'une durée).
+// Calcul exact sur les densités quand il n'y a que des datations indépendantes et des années (convolution pour
+// l'écart, fonctions de répartition pour l'appartenance) ; sinon tirage par tirage : les colonnes donnent leurs
+// tirages, chaque datation indépendante est tirée par inverse de sa fonction de répartition (tirage stratifié).
+
+// Intervalles d'une densité de durée, en années (« 120 → 340 ans : 95,0 % »).
+QString durationIntervalsText(const std::vector<Interval>& v, DateFormat fmt)
+{
+    QStringList items;
+    for (const Interval& iv : v) {
+        if (iv.prob < 0.005) continue;
+        items << QStringLiteral("%1 → %2 : %3 %").arg(dateformat::spread(iv.from, fmt), dateformat::spread(iv.to, fmt),
+                                                       text::num(iv.prob * 100.0, 1));
+    }
+    return items.join("\n");
+}
+
+// Probabilité estimée sur les tirages, avec son erreur Monte-Carlo sqrt(p(1 − p) / ESS) (ESS de l'indicatrice, toutes
+// chaînes) : dit si le nombre de tirages suffit pour la précision annoncée.
+QString probabilityText(double p, double ess)
+{
+    QString t = text::num(100.0 * p, 1) + QStringLiteral(" %");
+    if (ess > 0.0 && p > 0.0 && p < 1.0) t += QStringLiteral(" (± %1 %)").arg(text::num(100.0 * std::sqrt(p * (1.0 - p) / ess), 1));
+    else if (ess > 0.0) t += QStringLiteral(" (aucun tirage contraire : < %1 %)").arg(text::numAuto(100.0 / ess, 2));
+    return t;
+}
+
+// ESS d'une indicatrice (0/1) par chaîne ; nombre de tirages si une seule chaîne ou chaînes trop courtes.
+double indicatorEss(const std::vector<std::vector<double>>& byChain, size_t kept)
+{
+    size_t len = std::numeric_limits<size_t>::max();
+    for (const std::vector<double>& c : byChain) len = std::min(len, c.size());
+    if (byChain.size() < 2 || len < 4) return double(kept);
+    std::vector<std::vector<double>> eq;
+    for (const std::vector<double>& c : byChain) eq.emplace_back(c.begin(), c.begin() + std::ptrdiff_t(len));
+    const mcmcdiag::RhatEss re = mcmcdiag::computeRhatAndEss(eq);
+    return std::isfinite(re.bulkEss) && re.bulkEss > 0.0 ? re.bulkEss : double(kept);
+}
 
 // « 97,3 % », « > 99,9 % », « < 0,1 % »
 QString percentText(double p)
@@ -1383,98 +1252,2018 @@ QString percentText(double p)
     return text::num(100.0 * p, 1) + QStringLiteral(" %");
 }
 
-OrderRun runOrder(const QJsonObject& rq, DateFormat fmt)
+// Fonction de répartition tabulée d'une densité (trapèzes) : F(x) et F⁻¹(u) par interpolation linéaire.
+struct CdfTable {
+    std::vector<double> t, F;
+    explicit CdfTable(const Density& d)
+    {
+        if (!d.valid()) return;
+        t = d.t;
+        F.assign(t.size(), 0.0);
+        for (size_t i = 1; i < t.size(); ++i) F[i] = F[i - 1] + 0.5 * (d.v[i - 1] + d.v[i]) * (t[i] - t[i - 1]);
+        const double total = F.back();
+        if (total > 0.0) for (double& f : F) f /= total;
+    }
+    double at(double x) const
+    {
+        if (t.empty() || x <= t.front()) return 0.0;
+        if (x >= t.back()) return 1.0;
+        const size_t i = size_t(std::upper_bound(t.begin(), t.end(), x) - t.begin());      // t[i-1] <= x < t[i]
+        return F[i - 1] + (x - t[i - 1]) / (t[i] - t[i - 1]) * (F[i] - F[i - 1]);
+    }
+    double inverse(double u) const
+    {
+        const size_t i = size_t(std::lower_bound(F.begin(), F.end(), u) - F.begin());
+        if (i == 0) return t.front();
+        if (i >= F.size()) return t.back();
+        const double dF = F[i] - F[i - 1];
+        return dF > 0.0 ? t[i - 1] + (u - F[i - 1]) / dF * (t[i] - t[i - 1]) : t[i];
+    }
+};
+
+// n tirages d'une densité : inverse de la fonction de répartition sur des quantiles stratifiés ((k + U) / n), dans un
+// ordre aléatoire (les tirages ne sont liés ni entre eux ni aux autres termes).
+std::vector<double> sampleDensity(const Density& d, size_t n, std::mt19937& rng)
 {
-    OrderRun O;
-    QJsonValue va = rq.value("a"), vb = rq.value("b");
-    if ((!va.isObject() || !vb.isObject()) && rq.value("dates").isArray() && rq.value("dates").toArray().size() == 2) {
-        va = rq.value("dates").toArray().at(0);
-        vb = rq.value("dates").toArray().at(1);
-    }
-    QString levelWarning;
-    O.level = readLevel(rq, levelWarning);
-    auto fail = [&](const QString& why) {
-        O.html += QStringLiteral("<p><b>Ordre de deux datations</b></p><p><i>Calcul impossible : %1.</i></p>").arg(why.toHtmlEscaped());
-        O.prompt += QStringLiteral("\nOrdre de deux datations — calcul impossible : %1.\n").arg(why);
-        return O;
-    };
-    if (!va.isObject() || !vb.isObject())
-        return fail(QStringLiteral("il faut deux datations, « a » et « b » (objets avec « method » et leurs valeurs)"));
-    const OrderItem A = orderItem(va.toObject(), rq, QStringLiteral("A"), fmt);
-    const OrderItem B = orderItem(vb.toObject(), rq, QStringLiteral("B"), fmt);
-    O.curves = A.curves || B.curves;
-    const QString an = A.label, bn = B.label == A.label ? B.label + QStringLiteral(" (2)") : B.label;
-    O.name = rq.value("name").toString().trimmed().isEmpty() ? QStringLiteral("%1 / %2").arg(an, bn) : rq.value("name").toString().trimmed();
-    const QString head = QStringLiteral("Ordre de « %1 » et « %2 » (datations indépendantes)").arg(an, bn);
-    O.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped());
-    O.prompt += QStringLiteral("\n%1\n").arg(head);
-    O.html += A.html + B.html;
-    O.prompt += A.prompt + B.prompt;
-    if (!A.error.isEmpty()) return fail(A.error);
-    if (!B.error.isEmpty()) return fail(B.error);
+    const CdfTable C(d);
+    std::vector<size_t> perm(n);
+    std::iota(perm.begin(), perm.end(), size_t(0));
+    std::shuffle(perm.begin(), perm.end(), rng);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    std::vector<double> x(n);
+    for (size_t i = 0; i < n; ++i) x[i] = C.inverse((double(perm[i]) + unif(rng)) / double(n));
+    return x;
+}
 
-    const Density D = differenceDensity(A.d, B.d);
-    if (!D.valid()) return fail(QStringLiteral("écart B − A impossible à calculer"));
-    const double pAB = std::clamp(1.0 - densityCdf(D, 0.0), 0.0, 1.0), pBA = 1.0 - pAB;
-    const DensityStats st = densityStats(D);
-    const dateformat::PrecisionScope precision(st.sd);
-
-    QString rows, promptHpd;
-    rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td><b>%3</b></td></tr>")
-                .arg(an.toHtmlEscaped(), bn.toHtmlEscaped(), percentText(pAB));
-    rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td><b>%3</b></td></tr>")
-                .arg(bn.toHtmlEscaped(), an.toHtmlEscaped(), percentText(pBA));
-    for (double l : displayLevels(O.level)) {
-        const QString t = durationIntervalsText(hpdIntervals(D, l), fmt), lt = levelText(l);
-        rows += QStringLiteral("<tr><td valign='top'>Écart « %1 » − « %2 », HPD %3 %</td><td>%4</td></tr>")
-                    .arg(bn.toHtmlEscaped(), an.toHtmlEscaped(), lt, t.toHtmlEscaped().replace('\n', QStringLiteral("<br>")));
-        promptHpd += QStringLiteral("Écart « %1 » − « %2 » (années), intervalles HPD à %3 % :\n- %4\n")
-                         .arg(bn, an, lt, QString(t).replace("\n", "\n- "));
+// Densité de s·X + c (s = +1 ou −1) : écart entre une datation et une année fixe.
+Density affineDensity(const Density& d, double s, double c)
+{
+    Density r;
+    r.step = d.step;
+    const size_t n = d.t.size();
+    r.t.resize(n);
+    r.v.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        const size_t j = s > 0.0 ? i : n - 1 - i;
+        r.t[i] = c + s * d.t[j];
+        r.v[i] = d.v[j];
     }
-    rows += QStringLiteral("<tr><td>Écart : médiane ; moyenne ± écart-type</td><td>%1 ; %2 ± %3</td></tr>")
-                .arg(dateformat::spread(st.median, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt));
-    O.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
-    O.html += QStringLiteral("<p><small>Calcul exact sur les deux densités (convolution, pas %1) en les supposant <b>indépendantes</b> : "
-                             "aucune contrainte stratigraphique ni phase. Un écart positif signifie « %2 » plus récent que « %3 ». "
-                             "Dans un modèle ChronoModel, l'ordre se lit sur les traces exportées (calcul tirage par tirage).</small></p>")
-                  .arg(dateformat::spread(D.step, fmt).toHtmlEscaped(), bn.toHtmlEscaped(), an.toHtmlEscaped());
-    O.prompt += QStringLiteral("P(« %1 » antérieur à « %2 ») = %3 ; P(« %2 » antérieur à « %1 ») = %4.\n")
-                    .arg(an, bn, percentText(pAB), percentText(pBA));
-    O.prompt += promptHpd;
-    O.prompt += QStringLiteral("Écart « %1 » − « %2 » : médiane %3, moyenne %4, écart-type %5 (écart positif = « %1 » plus récent).\n")
-                    .arg(bn, an, dateformat::spread(st.median, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt));
-    O.prompt += QStringLiteral("Méthode : calcul exact sur les densités calibrées, les deux datations étant supposées indépendantes "
-                               "(P(A antérieur à B) = ∫ f_A(a) · P(B > a) da ; écart = densité de B − A). Consigne : donne les deux "
-                               "probabilités telles quelles. C'est une probabilité a posteriori, pas un test de signification ni une "
-                               "p-value : ne fixe pas de seuil à la place de l'utilisateur. Explique que des intervalles HPD qui se "
-                               "recouvrent n'empêchent pas une probabilité nette, et que des intervalles séparés la rendent proche de "
-                               "100 %. Rappelle que l'indépendance suppose qu'aucune autre information ne relie les deux datations : si "
-                               "une stratigraphie, une phase ou d'autres dates les relient, il faut un modèle ChronoModel (avec ou sans "
-                               "la contrainte) et le calcul sur ses traces exportées ; une contrainte imposée donne 100 % par "
-                               "construction. Une calibration multimodale (plateau de la courbe) peut rendre l'ordre incertain même "
-                               "avec des mesures précises.\n");
-    if (!levelWarning.isEmpty()) {
-        O.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(levelWarning.toHtmlEscaped());
-        O.prompt += QStringLiteral("Avertissement : %1.\n").arg(levelWarning);
-    }
+    return r;
+}
 
-    // Figures : les deux densités (une par ligne) ; l'écart B − A à part.
-    QJsonObject sa = plotSeries(an, A.d, fmt), sb = plotSeries(bn, B.d, fmt);
-    if (const QString c = MethodRunner::colorOf(va.toObject()); !c.isEmpty()) sa["color"] = c;
-    if (const QString c = MethodRunner::colorOf(vb.toObject()); !c.isEmpty()) sb["color"] = c;
-    O.series.append(sa);
-    O.series.append(sb);
+// Graphique à part d'une durée ou d'un écart (axe en années, pas en dates).
+QJsonObject spreadPlot(const QString& title, const QString& word, const QString& series, const Density& D, double level, DateFormat fmt)
+{
     QJsonArray xs, ys;
     const size_t step = std::max<size_t>(1, D.t.size() / 400);
     for (size_t k = 0; k < D.t.size(); k += step) { xs.append(D.t[k] / dateformat::unitYears(fmt)); ys.append(D.v[k]); }
-    O.gapPlot = QJsonObject{ { "title", QStringLiteral("Écart %1 − %2").arg(bn, an) },
-                             { "xlabel", fmt == DateFormat::Ka ? QStringLiteral("Écart (ka)") : fmt == DateFormat::Ma ? QStringLiteral("Écart (Ma)")
-                                                                                                  : QStringLiteral("Écart (années)") },
-                             { "ylabel", QStringLiteral("Densité de probabilité") }, { "fill", true }, { "yaxis", false },
-                             { "hpd", O.level }, { "layout", QStringLiteral("rows") },
-                             { "series", QJsonArray{ QJsonObject{ { "name", QStringLiteral("%1 − %2").arg(bn, an) }, { "x", xs }, { "y", ys } } } } };
-    O.ok = true;
-    return O;
+    const QString unit = dateformat::unitLabel(fmt).isEmpty() ? QStringLiteral("années") : dateformat::unitLabel(fmt);
+    return QJsonObject{ { "title", title }, { "xlabel", QStringLiteral("%1 (%2)").arg(word, unit) },
+                        { "ylabel", QStringLiteral("Densité de probabilité") }, { "fill", true }, { "yaxis", false },
+                        { "hpd", level }, { "layout", QStringLiteral("rows") },
+                        { "series", QJsonArray{ QJsonObject{ { "name", series }, { "x", xs }, { "y", ys } } } } };
+}
+
+// Un terme de la relation.
+struct Operand {
+    enum Kind { Column, Independent, Fixed } kind = Fixed;
+    QString label, html, prompt, color;
+    const TraceSet* set = nullptr;
+    const std::vector<double>* col = nullptr;
+    Density d;                       // datation indépendante
+    double year = std::nan("");      // année fixe
+    bool curves = false;
+    bool isEvent = false;            // événement calculé par SeldonH (pas un Event du modèle ChronoModel)
+};
+
+// Valeur d'un terme dans la demande : objet (datation), texte (colonne, année, ou objet JSON écrit en texte), nombre.
+QJsonValue operandValue(const QJsonObject& rq, std::initializer_list<const char*> keys)
+{
+    for (const char* k : keys) {
+        const QJsonValue v = rq.value(QLatin1String(k));
+        if (v.isObject()) return v;
+        if (v.isDouble()) return QString::number(v.toDouble(), 'g', 12);
+        if (!v.isString()) continue;
+        const QString s = v.toString().trimmed();
+        if (s.isEmpty()) continue;
+        if (s.startsWith('{')) {
+            const QJsonDocument doc = QJsonDocument::fromJson(s.toUtf8());
+            if (doc.isObject()) return doc.object();
+        }
+        return s;
+    }
+    return QJsonValue(QJsonValue::Undefined);
+}
+
+// Datation écrite en texte par un modèle de langage (« 2450 ± 30 BP ») : lue comme une datation, pas comme une année.
+QJsonObject datingFromText(const QString& s)
+{
+    static const QRegularExpression marks(QStringLiteral(R"(±|\+/-|\+-|\bBP\b|\bF14C\b|\bTL\b|\bOSL\b)"), QRegularExpression::CaseInsensitiveOption);
+    if (!marks.match(s).hasMatch()) return {};
+    const QVector<QJsonObject> rq = MethodRegistry::instance().parse(text::erasToAstronomical(s));
+    return rq.size() == 1 ? rq.first() : QJsonObject();
+}
+
+bool resolveOperand(const QJsonValue& v, const QJsonObject& rq, const QString& fallback, int preferred, DateFormat fmt,
+                    Operand& o, QString& error)
+{
+    QJsonObject obj = v.isObject() ? v.toObject() : datingFromText(v.toString());
+    if (!obj.isEmpty()) {
+        const QString m = MethodRunner::normalizeRequest(obj).value("method").toString();
+        if (m == QLatin1String("relation") || m == QLatin1String("inverse") || m == QLatin1String("density_file") || m == QLatin1String("table")) {
+            o.label = fallback;
+            error = QStringLiteral("« %1 » doit être une datation (c14, f14c, tl, gauss, unif, am, density, event ou combine), une colonne "
+                                   "des traces ou une année, pas un calcul « %2 »").arg(fallback, m);
+            return false;
+        }
+        if (!obj.contains("name") && v.isString()) obj["name"] = v.toString().trimmed();
+        const OrderItem I = orderItem(obj, rq, fallback, fmt);
+        o.kind = Operand::Independent;
+        o.label = I.label;
+        o.html = I.html;
+        o.prompt = I.prompt;
+        o.curves = I.curves;
+        o.color = MethodRunner::colorOf(obj);
+        o.isEvent = m == QLatin1String("event");
+        if (!I.error.isEmpty()) { error = I.error; return false; }
+        o.d = I.d;
+        return true;
+    }
+    const QString name = v.toString().trimmed();
+    int s = -1, c = -1;
+    QString err;
+    if (traces::resolve(name, s, c, &err, preferred)) {
+        const TraceSet& ts = traces::loaded()[s];
+        o.kind = Operand::Column;
+        o.set = &ts;
+        o.col = &ts.values[size_t(c)];
+        o.label = ts.columns[c];
+        return true;
+    }
+    const double y = text::yearFromText(name);
+    if (std::isfinite(y)) {
+        o.kind = Operand::Fixed;
+        o.year = y;
+        o.label = dateformat::format(y, fmt);
+        return true;
+    }
+    o.label = name;
+    error = err;
+    return false;
+}
+
+struct RelationRun {
+    bool ok = false;
+    bool curves = false;
+    bool posterior = false;          // au moins une colonne de traces : résultat a posteriori d'un modèle ChronoModel
+    QString html, prompt, name;
+    QString title;                   // titre de la fiche : opération et termes tels que SeldonH les a compris
+    QJsonArray series;               // densités de dates (graphique des datations)
+    QJsonObject extraPlot;           // durée ou écart : graphique à part (axe en années)
+    QVector<QJsonObject> scatterPlots; // corrélation : nuage de points de chaque paire (graphiques à part)
+    double level = MethodRunner::kDefaultLevel;
+};
+
+// Nom d'une datation sans nom d'après sa mesure (« 1700 ± 50 ans avant 2025 », « 1650 ± 30 BP ») ; vide pour un
+// événement, une combinaison ou une méthode inconnue.
+QString measureName(const QJsonObject& o)
+{
+    const MethodRegistry& reg = MethodRegistry::instance();
+    const QJsonObject n = MethodRunner::normalizeRequest(o);
+    if (!reg.byId(n.value("method").toString())) return {};
+    QString d = reg.describe(n);
+    if (const qsizetype k = d.indexOf(QStringLiteral(" — ")); k > 0) d = d.left(k);
+    if (const qsizetype k = d.indexOf(QStringLiteral(" : ")); k > 0 && k < 30) d = d.mid(k + 3);
+    if (const qsizetype k = d.lastIndexOf(QStringLiteral(" (")); k > 0 && d.endsWith(')')) d = d.left(k);   // « (années calendaires signées) »
+    return d.trimmed();
+}
+
+// Mesure d'une datation préfixée par sa méthode (« 14C 1650 ± 30 BP », « TL 1700 ± 50 ans avant 2025 ») : titres de fiche.
+QString prefixedMeasureName(const QJsonObject& o)
+{
+    const QString mn = measureName(o);
+    if (mn.isEmpty()) return {};
+    const QString m = MethodRunner::normalizeRequest(o).value("method").toString();
+    static const QHash<QString, QString> prefix = { { "c14", "14C" }, { "f14c", "F14C" }, { "tl", "TL" }, { "am", "AM" },
+                                                    { "gauss", "Gauss" }, { "unif", "Unif" } };
+    return prefix.contains(m) && !mn.startsWith(prefix.value(m)) ? prefix.value(m) + ' ' + mn : mn;
+}
+
+// Colonne de traces pour un titre : « Phase A Begin » → début de « Phase A », « Phase A End » → fin de « Phase A ».
+QString prettyColumn(const QString& c)
+{
+    if (c.endsWith(QLatin1String(" Begin"))) return QStringLiteral("début de « %1 »").arg(c.chopped(6));
+    if (c.endsWith(QLatin1String(" End"))) return QStringLiteral("fin de « %1 »").arg(c.chopped(4));
+    return QStringLiteral("« %1 »").arg(c);
+}
+
+RelationRun runRelation(const QJsonObject& rq, DateFormat fmt)
+{
+    RelationRun R;
+    QString levelWarning;
+    R.level = readLevel(rq, levelWarning);
+    QString done;                    // fiches des datations, déjà écrites
+    auto fail = [&](const QString& why) {
+        R.html += QStringLiteral("<p><b>Relation entre datations ou traces MCMC</b></p>%1<p><i>Calcul impossible : %2.</i></p>")
+                      .arg(done, why.toHtmlEscaped());
+        R.prompt += QStringLiteral("\nRelation entre datations ou traces MCMC — calcul impossible : %1.\n").arg(why);
+        R.ok = false;
+        return R;
+    };
+
+    // 1. Opération
+    QString op = text::fold(rq.value("op").toString()).trimmed();
+    static const QHash<QString, QString> ops = {
+        { "duration", "duration" }, { "duree", "duration" }, { "ecart", "duration" }, { "difference", "duration" }, { "interval", "duration" },
+        { "gap", "duration" }, { "span", "duration" },
+        { "between", "between" }, { "entre", "between" }, { "date entre", "between" }, { "date_between", "between" },
+        { "value", "value" }, { "valeur", "value" }, { "date", "value" }, { "densite", "value" }, { "density", "value" },
+        { "column", "value" }, { "colonne", "value" },
+        { "order", "order" }, { "ordre", "order" }, { "anteriorite", "order" }, { "posteriorite", "order" }, { "antero-posteriorite", "order" },
+        { "before", "order" }, { "avant", "order" }, { "precedence", "order" }, { "compare", "order" }, { "comparer", "order" },
+        { "inside", "inside" }, { "within", "inside" }, { "appartenance", "inside" }, { "dans", "inside" }, { "membership", "inside" },
+        { "correlation", "correlation" }, { "correlations", "correlation" }, { "correl", "correlation" }, { "matrice", "correlation" },
+        { "matrix", "correlation" }, { "covariance", "correlation" }, { "scatter", "correlation" }, { "nuage", "correlation" },
+        { "dependance", "correlation" }, { "dependence", "correlation" } };
+    QJsonValue vFrom = operandValue(rq, { "from", "a", "start" }), vTo = operandValue(rq, { "to", "b", "end" });
+    QJsonValue vOf = operandValue(rq, { "of", "column", "variable", "c" });
+    if (ops.contains(op)) op = ops.value(op);
+    else if (op.isEmpty()) op = !vOf.isUndefined() ? QStringLiteral("value") : QStringLiteral("order");
+    else return fail(QStringLiteral("opération « %1 » inconnue (duration, between, value, order, inside ou correlation)").arg(rq.value("op").toString()));
+    if (vFrom.isUndefined() && vTo.isUndefined() && rq.value("dates").isArray()) {     // « dates » : [A, B] (ou [C, A, B] pour inside)
+        const QJsonArray ds = rq.value("dates").toArray();
+        const int k = op == QLatin1String("inside") && ds.size() == 3 && vOf.isUndefined() ? 1 : 0;
+        if (k == 1) vOf = ds.at(0);
+        if (ds.size() >= 2 + k) { vFrom = ds.at(k); vTo = ds.at(k + 1); }
+    }
+    if (op == QLatin1String("value") && vOf.isUndefined()) vOf = vFrom;
+
+    // 2. Termes
+    struct Wanted { QJsonValue v; QString fallback; };
+    QVector<Wanted> wanted;
+    if (op == QLatin1String("value")) {
+        if (vOf.isUndefined()) return fail(QStringLiteral("terme à analyser absent (« of » : colonne des traces ou datation)"));
+        wanted = { { vOf, QStringLiteral("A") } };
+    } else if (op == QLatin1String("correlation")) {
+        // Liste « terms » (ou « dates », « variables »), sinon from, to et of : 2 à 8 termes.
+        QJsonArray list;
+        for (const char* k : { "terms", "variables", "dates" })
+            if (rq.value(QLatin1String(k)).isArray()) { list = rq.value(QLatin1String(k)).toArray(); break; }
+        QVector<QJsonValue> vs;
+        if (!list.isEmpty()) {
+            for (const QJsonValue& x : list) {
+                if (x.isString() && x.toString().trimmed().startsWith('{')) {
+                    const QJsonDocument doc = QJsonDocument::fromJson(x.toString().toUtf8());
+                    vs << (doc.isObject() ? QJsonValue(doc.object()) : x);
+                } else vs << (x.isDouble() ? QJsonValue(QString::number(x.toDouble(), 'g', 12)) : x);
+            }
+        } else
+            for (const QJsonValue& x : { vFrom, vTo, vOf }) if (!x.isUndefined()) vs << x;
+        if (vs.size() < 2) return fail(QStringLiteral("il faut au moins deux termes pour une corrélation (« terms » : [A, B, …], ou « from » et « to »)"));
+        if (vs.size() > 8) return fail(QStringLiteral("au plus 8 termes pour une matrice de corrélation (%1 demandés)").arg(vs.size()));
+        for (int k = 0; k < vs.size(); ++k) wanted.append({ vs[k], QString(QChar(u'A' + k)) });
+    } else if (op == QLatin1String("inside")) {
+        if (vOf.isUndefined() || vFrom.isUndefined() || vTo.isUndefined())
+            return fail(QStringLiteral("il faut le terme testé (« of ») et les deux bornes de l'intervalle (« from », « to »)"));
+        wanted = { { vOf, QStringLiteral("C") }, { vFrom, QStringLiteral("A") }, { vTo, QStringLiteral("B") } };
+    } else {
+        if (vFrom.isUndefined() || vTo.isUndefined())
+            return fail(QStringLiteral("il faut deux termes : « from » (A) et « to » (B), colonnes des traces ou datations"));
+        wanted = { { vFrom, QStringLiteral("A") }, { vTo, QStringLiteral("B") } };
+    }
+    QStringList columnNames;                 // un même fichier qui contient toutes les colonnes est préféré
+    for (const Wanted& w : wanted)
+        if (w.v.isString()) { int s = -1, c = -1; if (traces::resolve(w.v.toString(), s, c)) columnNames << w.v.toString(); }
+    const int preferred = traces::setWithAll(columnNames);
+    // Avec des colonnes de traces (« Phase A End »), une datation sans nom n'est pas appelée « A », « B » ou « C » : nom
+    // d'après sa mesure, préfixé par la méthode (« TL 1700 ± 50 ans avant 2025 »).
+    if (!columnNames.isEmpty())
+        for (Wanted& w : wanted) {
+            if (!w.v.isObject() || !w.v.toObject().value("name").toString().trimmed().isEmpty()) continue;
+            QJsonObject o = w.v.toObject();
+            const QString mn = measureName(o);
+            if (mn.isEmpty()) continue;
+            const QString m = MethodRunner::normalizeRequest(o).value("method").toString();
+            static const QHash<QString, QString> prefix = { { "c14", "14C" }, { "f14c", "F14C" }, { "tl", "TL" }, { "am", "AM" },
+                                                            { "gauss", "Gauss" }, { "unif", "Unif" } };
+            o["name"] = prefix.contains(m) && !mn.startsWith(prefix.value(m)) ? prefix.value(m) + ' ' + mn : mn;
+            w.v = o;
+        }
+    std::vector<Operand> X(size_t(wanted.size()));
+    for (int k = 0; k < wanted.size(); ++k) {
+        QString err;
+        const bool ok = resolveOperand(wanted[k].v, rq, wanted[k].fallback, preferred, fmt, X[size_t(k)], err);
+        done += X[size_t(k)].html;
+        R.prompt += X[size_t(k)].prompt;
+        if (!ok) return fail(err);
+    }
+    for (size_t k = 1; k < X.size(); ++k)                        // noms en double (deux datations sans nom)
+        for (size_t j = 0; j < k; ++j)
+            if (X[k].label == X[j].label) X[k].label += QStringLiteral(" (%1)").arg(k + 1);
+    const TraceSet* set = nullptr;
+    bool hasIndep = false;
+    QStringList indepNames;
+    bool anyEvent = false;
+    for (const Operand& o : X) {
+        if (o.kind == Operand::Independent) { hasIndep = true; indepNames << o.label; anyEvent = anyEvent || o.isEvent; }
+        R.curves = R.curves || o.curves;
+        if (o.kind != Operand::Column) continue;
+        if (set && (o.set->rows() != set->rows() || o.set->chainStarts != set->chainStarts))
+            return fail(QStringLiteral("« %1 » et « %2 » viennent d'exports différents (nombre de tirages ou chaînes différents) : "
+                                       "exporter les deux depuis le même calcul").arg(X[0].label, o.label));
+        if (!set) set = o.set;
+    }
+    const bool hasColumn = set != nullptr;
+    {
+        // Titre de la fiche : l'opération réellement calculée et les termes tels que SeldonH les a compris (colonne des
+        // traces, datation indépendante, année), pour contrôler le choix de l'outil fait par le modèle de langage.
+        QStringList T;
+        for (size_t k = 0; k < X.size(); ++k) {
+            const Operand& o = X[k];
+            const QJsonValue& v = wanted[int(k)].v;
+            QString t;
+            if (o.kind == Operand::Column) t = prettyColumn(o.label);
+            else if (o.kind == Operand::Independent && o.isEvent) t = QStringLiteral("Event « %1 » (calculé par SeldonH)").arg(o.label);
+            else if (o.kind == Operand::Independent && v.isObject() && v.toObject().value("name").toString().trimmed().isEmpty())
+                t = prefixedMeasureName(v.toObject());
+            else if (o.kind == Operand::Fixed) t = QStringLiteral("l'année %1").arg(o.label);
+            if (t.isEmpty()) t = QStringLiteral("« %1 »").arg(o.label);
+            T << t;
+        }
+        auto list = [](const QStringList& l) {
+            return l.size() < 2 ? l.join(QString()) : l.mid(0, l.size() - 1).join(QStringLiteral(", ")) + QStringLiteral(" et ") + l.last();
+        };
+        R.title = op == "value" ? QStringLiteral("Densité de %1").arg(T.value(0))
+                : op == "duration" ? QStringLiteral("Durée entre %1 et %2").arg(T.value(0), T.value(1))
+                : op == "between" ? QStringLiteral("Date entre %1 et %2").arg(T.value(0), T.value(1))
+                : op == "order" ? QStringLiteral("Ordre de %1 et %2").arg(T.value(0), T.value(1))
+                : op == "correlation" ? QStringLiteral("Corrélation entre %1").arg(list(T))
+                : QStringLiteral("Appartenance de %1 à [%2 ; %3]").arg(T.value(0), T.value(1), T.value(2));
+        if (hasColumn) R.title += QStringLiteral(" (traces MCMC)");
+    }
+    R.posterior = hasColumn;
+    if (op == QLatin1String("correlation"))
+        for (const Operand& o : X)
+            if (o.kind == Operand::Fixed)
+                return fail(QStringLiteral("« %1 » est une année fixe : elle ne varie pas, sa corrélation n'est pas définie").arg(o.label));
+    if ((op == QLatin1String("value") || op == QLatin1String("inside")) && X[0].kind == Operand::Fixed)
+        return fail(QStringLiteral("« %1 » est une année fixe : il faut une colonne des traces chargées ou une datation").arg(X[0].label));
+    if (op != QLatin1String("value") && op != QLatin1String("inside") && op != QLatin1String("correlation")
+        && X[0].kind == Operand::Fixed && X[1].kind == Operand::Fixed)
+        return fail(QStringLiteral("« %1 » et « %2 » sont deux années fixes : il faut au moins une colonne des traces ou une datation")
+                        .arg(X[0].label, X[1].label));
+    const bool exact = !hasColumn && op != QLatin1String("between") && op != QLatin1String("correlation");
+    const QString& A = X[op == QLatin1String("inside") ? 1 : 0].label;
+    const QString B = op == QLatin1String("value") ? QString() : X[op == QLatin1String("inside") ? 2 : 1].label;
+    QStringList allLabels;
+    for (const Operand& o : X) allLabels << o.label;
+    const QString corrList = QStringLiteral("« %1 »").arg(allLabels.join(QStringLiteral(" », « ")));
+    const QString Cn = op == QLatin1String("inside") ? X[0].label : QString();
+    const QString iv = QStringLiteral("[%1 ; %2]").arg(A, B);
+
+    // 3. En-tête
+    const QString opText = op == "value" ? QStringLiteral("densité de « %1 »").arg(A)
+                         : op == "duration" ? QStringLiteral("durée de « %1 » à « %2 » (%2 − %1)").arg(A, B)
+                         : op == "between" ? QStringLiteral("date comprise entre « %1 » et « %2 » (uniforme entre les deux, tirage par tirage)").arg(A, B)
+                         : op == "order" ? QStringLiteral("antéro-postérité de « %1 » et « %2 »").arg(A, B)
+                         : op == "correlation" ? QStringLiteral("corrélation entre %1 (tirage par tirage)").arg(corrList)
+                         : QStringLiteral("appartenance de « %1 » à l'intervalle %2").arg(Cn, iv);
+    const QString userName = rq.value("name").toString().trimmed();
+    R.name = !userName.isEmpty() ? userName
+           : op == "value" ? A : op == "duration" ? QStringLiteral("%1 → %2").arg(A, B) : op == "between" ? QStringLiteral("entre %1 et %2").arg(A, B)
+           : op == "order" ? QStringLiteral("%1 / %2").arg(A, B)
+           : op == "correlation" ? QStringLiteral("Corrélation %1").arg(allLabels.join(QStringLiteral(" / ")))
+           : QStringLiteral("%1 dans %2").arg(Cn, iv);
+    QString head;
+    QStringList files;                       // exports du même calcul (Chain_all_Events.csv et Chain_all_Phases.csv…)
+    for (const Operand& o : X)
+        if (o.kind == Operand::Column && !files.contains(o.set->file)) files << o.set->file;
+    if (hasColumn) head = QStringLiteral("Traces MCMC « %1 » — %2%3").arg(files.join(QStringLiteral(" » et « ")), opText,
+                                hasIndep ? QStringLiteral(" — avec datation indépendante du modèle") : QString());
+    else if (op == QLatin1String("order")) head = QStringLiteral("Ordre de « %1 » et « %2 » (datations indépendantes)").arg(A, B);
+    else if (op == QLatin1String("correlation")) head = QStringLiteral("Corrélation entre datations indépendantes — %1").arg(opText);
+    else head = QStringLiteral("Relation entre datations indépendantes — %1").arg(opText);
+    R.html += QStringLiteral("<p><b>%1</b></p>").arg(head.toHtmlEscaped()) + done;
+    R.prompt = QStringLiteral("\n%1\n").arg(head) + R.prompt;
+    if (hasColumn && hasIndep) {
+        const QString w = QStringLiteral("%1 supposée%2 indépendante%2 du modèle ChronoModel des traces : si elle%3 en fait déjà partie, elle%3 "
+                                         "est comptée deux fois ; prendre plutôt sa trace a posteriori (export des chaînes des dates) ou "
+                                         "relancer le modèle avec elle%3.%4")
+                              .arg(indepNames.size() > 1 ? QStringLiteral("Datations « %1 »").arg(indepNames.join(QStringLiteral(" », « ")))
+                                                         : QStringLiteral("Datation « %1 »").arg(indepNames.first()),
+                                   indepNames.size() > 1 ? QStringLiteral("s") : QString(),
+                                   indepNames.size() > 1 ? QStringLiteral("s") : QString(),
+                                   anyEvent ? QStringLiteral(" Un événement calculé par SeldonH n'a ni les contraintes ni les phases du modèle.") : QString());
+        R.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(w.toHtmlEscaped());
+        R.prompt += QStringLiteral("Avertissement : %1\n").arg(w);
+    }
+    const QLocale fr(QLocale::French);
+    const double infv = std::numeric_limits<double>::infinity();
+    // Densité d'un terme pour la figure (colonne : lissage des tirages ; datation : sa densité).
+    auto operandSeries = [&](const Operand& o) {
+        Density dc;
+        if (o.kind == Operand::Independent) dc = o.d;
+        else if (o.kind == Operand::Column) {
+            std::vector<double> v;
+            for (double y : *o.col) if (std::isfinite(y)) v.push_back(y);
+            dc = kernelDensity(v, -infv, infv, Bandwidth::SheatherJones);
+        }
+        if (!dc.valid()) return;
+        QJsonObject s = plotSeries(o.label, dc, fmt);
+        if (!o.color.isEmpty()) s["color"] = o.color;
+        R.series.append(s);
+    };
+    auto finish = [&]() {
+        if (!levelWarning.isEmpty()) {
+            R.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(levelWarning.toHtmlEscaped());
+            R.prompt += QStringLiteral("Avertissement : %1.\n").arg(levelWarning);
+        }
+        R.ok = true;
+        return R;
+    };
+    static const QString independence = QStringLiteral(
+        "Méthode : datations supposées indépendantes (aucune contrainte stratigraphique ni phase entre elles). Si une stratigraphie, une "
+        "phase ou d'autres dates les relient, il faut un modèle ChronoModel et le calcul sur ses traces exportées.\n");
+
+    // Tableau d'une durée (densité D, en années) : HPD, MAP, moyenne, quartiles, P(B postérieur à A).
+    auto durationTable = [&](const Density& d, double pPos) {
+        const DensityStats st = densityStats(d);
+        const dateformat::PrecisionScope precision(st.sd);
+        QString rows, promptHpd;
+        for (double l : displayLevels(R.level)) {
+            const QString t = durationIntervalsText(hpdIntervals(d, l), fmt), lt = levelText(l);
+            const bool asked = std::abs(l - R.level) < 1e-9 && std::abs(R.level - MethodRunner::kDefaultLevel) > 1e-9;
+            rows += QStringLiteral("<tr><td valign='top'><b>HPD %1 %</b>%2</td><td>%3</td></tr>")
+                        .arg(lt, asked ? QStringLiteral(" <i>(demandé)</i>") : QString(), QString(t).replace('\n', "<br>"));
+            promptHpd += QStringLiteral("Intervalles HPD de la durée à %1 %%2 :\n- %3\n")
+                             .arg(lt, asked ? QStringLiteral(" (niveau demandé par l'utilisateur)") : QString(), QString(t).replace("\n", "\n- "));
+        }
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1"
+                                 "<tr><td><b>MAP (mode)</b></td><td>%2</td></tr>"
+                                 "<tr><td><b>Moyenne ; écart-type</b></td><td>%3 ; %4</td></tr>"
+                                 "<tr><td><b>Q1 ; Q2 (médiane) ; Q3</b></td><td>%5 ; %6 ; %7</td></tr>"
+                                 "<tr><td><b>P(« %8 » postérieur à « %9 »)</b></td><td>%10 %</td></tr></table>")
+                      .arg(rows, dateformat::spread(st.mode, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt),
+                           dateformat::spread(st.q1, fmt), dateformat::spread(st.median, fmt), dateformat::spread(st.q3, fmt),
+                           B.toHtmlEscaped(), A.toHtmlEscaped(), text::num(100.0 * pPos, 1));
+        R.prompt += promptHpd;
+        R.prompt += QStringLiteral("Durée : MAP %1, moyenne %2, écart-type %3, Q1 %4, médiane %5, Q3 %6. Une durée négative signifie que "
+                                   "« %7 » est antérieur à « %8 ». Probabilité que « %7 » soit postérieur à « %8 » : %9 %.\n")
+                        .arg(dateformat::spread(st.mode, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt),
+                             dateformat::spread(st.q1, fmt), dateformat::spread(st.median, fmt), dateformat::spread(st.q3, fmt),
+                             B, A, text::num(100.0 * pPos, 1));
+        R.extraPlot = spreadPlot(QStringLiteral("Durée — %1").arg(R.name), QStringLiteral("Durée"), R.name, d, R.level, fmt);
+    };
+
+    // 4a. Calcul exact : datations indépendantes et années fixes seulement.
+    if (exact) {
+        if (op == QLatin1String("value")) {
+            const Density& d = X[0].d;
+            appendSummary(R.html, R.prompt, d, hpdIntervals(d, 95.0), hpdIntervals(d, 68.0), densityStats(d), R.level, fmt);
+            operandSeries(X[0]);
+            return finish();
+        }
+        if (op == QLatin1String("inside")) {
+            // P(C dans [min(A,B) ; max(A,B)]) = ∫ f_C(c) [F_A(c)(1 − F_B(c)) + F_B(c)(1 − F_A(c))] dc ; avant : (1 − F_A)(1 − F_B) ; après : F_A F_B.
+            const CdfTable ta(X[1].d), tb(X[2].d);
+            auto F = [&](const Operand& o, const CdfTable& t, double x) { return o.kind == Operand::Fixed ? (x >= o.year ? 1.0 : 0.0) : t.at(x); };
+            const Density& c = X[0].d;
+            double pb = 0.0, pa = 0.0, mass = 0.0;
+            for (size_t i = 0; i + 1 < c.t.size(); ++i) {
+                const double m = 0.5 * (c.v[i] + c.v[i + 1]) * (c.t[i + 1] - c.t[i]), x = 0.5 * (c.t[i] + c.t[i + 1]);
+                const double fa = F(X[1], ta, x), fb = F(X[2], tb, x);
+                pb += m * (1.0 - fa) * (1.0 - fb);
+                pa += m * fa * fb;
+                mass += m;
+            }
+            if (!(mass > 0.0)) return fail(QStringLiteral("densité vide pour « %1 »").arg(Cn));
+            pb /= mass; pa /= mass;
+            const double pi = std::clamp(1.0 - pb - pa, 0.0, 1.0);
+            R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>"
+                                     "<tr><td><b>P(« %1 » dans %2)</b></td><td><b>%3</b></td></tr>"
+                                     "<tr><td>P(« %1 » avant l'intervalle)</td><td>%4</td></tr>"
+                                     "<tr><td>P(« %1 » après l'intervalle)</td><td>%5</td></tr></table>")
+                          .arg(Cn.toHtmlEscaped(), iv.toHtmlEscaped(), percentText(pi), percentText(pb), percentText(pa));
+            R.html += QStringLiteral("<p><small>Calcul exact sur les densités (fonctions de répartition), datations supposées "
+                                     "<b>indépendantes</b> ; les bornes sont prises à chaque fois dans l'ordre (la plus ancienne en premier). "
+                                     "Probabilité a posteriori, pas un test de signification.</small></p>");
+            R.prompt += QStringLiteral("P(« %1 » dans %2) = %3 ; P(avant) = %4 ; P(après) = %5 (calcul exact sur les densités).\n")
+                            .arg(Cn, iv, percentText(pi), percentText(pb), percentText(pa));
+            R.prompt += independence;
+            for (const Operand& o : X) operandSeries(o);
+            return finish();
+        }
+        // Écart D = B − A (order, duration)
+        const Operand& a = X[0];
+        const Operand& b = X[1];
+        const Density D = a.kind == Operand::Fixed ? affineDensity(b.d, 1.0, -a.year)
+                        : b.kind == Operand::Fixed ? affineDensity(a.d, -1.0, b.year)
+                                                   : differenceDensity(a.d, b.d);
+        if (!D.valid()) return fail(QStringLiteral("écart « %1 » − « %2 » impossible à calculer").arg(B, A));
+        const double pAB = std::clamp(1.0 - densityCdf(D, 0.0), 0.0, 1.0), pBA = 1.0 - pAB;
+        const QString method = a.kind == Operand::Independent && b.kind == Operand::Independent
+            ? QStringLiteral("convolution, pas %1").arg(dateformat::spread(D.step, fmt)) : QStringLiteral("densité décalée de l'année fixe");
+        if (op == QLatin1String("duration")) {
+            durationTable(D, pAB);
+            R.html += QStringLiteral("<p><small>Calcul exact sur les densités (%1) en les supposant <b>indépendantes</b> : aucune contrainte "
+                                     "stratigraphique ni phase.</small></p>").arg(method.toHtmlEscaped());
+            R.prompt += independence;
+            for (const Operand& o : X) operandSeries(o);
+            return finish();
+        }
+        const DensityStats st = densityStats(D);
+        const dateformat::PrecisionScope precision(st.sd);
+        QString rows, promptHpd;
+        rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td><b>%3</b></td></tr>")
+                    .arg(A.toHtmlEscaped(), B.toHtmlEscaped(), percentText(pAB));
+        rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td><b>%3</b></td></tr>")
+                    .arg(B.toHtmlEscaped(), A.toHtmlEscaped(), percentText(pBA));
+        for (double l : displayLevels(R.level)) {
+            const QString t = durationIntervalsText(hpdIntervals(D, l), fmt), lt = levelText(l);
+            rows += QStringLiteral("<tr><td valign='top'>Écart « %1 » − « %2 », HPD %3 %</td><td>%4</td></tr>")
+                        .arg(B.toHtmlEscaped(), A.toHtmlEscaped(), lt, t.toHtmlEscaped().replace('\n', QStringLiteral("<br>")));
+            promptHpd += QStringLiteral("Écart « %1 » − « %2 » (années), intervalles HPD à %3 % :\n- %4\n")
+                             .arg(B, A, lt, QString(t).replace("\n", "\n- "));
+        }
+        rows += QStringLiteral("<tr><td>Écart : médiane ; moyenne ± écart-type</td><td>%1 ; %2 ± %3</td></tr>")
+                    .arg(dateformat::spread(st.median, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt));
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+        R.html += QStringLiteral("<p><small>Calcul exact sur les deux densités (%1) en les supposant <b>indépendantes</b> : "
+                                 "aucune contrainte stratigraphique ni phase. Un écart positif signifie « %2 » plus récent que « %3 ». "
+                                 "Dans un modèle ChronoModel, l'ordre se lit sur les traces exportées (calcul tirage par tirage).</small></p>")
+                      .arg(method.toHtmlEscaped(), B.toHtmlEscaped(), A.toHtmlEscaped());
+        R.prompt += QStringLiteral("P(« %1 » antérieur à « %2 ») = %3 ; P(« %2 » antérieur à « %1 ») = %4.\n")
+                        .arg(A, B, percentText(pAB), percentText(pBA));
+        R.prompt += promptHpd;
+        R.prompt += QStringLiteral("Écart « %1 » − « %2 » : médiane %3, moyenne %4, écart-type %5 (écart positif = « %1 » plus récent).\n")
+                        .arg(B, A, dateformat::spread(st.median, fmt), dateformat::spread(st.mean, fmt), dateformat::spread(st.sd, fmt));
+        R.prompt += QStringLiteral("Méthode : calcul exact sur les densités calibrées, les deux datations étant supposées indépendantes "
+                                   "(P(A antérieur à B) = ∫ f_A(a) · P(B > a) da ; écart = densité de B − A). Consigne : donne les deux "
+                                   "probabilités telles quelles. C'est une probabilité a posteriori, pas un test de signification ni une "
+                                   "p-value : ne fixe pas de seuil à la place de l'utilisateur. Explique que des intervalles HPD qui se "
+                                   "recouvrent n'empêchent pas une probabilité nette, et que des intervalles séparés la rendent proche de "
+                                   "100 %. Rappelle que l'indépendance suppose qu'aucune autre information ne relie les deux datations : si "
+                                   "une stratigraphie, une phase ou d'autres dates les relient, il faut un modèle ChronoModel (avec ou sans "
+                                   "la contrainte) et le calcul sur ses traces exportées ; une contrainte imposée donne 100 % par "
+                                   "construction. Une calibration multimodale (plateau de la courbe) peut rendre l'ordre incertain même "
+                                   "avec des mesures précises.\n");
+        for (const Operand& o : X) operandSeries(o);
+        R.extraPlot = spreadPlot(QStringLiteral("Écart %1 − %2").arg(B, A), QStringLiteral("Écart"), QStringLiteral("%1 − %2").arg(B, A), D, R.level, fmt);
+        return finish();
+    }
+
+    // 4b. Tirage par tirage : colonnes des traces telles quelles, datations indépendantes tirées, années répétées.
+    constexpr size_t kSimulated = 100000;            // tirages Monte-Carlo sans traces (date entre deux datations)
+    const size_t N = hasColumn ? set->rows() : kSimulated;
+    const std::vector<size_t> chainStarts = hasColumn ? set->chainStarts : std::vector<size_t>{ 0 };
+    std::mt19937 rng(12345);                         // reproductible
+    std::vector<std::vector<double>> owned(X.size());
+    std::vector<const std::vector<double>*> cols(X.size(), nullptr);
+    for (size_t k = 0; k < X.size(); ++k) {
+        if (X[k].kind == Operand::Column) { cols[k] = X[k].col; continue; }
+        owned[k] = X[k].kind == Operand::Independent ? sampleDensity(X[k].d, N, rng) : std::vector<double>(N, X[k].year);
+        cols[k] = &owned[k];
+    }
+    QString basis = hasColumn ? QStringLiteral("%1 tirages a posteriori (%2 chaîne%3)").arg(fr.toString(qlonglong(N))).arg(chainStarts.size())
+                                    .arg(chainStarts.size() > 1 ? "s" : "")
+                              : QStringLiteral("%1 tirages Monte-Carlo des datations indépendantes").arg(fr.toString(qlonglong(N)));
+    const QString drawn = hasIndep ? QStringLiteral("chaque datation indépendante tirée par inverse de sa fonction de répartition, en tirage stratifié")
+                                   : QString();
+
+    // Corrélation des termes `idx` sur les tirages communs : matrice (r de Pearson au-dessus de la diagonale, avec un
+    // intervalle approché à 95 % par la transformation de Fisher sur la taille d'échantillon effective, ρ de Spearman
+    // au-dessous) ; avec `plots`, nuage de points de chaque paire (3 au plus) avec la droite « B = A ».
+    auto correlationBlock = [&](const std::vector<size_t>& idx, bool plots) {
+        const size_t k = idx.size();
+        if (k < 2) return;
+        std::vector<size_t> rowsKept;
+        std::vector<size_t> chainOf;
+        size_t ch = 0;
+        for (size_t i = 0; i < N; ++i) {
+            while (ch + 1 < chainStarts.size() && i >= chainStarts[ch + 1]) ++ch;
+            bool ok = true;
+            for (size_t j : idx) ok = ok && std::isfinite((*cols[j])[i]);
+            if (ok) { rowsKept.push_back(i); chainOf.push_back(ch); }
+        }
+        const size_t n = rowsKept.size();
+        if (n < 10) return;
+        std::vector<std::vector<double>> v(k, std::vector<double>(n)), rk(k, std::vector<double>(n));
+        std::vector<double> ess(k, double(n));
+        std::vector<bool> constant(k, false);
+        for (size_t a = 0; a < k; ++a) {
+            for (size_t i = 0; i < n; ++i) v[a][i] = (*cols[idx[a]])[rowsKept[i]];
+            std::vector<size_t> ord(n);
+            std::iota(ord.begin(), ord.end(), size_t(0));
+            std::sort(ord.begin(), ord.end(), [&](size_t x, size_t y) { return v[a][x] < v[a][y]; });
+            for (size_t i = 0; i < n;) {                           // rangs, moyenne des rangs pour les ex aequo
+                size_t j = i;
+                while (j + 1 < n && v[a][ord[j + 1]] == v[a][ord[i]]) ++j;
+                for (size_t t = i; t <= j; ++t) rk[a][ord[t]] = 0.5 * double(i + j) + 1.0;
+                i = j + 1;
+            }
+            constant[a] = v[a][ord.front()] == v[a][ord.back()];
+            // Taille d'échantillon effective d'une colonne (autocorrélation des chaînes) ; datation tirée : n.
+            if (X[idx[a]].kind == Operand::Column && chainStarts.size() >= 2) {
+                std::vector<std::vector<double>> byCh(chainStarts.size());
+                for (size_t i = 0; i < n; ++i) byCh[chainOf[i]].push_back(v[a][i]);
+                size_t len = std::numeric_limits<size_t>::max();
+                for (const auto& c : byCh) len = std::min(len, c.size());
+                if (len >= 4) {
+                    for (auto& c : byCh) c.resize(len);
+                    const mcmcdiag::RhatEss re = mcmcdiag::computeRhatAndEss(byCh);
+                    if (std::isfinite(re.bulkEss) && re.bulkEss > 0) ess[a] = std::min(double(n), re.bulkEss);
+                }
+            }
+        }
+        auto pearson = [&](const std::vector<double>& x, const std::vector<double>& y) {
+            double mx = 0, my = 0;
+            for (size_t i = 0; i < n; ++i) { mx += x[i]; my += y[i]; }
+            mx /= double(n); my /= double(n);
+            double sxy = 0, sxx = 0, syy = 0;
+            for (size_t i = 0; i < n; ++i) { const double dx = x[i] - mx, dy = y[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy; }
+            return sxx > 0 && syy > 0 ? sxy / std::sqrt(sxx * syy) : std::nan("");
+        };
+        auto r3 = [](double r) { return std::isfinite(r) ? text::num(std::abs(r) < 0.005 ? 0.0 : r, 2) : QStringLiteral("—"); };
+        QString head = QStringLiteral("<tr><td></td>");
+        for (size_t a = 0; a < k; ++a) head += QStringLiteral("<td><b>%1</b></td>").arg(X[idx[a]].label.toHtmlEscaped());
+        QString rowsHtml, pairs;
+        bool withIndep = false;
+        std::vector<std::vector<double>> Rm(k, std::vector<double>(k, 1.0));
+        for (size_t a = 0; a < k; ++a) {
+            rowsHtml += QStringLiteral("<tr><td><b>%1</b></td>").arg(X[idx[a]].label.toHtmlEscaped());
+            for (size_t b = 0; b < k; ++b) {
+                if (a == b) { rowsHtml += QStringLiteral("<td align='center'>1</td>"); continue; }
+                const size_t lo = std::min(a, b), hi = std::max(a, b);
+                const double r = constant[lo] || constant[hi] ? std::nan("") : pearson(v[lo], v[hi]);
+                const double rho = constant[lo] || constant[hi] ? std::nan("") : pearson(rk[lo], rk[hi]);
+                Rm[a][b] = r;
+                if (a < b) {                                           // au-dessus : Pearson et intervalle
+                    const double ne = std::min(ess[a], ess[b]);
+                    QString ci;
+                    if (std::isfinite(r) && ne > 4 && std::abs(r) < 1.0) {
+                        const double z = std::atanh(r), se = 1.0 / std::sqrt(ne - 3.0);
+                        ci = QStringLiteral("[%1 ; %2]").arg(r3(std::tanh(z - 1.96 * se)), r3(std::tanh(z + 1.96 * se)));
+                    }
+                    rowsHtml += QStringLiteral("<td align='center'>r = %1<br><small>%2</small></td>").arg(r3(r), ci);
+                    const bool indep = (X[idx[a]].kind == Operand::Independent) != (X[idx[b]].kind == Operand::Independent)
+                                       || (X[idx[a]].kind == Operand::Independent && X[idx[b]].kind == Operand::Independent);
+                    withIndep = withIndep || indep;
+                    pairs += QStringLiteral("- « %1 » et « %2 » : r de Pearson = %3%4 ; ρ de Spearman = %5 (n_eff ≈ %6)%7.\n")
+                                 .arg(X[idx[a]].label, X[idx[b]].label, r3(r),
+                                      ci.isEmpty() ? QString() : QStringLiteral(" (intervalle approché à 95 % : %1)").arg(ci), r3(rho),
+                                      fr.toString(qlonglong(std::llround(ne))),
+                                      indep ? QStringLiteral(" — nulle par construction (datation tirée indépendamment)") : QString());
+                } else {
+                    rowsHtml += QStringLiteral("<td align='center'><i>ρ = %1</i></td>").arg(r3(rho));
+                }
+            }
+            rowsHtml += QStringLiteral("</tr>");
+        }
+        R.html += QStringLiteral("<p><b>Corrélation entre les termes</b> (%1 tirages communs)</p>"
+                                 "<table cellspacing='0' cellpadding='3' border='1' style='border-collapse:collapse'>%2</tr>%3</table>"
+                                 "<p><small>Au-dessus de la diagonale : r de Pearson (corrélation linéaire), avec entre crochets l'intervalle à 95 % "
+                                 "de sa vraie valeur, qui tient compte du nombre limité de tirages indépendants (ESS). Au-dessous : ρ de "
+                                 "Spearman (corrélation des rangs). Une corrélation positive signifie que les deux dates bougent ensemble d'un tirage à l'autre "
+                                 "(contrainte, phase ou données communes) ; elle mesure la dépendance a posteriori, pas une causalité.%4</small></p>")
+                      .arg(fr.toString(qlonglong(n)), head, rowsHtml,
+                           withIndep ? QStringLiteral(" Une datation indépendante est tirée sans lien avec les autres termes : sa "
+                                                      "corrélation avec eux est nulle par construction (aux fluctuations près).")
+                                     : QString());
+        R.prompt += QStringLiteral("Corrélation entre les termes (sur %1 tirages communs) :\n%2").arg(fr.toString(qlonglong(n)), pairs);
+        if (!plots) return;
+        int made = 0;
+        const size_t maxPts = 2500, stride = std::max<size_t>(1, n / maxPts);
+        for (size_t a = 0; a < k && made < 3; ++a)
+            for (size_t b = a + 1; b < k && made < 3; ++b) {
+                if (constant[a] || constant[b]) continue;
+                QJsonArray xs, ys;
+                double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+                for (size_t i = 0; i < n; i += stride) {
+                    xs.append(dateformat::convert(v[a][i], fmt));
+                    ys.append(dateformat::convert(v[b][i], fmt));
+                    lo = std::min({ lo, v[a][i], v[b][i] });
+                    hi = std::max({ hi, v[a][i], v[b][i] });
+                }
+                const QString la = X[idx[a]].label, lb = X[idx[b]].label;
+                const QJsonObject pts{ { "name", QStringLiteral("Tirages (%1)").arg(fr.toString(qlonglong(xs.size()))) },
+                                       { "x", xs }, { "y", ys }, { "points", true } };
+                const QJsonObject diag{ { "name", QStringLiteral("%1 = %2").arg(lb, la) },
+                                        { "x", QJsonArray{ dateformat::convert(lo, fmt), dateformat::convert(hi, fmt) } },
+                                        { "y", QJsonArray{ dateformat::convert(lo, fmt), dateformat::convert(hi, fmt) } },
+                                        { "dash", true }, { "width", 1.0 }, { "color", QStringLiteral("#e1572a") }, { "fill", false } };
+                QJsonObject plot{ { "title", QStringLiteral("Corrélation %1 / %2 — r = %3").arg(la, lb, r3(Rm[a][b])) },
+                                  { "xlabel", QStringLiteral("%1 — %2").arg(la, dateformat::axisLabel(fmt)) },
+                                  { "ylabel", QStringLiteral("%1 — %2").arg(lb, dateformat::axisLabel(fmt)) },
+                                  { "fill", false }, { "yaxis", true }, { "yzero", false }, { "layout", QStringLiteral("overlay") },
+                                  { "series", QJsonArray{ pts, diag } } };
+                if (dateformat::isAge(fmt)) { plot["xreverse"] = true; plot["yreverse"] = true; }
+                R.scatterPlots << plot;
+                ++made;
+            }
+        if (made > 0)
+            R.prompt += QStringLiteral("Nuage%1 de points des tirages (une paire par graphique, droite « B = A » en tirets : au-dessus, "
+                                       "le second terme est plus récent) DÉJÀ tracé%1 dans un onglet à part.\n").arg(made > 1 ? "s" : "");
+    };
+
+    if (op == QLatin1String("correlation")) {
+        std::vector<size_t> all(X.size());
+        std::iota(all.begin(), all.end(), size_t(0));
+        correlationBlock(all, true);
+        if (R.scatterPlots.isEmpty() && !R.html.contains(QStringLiteral("Corrélation entre les termes")))
+            return fail(QStringLiteral("moins de 10 tirages exploitables (valeurs vides dans les colonnes)"));
+        R.html += QStringLiteral("<p><small>Calcul sur %1%2.</small></p>").arg(basis.toHtmlEscaped(),
+                      drawn.isEmpty() ? QString() : QStringLiteral(", ") + drawn.toHtmlEscaped());
+        R.prompt += QStringLiteral("Calcul sur %1 (dépendance entre colonnes respectée).\n").arg(basis);
+        if (!hasColumn) R.prompt += independence;
+        for (const Operand& o : X) operandSeries(o);
+        return finish();
+    }
+    // Les autres opérations tirage par tirage donnent aussi la corrélation des termes variables (sans graphique).
+    auto autoCorrelation = [&]() {
+        std::vector<size_t> var;
+        for (size_t j = 0; j < X.size(); ++j) if (X[j].kind != Operand::Fixed) var.push_back(j);
+        if (var.size() >= 2 && hasColumn) correlationBlock(var, false);
+    };
+
+    if (op == QLatin1String("order") || op == QLatin1String("inside")) {
+        const bool inside = op == QLatin1String("inside");
+        std::vector<std::vector<double>> byChain(chainStarts.size());
+        size_t chain = 0, kept = 0, n1 = 0, n2 = 0, n3 = 0;       // order : A<B, B<A, égaux ; inside : avant, dedans, après
+        for (size_t i = 0; i < N; ++i) {
+            while (chain + 1 < chainStarts.size() && i >= chainStarts[chain + 1]) ++chain;
+            bool finite = true;
+            for (const auto* c : cols) finite = finite && std::isfinite((*c)[i]);
+            if (!finite) continue;
+            ++kept;
+            double ind = 0.0;
+            if (!inside) {
+                const double a = (*cols[0])[i], b = (*cols[1])[i];
+                if (a < b) { ++n1; ind = 1.0; } else if (b < a) ++n2; else ++n3;
+            } else {
+                const double c = (*cols[0])[i];
+                const double lo = std::min((*cols[1])[i], (*cols[2])[i]), hi = std::max((*cols[1])[i], (*cols[2])[i]);
+                if (c < lo) ++n1; else if (c > hi) ++n3; else { ++n2; ind = 1.0; }
+            }
+            byChain[chain].push_back(ind);
+        }
+        if (kept < 10) return fail(QStringLiteral("moins de 10 tirages exploitables (valeurs vides dans les colonnes)"));
+        const double ess = indicatorEss(byChain, kept);
+        QString rows;
+        if (!inside) {
+            const double pAB = double(n1) / double(kept), pBA = double(n2) / double(kept);
+            rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td>%3</td></tr>").arg(A.toHtmlEscaped(), B.toHtmlEscaped(), probabilityText(pAB, ess));
+            rows += QStringLiteral("<tr><td><b>P(« %1 » antérieur à « %2 »)</b></td><td>%3</td></tr>").arg(B.toHtmlEscaped(), A.toHtmlEscaped(), probabilityText(pBA, ess));
+            if (n3 > 0) rows += QStringLiteral("<tr><td>Tirages égaux</td><td>%1</td></tr>").arg(fr.toString(qlonglong(n3)));
+            R.prompt += QStringLiteral("P(« %1 » antérieur à « %2 ») = %3 ; P(« %2 » antérieur à « %1 ») = %4 (proportion des tirages, erreur "
+                                       "Monte-Carlo entre parenthèses).%5\n")
+                            .arg(A, B, probabilityText(pAB, ess), probabilityText(pBA, ess),
+                                 n3 > 0 ? QStringLiteral(" %1 tirages égaux.").arg(n3) : QString());
+        } else {
+            const double pb = double(n1) / double(kept), pi = double(n2) / double(kept), pa = double(n3) / double(kept);
+            rows += QStringLiteral("<tr><td><b>P(« %1 » dans %2)</b></td><td>%3</td></tr>").arg(Cn.toHtmlEscaped(), iv.toHtmlEscaped(), probabilityText(pi, ess));
+            rows += QStringLiteral("<tr><td>P(« %1 » avant l'intervalle)</td><td>%2</td></tr>").arg(Cn.toHtmlEscaped(), probabilityText(pb, ess));
+            rows += QStringLiteral("<tr><td>P(« %1 » après l'intervalle)</td><td>%2</td></tr>").arg(Cn.toHtmlEscaped(), probabilityText(pa, ess));
+            R.prompt += QStringLiteral("P(« %1 » dans %2) = %3 ; P(avant) = %4 ; P(après) = %5 (proportions des tirages, bornes prises à chaque "
+                                       "tirage, la plus ancienne en premier ; erreur Monte-Carlo entre parenthèses).\n")
+                            .arg(Cn, iv, probabilityText(pi, ess), probabilityText(pb, ess), probabilityText(pa, ess));
+        }
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+        basis = QStringLiteral("%1 tirages %2(%3 chaîne%4, ESS ≈ %5)")
+                    .arg(fr.toString(qlonglong(kept)), hasColumn ? QStringLiteral("a posteriori ") : QString()).arg(chainStarts.size())
+                    .arg(chainStarts.size() > 1 ? "s" : "").arg(fr.toString(qlonglong(std::llround(ess))));
+        if (!drawn.isEmpty()) basis += QStringLiteral(", ") + drawn;
+        R.html += QStringLiteral("<p><small>Proportion des tirages, calculée tirage par tirage sur %1 : probabilité a posteriori%2, "
+                                 "pas un test de signification.</small></p>")
+                      .arg(basis.toHtmlEscaped(), hasColumn ? QStringLiteral(" dans le modèle ChronoModel (contraintes et phases comprises)") : QString());
+        R.prompt += QStringLiteral("Calcul sur %1 (dépendance entre colonnes respectée). Probabilité a posteriori, pas un test de signification "
+                                   "ni une p-value : ne fixe pas de seuil à la place de l'utilisateur.\n").arg(basis);
+        for (const Operand& o : X) if (o.kind != Operand::Fixed) operandSeries(o);
+        autoCorrelation();
+        return finish();
+    }
+
+    // value, duration, between : densité de la quantité dérivée
+    std::vector<double> x;
+    std::vector<std::vector<double>> byChain(chainStarts.size());
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    const int draws = op == "between" ? int(std::clamp<size_t>(200000 / std::max<size_t>(N, 1), 1, 10)) : 1;
+    size_t chain = 0, kept = 0, positive = 0;
+    for (size_t i = 0; i < N; ++i) {
+        while (chain + 1 < chainStarts.size() && i >= chainStarts[chain + 1]) ++chain;
+        const double a = (*cols[0])[i], b = cols.size() > 1 ? (*cols[1])[i] : 0.0;
+        if (!std::isfinite(a) || !std::isfinite(b)) continue;
+        ++kept;
+        if (op == "value") { x.push_back(a); byChain[chain].push_back(a); }
+        else if (op == "duration") { x.push_back(b - a); byChain[chain].push_back(b - a); if (b > a) ++positive; }
+        else {
+            const double lo = std::min(a, b), hi = std::max(a, b);
+            for (int k = 0; k < draws; ++k) x.push_back(lo + unif(rng) * (hi - lo));
+        }
+    }
+    if (kept < 10) return fail(QStringLiteral("moins de 10 tirages exploitables (valeurs vides dans les colonnes)"));
+    double h = 0.0;
+    Bandwidth rule = Bandwidth::SheatherJones;
+    const Density d = kernelDensity(x, -infv, infv, Bandwidth::SheatherJones, &h, &rule);
+    if (!d.valid()) return fail(QStringLiteral("densité impossible : tous les tirages ont la même valeur (colonne fixée ?)"));
+    basis = hasColumn ? QStringLiteral("%1 tirages a posteriori (%2 chaîne%3)").arg(fr.toString(qlonglong(kept))).arg(chainStarts.size())
+                            .arg(chainStarts.size() > 1 ? "s" : "")
+                      : QStringLiteral("%1 tirages Monte-Carlo des datations indépendantes").arg(fr.toString(qlonglong(kept)));
+    if (op == "between") basis += QStringLiteral(", %1 dates tirées par tirage").arg(draws);
+    if (!drawn.isEmpty()) basis += QStringLiteral(", ") + drawn;
+    if (hasColumn) {
+        R.html += QStringLiteral("<p><i>Calcul tirage par tirage sur %1 : la dépendance entre les colonnes (contraintes, phases) est respectée.</i></p>")
+                      .arg(basis.toHtmlEscaped());
+        R.prompt += QStringLiteral("Calcul tirage par tirage sur %1 (dépendance entre colonnes respectée).\n").arg(basis);
+    } else {
+        R.html += QStringLiteral("<p><i>Calcul par tirages sur %1, datations supposées indépendantes.</i></p>").arg(basis.toHtmlEscaped());
+        R.prompt += QStringLiteral("Calcul par tirages sur %1.\n").arg(basis);
+        R.prompt += independence;
+    }
+    if (op == "duration") {
+        durationTable(d, double(positive) / double(kept));
+    } else {
+        appendSummary(R.html, R.prompt, d, hpdIntervals(d, 95.0), hpdIntervals(d, 68.0), densityStats(d), R.level, fmt);
+        R.series.append(plotSeries(op == "between" ? QStringLiteral("Date entre %1 et %2").arg(A, B) : A, d, fmt));
+        if (op == "between") for (const Operand& o : X) if (o.kind != Operand::Fixed) operandSeries(o);
+    }
+
+    // Lissage et convergence de la quantité calculée
+    const QString hRule = rule == Bandwidth::SheatherJones ? QStringLiteral("Sheather-Jones") : QStringLiteral("Silverman (repli)");
+    QString conv;
+    size_t len = std::numeric_limits<size_t>::max();
+    for (const std::vector<double>& c : byChain) len = std::min(len, c.size());
+    if (hasColumn && op != "between" && byChain.size() >= 2 && len >= 4) {
+        std::vector<std::vector<double>> eq;
+        for (const std::vector<double>& c : byChain) eq.emplace_back(c.begin(), c.begin() + std::ptrdiff_t(len));
+        const mcmcdiag::RhatEss re = mcmcdiag::computeRhatAndEss(eq);
+        const double M = double(eq.size());
+        const bool good = re.rhat < mcmcdiag::kRhatGood && std::min(re.bulkEss, re.tailEss) >= mcmcdiag::kEssGoodPerChain * M;
+        const bool warnc = re.rhat < mcmcdiag::kRhatWarning && std::min(re.bulkEss, re.tailEss) >= mcmcdiag::kEssWarningPerChain * M;
+        conv = QStringLiteral("%1 (R̂ = %2 ; ESS bulk = %3 ; ESS tail = %4)")
+                   .arg(good ? QStringLiteral("✅ satisfaisante") : warnc ? QStringLiteral("⚠️ à surveiller") : QStringLiteral("❌ insuffisante"),
+                        rhatText(re.rhat), essText(re.bulkEss), essText(re.tailEss));
+    }
+    R.html += QStringLiteral("<p><small>Densité lissée par noyau gaussien, h = %1 (règle de %2)%3.</small></p>")
+                  .arg(dateformat::spread(h, fmt).toHtmlEscaped(), hRule,
+                       conv.isEmpty() ? QString() : QStringLiteral(" ; convergence de cette quantité : %1").arg(conv.toHtmlEscaped()));
+    R.prompt += QStringLiteral("Densité lissée par noyau gaussien : h = %1 (règle de %2).%3\n")
+                    .arg(dateformat::spread(h, fmt), hRule, conv.isEmpty() ? QString() : QStringLiteral(" Convergence de cette quantité : %1.").arg(conv));
+    autoCorrelation();
+    return finish();
+}
+
+// ------------------------------------------------------------------ courbes de ChronoModel (splines)
+//
+// Calcul « curve » sur une courbe estimée par ChronoModel (mode courbe : 1 à 3 composantes en fonction du temps), à
+// partir de la trace des splines exportée (Curve_X_Splines.csv) : chaque tirage est une spline complète, évaluée comme
+// dans ChronoModel (valeurs_G_GP_GS). Opérations :
+//   value       : loi de G(t) à une date t (année, colonne des traces, datation), P(G < y), P(ymin ≤ G ≤ ymax) ;
+//   derivative  : loi de la vitesse instantanée G′(t) ;
+//   rate        : vitesse moyenne entre deux dates, (G(t2) − G(t1)) / (t2 − t1), tirage par tirage ;
+//   crossing    : date où la courbe atteint la valeur y (première, dernière ou toutes) ;
+//   rate_values : temps mis pour aller de y1 à y2 (première atteinte de y1, puis première atteinte de y2 ensuite) et
+//                 vitesse moyenne (y2 − y1) / (t2 − t1).
+// Sans trace des splines, une carte de densité (Curve_X_Map.csv, Curve_X_GP_Map.csv) suffit pour value et derivative
+// (loi de G ou G′ dans une colonne de la carte) ; les autres opérations relient plusieurs dates d'une même spline et
+// demandent la trace.
+
+struct CurveRun {
+    bool ok = false;
+    bool posterior = true;
+    QString html, prompt, title, name;
+    QJsonArray series;                 // densités de dates (date d'atteinte d'une valeur) : graphique des datations
+    QVector<QJsonObject> plots;        // graphiques à part : loi de la grandeur, courbe et son enveloppe
+    double level = MethodRunner::kDefaultLevel;
+};
+
+QString curveOp(const QString& raw)
+{
+    static const QHash<QString, QString> ops = {
+        { "value", "value" }, { "valeur", "value" }, { "densite", "value" }, { "density", "value" }, { "probabilite", "value" },
+        { "probability", "value" }, { "g", "value" }, { "loi", "value" },
+        { "derivative", "derivative" }, { "derivee", "derivative" }, { "vitesse_instantanee", "derivative" }, { "instant_rate", "derivative" },
+        { "speed_at", "derivative" }, { "gp", "derivative" }, { "slope", "derivative" }, { "pente", "derivative" },
+        { "rate", "rate" }, { "vitesse", "rate" }, { "speed", "rate" }, { "velocity", "rate" }, { "taux", "rate" },
+        { "vitesse_moyenne", "rate" }, { "mean_rate", "rate" }, { "rate_dates", "rate" }, { "vitesse_dates", "rate" },
+        { "crossing", "crossing" }, { "date", "crossing" }, { "quand", "crossing" }, { "when", "crossing" }, { "atteinte", "crossing" },
+        { "reach", "crossing" }, { "inverse", "crossing" }, { "temps", "crossing" }, { "time", "crossing" },
+        { "calibrate", "calibrate" }, { "calibration", "calibrate" }, { "calibrer", "calibrate" }, { "dater", "calibrate" },
+        { "datation", "calibrate" }, { "date_mesure", "calibrate" }, { "measure", "calibrate" }, { "mesure", "calibrate" },
+        { "rate_values", "rate_values" }, { "vitesse_valeurs", "rate_values" }, { "rate_between_values", "rate_values" },
+        { "between_values", "rate_values" }, { "vitesse_entre_valeurs", "rate_values" }, { "duree_valeurs", "rate_values" },
+        { "duration_values", "rate_values" },
+        { "acceleration", "acceleration" }, { "acceleration_instantanee", "acceleration" }, { "gs", "acceleration" },
+        { "derivee_seconde", "acceleration" }, { "second_derivative", "acceleration" }, { "gpp", "acceleration" },
+        { "plot", "plot" }, { "tracer", "plot" }, { "trace", "plot" }, { "draw", "plot" }, { "graph", "plot" }, { "graphique", "plot" },
+        { "courbes", "plot" }, { "curves", "plot" }, { "dessiner", "plot" }, { "envelope", "plot" }, { "enveloppe", "plot" },
+        { "extremum", "extremum" }, { "extreme", "extremum" }, { "extremes", "extremum" }, { "extrema", "extremum" },
+        { "max", "extremum" }, { "maximum", "extremum" }, { "min", "extremum" }, { "minimum", "extremum" },
+        { "argmax", "extremum" }, { "argmin", "extremum" }, { "peak", "extremum" }, { "pic", "extremum" },
+        { "max_variation", "extremum" }, { "variation_max", "extremum" }, { "variation_maximale", "extremum" },
+        { "variation_la_plus_forte", "extremum" }, { "plus_forte_variation", "extremum" }, { "strongest", "extremum" },
+        { "steepest", "extremum" }, { "max_speed", "extremum" }, { "vitesse_max", "extremum" }, { "vitesse_maximale", "extremum" },
+        { "max_rate", "extremum" }, { "date_max", "extremum" }, { "date_extremum", "extremum" } };
+    const QString k = text::fold(raw).trimmed().replace(' ', '_').replace('-', '_');
+    return ops.value(k);
+}
+
+// Grandeur de la courbe : 0 = G (valeur), 1 = G′ (vitesse ; taux d'accumulation pour une courbe âge-profondeur),
+// 2 = G″ (accélération). -1 si vide, -2 si inconnue.
+int curveQuantity(const QString& raw)
+{
+    const QString k = text::fold(raw).trimmed().replace(' ', '_').replace('-', '_');
+    if (k.isEmpty()) return -1;
+    static const QHash<QString, int> q = {
+        { "value", 0 }, { "valeur", 0 }, { "g", 0 }, { "courbe", 0 }, { "curve", 0 }, { "0", 0 },
+        { "derivative", 1 }, { "derivee", 1 }, { "vitesse", 1 }, { "speed", 1 }, { "velocity", 1 }, { "rate", 1 }, { "taux", 1 },
+        { "gp", 1 }, { "slope", 1 }, { "pente", 1 }, { "taux_d_accumulation", 1 }, { "taux_accumulation", 1 }, { "accumulation", 1 },
+        { "accumulation_rate", 1 }, { "sedimentation", 1 }, { "taux_de_sedimentation", 1 }, { "1", 1 },
+        { "acceleration", 2 }, { "gs", 2 }, { "gpp", 2 }, { "derivee_seconde", 2 }, { "second_derivative", 2 }, { "2", 2 } };
+    return q.value(k, -2);
+}
+
+// Nombre d'une demande (nombre ou texte « 1,5 ») ; NaN si absent ou illisible.
+double curveNumber(const QJsonObject& rq, std::initializer_list<const char*> keys)
+{
+    for (const char* k : keys) {
+        const QJsonValue v = rq.value(QLatin1String(k));
+        if (v.isDouble()) return v.toDouble();
+        if (v.isString()) {
+            QString s = v.toString().trimmed();
+            s.remove(QChar(0x00A0)).remove(' ');
+            s.replace(',', '.').replace(QChar(0x2212), '-');
+            bool ok = false;
+            const double d = s.toDouble(&ok);
+            if (ok) return d;
+        }
+    }
+    return std::nan("");
+}
+
+// Valeur d'une grandeur de la courbe (G, G′, vitesse) : nombre en clair, avec les décimales automatiques.
+QString curveNum(double v) { return dateformat::format(v, DateFormat::Numeric); }
+
+// Graphique à part de la loi d'une grandeur (axe des valeurs, pas des dates).
+QJsonObject valuePlot(const QString& title, const QString& xlabel, const QString& series, const Density& D, double level,
+                      double marker = std::nan(""), double marker2 = std::nan(""), const QString& markerName = QString())
+{
+    // Partie utile de la densité : au-dessus de 1e-3 du maximum, entre les quantiles 0,1 % et 99,9 % (queues lointaines
+    // de quelques tirages isolés exclues), ≤ ~400 points.
+    QJsonArray xs, ys;
+    const double vmax = D.v.empty() ? 0.0 : *std::max_element(D.v.begin(), D.v.end());
+    const CdfTable C(D);
+    const double qlo = C.inverse(0.001), qhi = C.inverse(0.999), pad = 0.05 * (qhi - qlo);
+    size_t i0 = 0, i1 = D.t.empty() ? 0 : D.t.size() - 1;
+    while (i0 < i1 && (D.v[i0] < vmax * 1e-3 || D.t[i0] < qlo - pad)) ++i0;
+    while (i1 > i0 && (D.v[i1] < vmax * 1e-3 || D.t[i1] > qhi + pad)) --i1;
+    const size_t step = std::max<size_t>(1, (i1 - i0 + 1) / 400);
+    double ymax = 0.0;
+    for (size_t k = i0; k <= i1 && k < D.t.size(); k += step) { xs.append(D.t[k]); ys.append(D.v[k]); ymax = std::max(ymax, D.v[k]); }
+    QJsonArray S{ QJsonObject{ { "name", series }, { "x", xs }, { "y", ys } } };
+    for (double m : { marker, marker2 })
+        if (std::isfinite(m))
+            S.append(QJsonObject{ { "name", markerName.isEmpty() ? curveNum(m) : QStringLiteral("%1 = %2").arg(markerName, curveNum(m)) }, { "x", QJsonArray{ m, m } }, { "y", QJsonArray{ 0.0, ymax } },
+                                  { "dash", true }, { "width", 1.0 }, { "color", QStringLiteral("#e1572a") }, { "fill", false } });
+    return QJsonObject{ { "title", title }, { "xlabel", xlabel }, { "ylabel", QStringLiteral("Densité de probabilité") }, { "fill", true },
+                        { "yaxis", false }, { "hpd", level }, { "layout", QStringLiteral("overlay") }, { "series", S } };
+}
+
+// Chaînes de la trace des splines : celles d'un export de traces (Chain_all_Events.csv) du même calcul, reconnu au
+// même nombre de tirages et à une colonne égale à un nœud du premier tirage ; sinon une seule chaîne.
+std::vector<size_t> curveChains(const SplineTrace& S, QString* from)
+{
+    for (const TraceSet& ts : traces::loaded()) {
+        if (ts.rows() != S.rows || ts.chainStarts.size() < 2) continue;
+        for (const std::vector<double>& col : ts.values)
+            for (int k = 0; k < S.knots; ++k)
+                if (!col.empty() && std::abs(col.front() - S.theta[size_t(k)]) < 1e-6 * std::max(1.0, std::abs(col.front()))) {
+                    if (from) *from = ts.file;
+                    return ts.chainStarts;
+                }
+    }
+    return { 0 };
+}
+
+CurveRun runCurve(const QJsonObject& rq, DateFormat fmt)
+{
+    CurveRun R;
+    QString levelWarning;
+    R.level = readLevel(rq, levelWarning);
+    auto fail = [&](const QString& why) {
+        R.html += QStringLiteral("<p><b>Courbe de ChronoModel</b></p><p><i>Calcul impossible : %1.</i></p>").arg(why.toHtmlEscaped());
+        R.prompt += QStringLiteral("\nCourbe de ChronoModel — calcul impossible : %1.\n").arg(why);
+        R.ok = false;
+        return R;
+    };
+    const QLocale fr(QLocale::French);
+    const double infv = std::numeric_limits<double>::infinity();
+
+    // 1. Opération
+    const QString rawOp = rq.value("op").toString();
+    QString op = curveOp(rawOp);
+    if (op.isEmpty()) {
+        if (!rawOp.trimmed().isEmpty())
+            return fail(QStringLiteral("opération « %1 » inconnue (value, derivative, acceleration, rate, crossing, calibrate, rate_values, extremum ou plot)").arg(rawOp));
+        const bool hasY1 = std::isfinite(curveNumber(rq, { "y1" })), hasY = std::isfinite(curveNumber(rq, { "y", "value" }));
+        op = hasY1 ? QStringLiteral("rate_values") : rq.contains("from") || rq.contains("t1") ? QStringLiteral("rate")
+           : hasY && !rq.contains("t") ? QStringLiteral("crossing") : QStringLiteral("value");
+    }
+    // Grandeur : valeur G, vitesse G′ ou accélération G″ (« quantity »). « derivative » = vitesse, « acceleration » = G″ ;
+    // « value » d'une vitesse = « derivative ». « plot » : liste de grandeurs (défaut : les trois).
+    QString qText;
+    for (const char* k : { "quantity", "grandeur", "of_curve", "courbe_de", "what" })
+        if (rq.value(QLatin1String(k)).isString()) { qText = rq.value(QLatin1String(k)).toString(); break; }
+    int order = -1;
+    std::vector<int> plotOrders;
+    if (op == "plot") {
+        QStringList parts;
+        for (const char* k : { "quantities", "grandeurs", "quantity", "grandeur" }) {
+            const QJsonValue v = rq.value(QLatin1String(k));
+            if (v.isArray()) { for (const QJsonValue& x : v.toArray()) parts << x.toString(); break; }
+            if (v.isString()) { parts = v.toString().split(QRegularExpression(QStringLiteral("[,;/+]|\\s+et\\s+|\\s+and\\s+")), Qt::SkipEmptyParts); break; }
+        }
+        for (const QString& x : parts) {
+            const int o = curveQuantity(x);
+            if (o == -2) return fail(QStringLiteral("grandeur « %1 » inconnue (value, derivative ou acceleration)").arg(x.trimmed()));
+            if (o >= 0 && std::find(plotOrders.begin(), plotOrders.end(), o) == plotOrders.end()) plotOrders.push_back(o);
+        }
+        if (plotOrders.empty()) plotOrders = { 0, 1, 2 };
+        std::sort(plotOrders.begin(), plotOrders.end());
+        order = plotOrders.front();
+    } else {
+        order = curveQuantity(qText);
+        if (order == -2) return fail(QStringLiteral("grandeur « %1 » inconnue (value, derivative ou acceleration)").arg(qText.trimmed()));
+        if (op == "extremum" && order < 0) order = 1;           // « variation la plus forte » : sur la vitesse G′
+        if (op == "acceleration") { op = QStringLiteral("derivative"); if (order < 0) order = 2; }
+        if (op == "derivative" && order < 0) order = 1;
+        if (op == "derivative" && order == 0) op = QStringLiteral("value");
+        if (op == "value" && order > 0) op = QStringLiteral("derivative");
+        if (order < 0) order = 0;
+        if ((op == "rate" || op == "rate_values") && order > 0)
+            return fail(QStringLiteral("la vitesse moyenne se calcule sur la courbe elle-même (grandeur « value ») ; pour la vitesse ou "
+                                       "l'accélération à une date, utiliser l'opération « derivative » ou « acceleration »"));
+    }
+
+    // 2. Composante et source (trace des splines, sinon carte de densité)
+    const QString dimText = [&] {
+        for (const char* k : { "dim", "component", "composante", "dimension" })
+            if (rq.value(QLatin1String(k)).isString() && !rq.value(QLatin1String(k)).toString().trimmed().isEmpty())
+                return rq.value(QLatin1String(k)).toString().trimmed();
+        return QString();
+    }();
+    int dim = dimText.isEmpty() ? 0 : curves::dimIndex(dimText);
+    if (dim < 0 && curves::splines().isEmpty())
+        return fail(QStringLiteral("composante « %1 » inconnue (X, Y ou Z ; inclinaison, déclinaison ou intensité)").arg(dimText));
+    QString dimNote;
+    const QString wantedFile = rq.value("file").toString().trimmed();
+    const SplineTrace* S = nullptr;
+    for (auto it = curves::splines().crbegin(); it != curves::splines().crend(); ++it)        // la dernière jointe d'abord
+        if (wantedFile.isEmpty() || it->file.compare(QFileInfo(wantedFile).fileName(), Qt::CaseInsensitive) == 0) { S = &*it; break; }
+    if (S && !dimText.isEmpty()) {
+        const int k = S->dimOf(dimText);
+        if (k >= 0) dim = k;
+        else if (S->dims == 1) {
+            dimNote = QStringLiteral("la trace « %1 » n'a qu'une composante (%2) : « %3 » est lu comme cette composante")
+                          .arg(S->file, S->names.value(0), dimText);
+            dim = 0;
+        } else {
+            return fail(QStringLiteral("composante « %1 » absente de « %2 » (composantes : %3)").arg(dimText, S->file, S->names.join(QStringLiteral(", "))));
+        }
+    } else if (S) {
+        dim = 0;
+    }
+    // calibrate : carte possible (G ou G′) ; l'accélération et le tracé demandent la trace.
+    const bool needsTrace = op == "rate" || op == "crossing" || op == "rate_values" || op == "plot" || op == "extremum" || order == 2;
+    const CurveMap* Mp = nullptr;
+    if (!S) {
+        if (curves::maps().isEmpty())
+            return fail(QStringLiteral("aucune courbe chargée : joindre la trace des splines exportée par ChronoModel (Curve_X_Splines.csv)"));
+        if (needsTrace)
+            return fail(order == 2 ? QStringLiteral("l'accélération (dérivée seconde) demande la trace des splines (Curve_X_Splines.csv) : "
+                                                    "ChronoModel n'exporte pas de carte de G″")
+                        : op == "plot" ? QStringLiteral("le tracé des courbes de valeur, de vitesse et d'accélération demande la trace des "
+                                                        "splines (Curve_X_Splines.csv)")
+                        : op == "extremum" ? QStringLiteral("la date de l'extremum (variation la plus forte, maximum, minimum) se cherche "
+                                                            "courbe par courbe : il faut la trace des splines (Curve_X_Splines.csv)")
+                        : QStringLiteral("cette opération relie plusieurs dates d'une même spline : il faut la trace des splines "
+                                         "(Curve_X_Splines.csv), une carte de densité ne donne que la loi de la courbe date par date"));
+        const bool wantGP = order == 1;                    // vitesse (derivative, calibrate de G′) : carte de G′
+        const CurveMap* any = nullptr;
+        for (auto it = curves::maps().crbegin(); it != curves::maps().crend(); ++it) {
+            const CurveMap& m = *it;
+            if (m.derivative != wantGP) continue;
+            if (!wantedFile.isEmpty() && m.file.compare(QFileInfo(wantedFile).fileName(), Qt::CaseInsensitive) != 0) continue;
+            if (!any) any = &m;
+            if (dimText.isEmpty() || curves::dimIndex(m.component) == dim) { Mp = &m; break; }
+        }
+        if (!Mp && any && curves::maps().size() == 1) { Mp = any; dimNote = QStringLiteral("une seule carte chargée : « %1 »").arg(any->file); }
+        if (!Mp)
+            return fail(wantGP ? QStringLiteral("pas de carte de vitesse (Curve_X_GP_Map.csv) chargée pour cette composante ; la trace des splines "
+                                                "(Curve_X_Splines.csv) donne la vitesse exacte")
+                               : QStringLiteral("pas de carte de densité (Curve_X_Map.csv) chargée pour cette composante"));
+        if (!Mp->usable) return fail(Mp->notes.join(QStringLiteral(" ; ")));
+        if (!Mp->component.isEmpty()) dim = std::max(0, curves::dimIndex(Mp->component));
+    }
+    const QString D = S ? S->names.value(dim) : !Mp->component.isEmpty() ? Mp->component : curves::dimName(dim);
+    const QString unit = S ? S->unitOf(dim) : Mp && (Mp->component.startsWith(QLatin1String("Inc")) || Mp->component.startsWith(QLatin1String("Dec")))
+                                                   ? QStringLiteral("°") : QString();
+    double per = curveNumber(rq, { "per" });                 // vitesse par an (défaut) ou par siècle (per = 100)
+    if (!(per > 0)) per = 1.0;
+    const QString perText = per == 1.0 ? QStringLiteral("par an") : per == 100.0 ? QStringLiteral("par siècle")
+                          : per == 1000.0 ? QStringLiteral("par millénaire") : QStringLiteral("pour %1 ans").arg(curveNum(per));
+    const QString unitRate = unit == QStringLiteral("°") ? QStringLiteral("degrés %1").arg(perText) : QStringLiteral("unités de %1 %2").arg(D, perText);
+    const QString perText2 = per == 1.0 ? QStringLiteral("par an²") : per == 100.0 ? QStringLiteral("par siècle²")
+                           : per == 1000.0 ? QStringLiteral("par millénaire²") : QStringLiteral("pour (%1 ans)²").arg(curveNum(per));
+    const QString unitAcc = unit == QStringLiteral("°") ? QStringLiteral("degrés %1").arg(perText2) : QStringLiteral("unités de %1 %2").arg(D, perText2);
+    // Grandeur d'ordre k : symbole (X, X′, X″), mot, unité, facteur d'échelle (vitesse × per, accélération × per²).
+    auto qSym = [&](int k) { return k == 0 ? D : k == 1 ? D + QChar(0x2032) : D + QChar(0x2033); };
+    auto qWord = [](int k) { return k == 0 ? QStringLiteral("valeur") : k == 1 ? QStringLiteral("vitesse") : QStringLiteral("accélération"); };
+    auto qUnit = [&](int k) { return k == 0 ? unit : k == 1 ? unitRate : unitAcc; };
+    auto qScale = [&](int k) { return k == 0 ? 1.0 : k == 1 ? per : per * per; };
+    const double scale = qScale(order);
+    const QString Q = qSym(order);                          // grandeur de la demande
+
+    // 3. Termes « date » (année fixe, colonne des traces, datation indépendante) et valeurs y
+    auto dateTerm = [&](std::initializer_list<const char*> keys, const QString& fallback, Operand& o, QString& err) {
+        const QJsonValue v = operandValue(rq, keys);
+        if (v.isUndefined()) {
+            err = QStringLiteral("date « %1 » absente (pour la date de la variation la plus forte, d'un maximum ou d'un minimum : op "
+                                 "« extremum » ; pour tracer la courbe : op « plot »)").arg(fallback);
+            return false;
+        }
+        return resolveOperand(v, rq, fallback, -1, fmt, o, err);
+    };
+    Operand T1, T2;
+    QString err;
+    const double y = curveNumber(rq, { "y", "value", "valeur" });
+    const double ymin = curveNumber(rq, { "ymin", "y_min" }), ymax = curveNumber(rq, { "ymax", "y_max" });
+    const double y1 = curveNumber(rq, { "y1", "from_value", "y_from", "value1" }), y2 = curveNumber(rq, { "y2", "to_value", "y_to", "value2" });
+    const double yErr = curveNumber(rq, { "error", "y_error", "sigma", "erreur", "err" });
+    if (op == "crossing" && yErr > 0) op = QStringLiteral("calibrate");       // valeur mesurée avec son erreur : date de la mesure
+    if (op == "calibrate" && yErr < 0) return fail(QStringLiteral("l'erreur de la mesure (« error ») doit être positive ou nulle"));
+    const bool exactValue = op == "calibrate" && !(yErr > 0);   // valeur exacte : limite σ → 0
+    // Vitesse ou accélération demandée sans date (prompt réel du 05/11/2026 : « où est la variation la plus forte », le modèle
+    // a demandé {"op":"derivative"} sans « t », trois fois de suite) : date de la vitesse la plus forte (extremum).
+    QString extremumNote;
+    if (op == "derivative" && operandValue(rq, { "t", "at", "date", "of", "time" }).isUndefined() && !std::isfinite(y)) {
+        op = QStringLiteral("extremum");
+        extremumNote = QStringLiteral("aucune date t donnée : SeldonH cherche la date où la %1 est la plus forte (en valeur absolue) ; pour "
+                                      "la %1 à une date précise, donner cette date").arg(order == 2 ? QStringLiteral("accélération") : QStringLiteral("vitesse"));
+    }
+    // Sens de l'extremum : abs (la plus forte en valeur absolue, défaut pour une vitesse ou une accélération), max, min,
+    // absmin (la plus faible en valeur absolue : la courbe la plus plate).
+    QString sense;
+    if (op == "extremum") {
+        QString sv;
+        for (const char* k : { "sense", "extremum", "kind", "type", "which", "sens" })
+            if (rq.value(QLatin1String(k)).isString() && !rq.value(QLatin1String(k)).toString().trimmed().isEmpty()) {
+                sv = text::fold(rq.value(QLatin1String(k)).toString()).trimmed().replace(' ', '_').replace('-', '_');
+                break;
+            }
+        const QString ro = text::fold(rawOp).trimmed();
+        if (sv.isEmpty() && (ro == "max" || ro == "maximum" || ro == "argmax" || ro == "peak" || ro == "pic")) sv = QStringLiteral("max");
+        if (sv.isEmpty() && (ro == "min" || ro == "minimum" || ro == "argmin")) sv = QStringLiteral("min");
+        static const QHash<QString, QString> senses = {
+            { "max", "max" }, { "maximum", "max" }, { "maximal", "max" }, { "maximale", "max" }, { "highest", "max" }, { "plus_grand", "max" },
+            { "plus_grande", "max" }, { "plus_haut", "max" }, { "croissance", "max" }, { "increase", "max" }, { "top", "max" },
+            { "min", "min" }, { "minimum", "min" }, { "minimal", "min" }, { "minimale", "min" }, { "lowest", "min" }, { "plus_petit", "min" },
+            { "plus_petite", "min" }, { "plus_bas", "min" }, { "decroissance", "min" }, { "decrease", "min" },
+            { "abs", "abs" }, { "absmax", "abs" }, { "abs_max", "abs" }, { "max_abs", "abs" }, { "plus_forte", "abs" }, { "strongest", "abs" },
+            { "largest", "abs" }, { "variation", "abs" }, { "steepest", "abs" }, { "absolu", "abs" }, { "absolue", "abs" },
+            { "absmin", "absmin" }, { "abs_min", "absmin" }, { "min_abs", "absmin" }, { "plus_faible", "absmin" }, { "weakest", "absmin" },
+            { "slowest", "absmin" }, { "flattest", "absmin" }, { "plus_plat", "absmin" }, { "plus_lente", "absmin" } };
+        if (sv.isEmpty()) sense = order == 0 ? QStringLiteral("max") : QStringLiteral("abs");
+        else if (senses.contains(sv)) sense = senses.value(sv);
+        else return fail(QStringLiteral("sens de l'extremum « %1 » inconnu (abs, max, min ou absmin)").arg(sv));
+    }
+    if (op == "value" || op == "derivative") {
+        if (!dateTerm({ "t", "at", "date", "of", "time" }, QStringLiteral("t"), T1, err)) return fail(err.isEmpty() ? QStringLiteral("date t illisible") : err);
+    } else if (op == "rate") {
+        if (!dateTerm({ "from", "t1", "a", "start" }, QStringLiteral("t1"), T1, err)) return fail(err);
+        if (!dateTerm({ "to", "t2", "b", "end" }, QStringLiteral("t2"), T2, err)) return fail(err);
+    } else if (op == "crossing" || op == "calibrate") {
+        if (!std::isfinite(y)) return fail(QStringLiteral("valeur « y » absente"));
+    } else if (op == "plot" || op == "extremum") {
+        // pas de date ni de valeur : la fenêtre (tmin, tmax) suffit
+    } else if (!std::isfinite(y1) || !std::isfinite(y2)) {
+        return fail(QStringLiteral("il faut les deux valeurs « y1 » et « y2 »"));
+    } else if (y1 == y2) {
+        return fail(QStringLiteral("y1 et y2 sont égales : la vitesse entre deux valeurs demande deux valeurs différentes"));
+    }
+    R.html += T1.html + T2.html;
+    R.prompt += T1.prompt + T2.prompt;
+    auto termText = [&](const Operand& o) {
+        return o.kind == Operand::Fixed ? o.label : o.kind == Operand::Column ? prettyColumn(o.label) : QStringLiteral("« %1 »").arg(o.label);
+    };
+
+    // Fenêtre de recherche des atteintes : période d'étude, ou [tmin ; tmax] de la demande.
+    double wa = S ? S->tmin : 0.0, wb = S ? S->tmax() : 0.0;
+    if (S) {
+        const double a = numOf(rq, { "tmin" }, std::nan("")), b = numOf(rq, { "tmax" }, std::nan(""));
+        if (std::isfinite(a)) wa = std::max(wa, a);
+        if (std::isfinite(b)) wb = std::min(wb, b);
+        if (!(wb > wa)) return fail(QStringLiteral("fenêtre [tmin ; tmax] vide ou hors de la période d'étude de la courbe"));
+    }
+    QString which = text::fold(rq.value("which").toString()).trimmed();
+    if (which.isEmpty() || which == "premiere" || which == "premier") which = QStringLiteral("first");
+    if (which == "derniere" || which == "dernier") which = QStringLiteral("last");
+    if (which == "toutes" || which == "tous") which = QStringLiteral("all");
+    if (op != "extremum" && which != "first" && which != "last" && which != "all") return fail(QStringLiteral("« which » : first, last ou all"));
+
+    // Titre et en-tête
+    const QString src = S ? QStringLiteral("splines") : QStringLiteral("carte de densité");
+    R.title = op == "value" ? QStringLiteral("Courbe %1 : valeur à %2").arg(D, termText(T1))
+            : op == "derivative" ? QStringLiteral("Courbe %1 : %3 instantanée à %2").arg(D, termText(T1), qWord(order))
+            : op == "extremum" ? QStringLiteral("Courbe %1 : date de la %2").arg(D, [&] {
+                  const QString w = qWord(order);
+                  return sense == "abs" ? (order == 0 ? QStringLiteral("valeur la plus forte (en valeur absolue)") : QStringLiteral("%1 la plus forte").arg(w))
+                       : sense == "absmin" ? QStringLiteral("%1 la plus faible (en valeur absolue)").arg(w)
+                       : sense == "max" ? QStringLiteral("%1 maximale").arg(w) : QStringLiteral("%1 minimale").arg(w); }())
+            : op == "plot" ? QStringLiteral("Courbe %1 : tracé (%2)").arg(D, [&] { QStringList w; for (int k : plotOrders) w << qWord(k); return w.join(QStringLiteral(", ")); }())
+            : op == "rate" ? QStringLiteral("Courbe %1 : vitesse moyenne entre %2 et %3").arg(D, termText(T1), termText(T2))
+            : op == "crossing" ? QStringLiteral("Courbe %1 : date où %3 = %2").arg(D, curveNum(y), Q)
+            : op == "calibrate" && !(yErr > 0) ? QStringLiteral("Courbe %1 : date pour %3 = %2").arg(D, text::numAuto(y, 6), Q)
+            : op == "calibrate" ? QStringLiteral("Courbe %1 : date pour %4 = %2 ± %3").arg(D, text::numAuto(y, 6), text::numAuto(yErr, 6), Q)
+            : QStringLiteral("Courbe %1 : vitesse entre %1 = %2 et %1 = %3").arg(D, curveNum(y1), curveNum(y2));
+    R.title += QStringLiteral(" (%1 ChronoModel)").arg(src);
+    const QString userName = rq.value("name").toString().trimmed();
+    R.name = !userName.isEmpty() ? userName
+           : op == "value" ? QStringLiteral("%1(%2)").arg(D, T1.label)
+           : op == "derivative" ? QStringLiteral("%1(%2)").arg(Q, T1.label)
+           : op == "plot" ? QStringLiteral("Courbe %1").arg(D)
+           : op == "extremum" ? QStringLiteral("Date du %1").arg(sense == "abs" ? QStringLiteral("maximum de |%1|").arg(Q) : sense == "absmin" ? QStringLiteral("minimum de |%1|").arg(Q)
+                                                                 : sense == "max" ? QStringLiteral("maximum de %1").arg(Q) : QStringLiteral("minimum de %1").arg(Q))
+           : op == "rate" ? QStringLiteral("Vitesse %1 de %2 à %3").arg(D, T1.label, T2.label)
+           : op == "crossing" ? QStringLiteral("Date où %1 = %2").arg(Q, curveNum(y))
+           : op == "calibrate" && !(yErr > 0) ? QStringLiteral("Date pour %1 = %2").arg(Q, text::numAuto(y, 6))
+           : op == "calibrate" ? QStringLiteral("Date pour %1 = %2 ± %3").arg(Q, text::numAuto(y, 6), text::numAuto(yErr, 6))
+           : QStringLiteral("De %1 = %2 à %1 = %3").arg(D, curveNum(y1), curveNum(y2));
+    const QString file = S ? S->file : Mp->file;
+    R.html += QStringLiteral("<p><b>Courbe de ChronoModel « %1 » — composante %2</b></p>").arg(file.toHtmlEscaped(), D);
+    R.prompt += QStringLiteral("\nCourbe de ChronoModel « %1 », composante %2 : %3.\n").arg(file, D, R.title);
+    if (!dimNote.isEmpty()) {
+        R.html += QStringLiteral("<p><i>%1.</i></p>").arg(dimNote.toHtmlEscaped());
+        R.prompt += dimNote + QStringLiteral(".\n");
+    }
+    if (!extremumNote.isEmpty()) {
+        R.html += QStringLiteral("<p><i>%1.</i></p>").arg(extremumNote.toHtmlEscaped());
+        R.prompt += extremumNote + QStringLiteral(".\n");
+    }
+    if (order > 0 && op != "plot") {
+        const QString u = QStringLiteral("%1 = %2 de %3, en %4%5").arg(Q, order == 1 ? QStringLiteral("vitesse (dérivée)") : QStringLiteral("accélération (dérivée seconde)"),
+                                                                       D, qUnit(order),
+                                                                       order == 1 ? QStringLiteral(" ; pour une courbe âge-profondeur, c'est le taux d'accumulation") : QString());
+        R.html += QStringLiteral("<p><i>%1.</i></p>").arg(u.toHtmlEscaped());
+        R.prompt += u + QStringLiteral(".\n");
+    }
+    auto finish = [&]() {
+        if (!levelWarning.isEmpty()) {
+            R.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(levelWarning.toHtmlEscaped());
+            R.prompt += QStringLiteral("Avertissement : %1.\n").arg(levelWarning);
+        }
+        R.ok = true;
+        return R;
+    };
+    // Loi d'une grandeur numérique (densité lissée) : HPD, MAP, moyenne, quartiles.
+    auto numericSummary = [&](const Density& d, const QString& what) {
+        R.html += QStringLiteral("<p><b>%1</b></p>").arg(what.toHtmlEscaped());
+        R.prompt += what + QStringLiteral(" :\n");
+        appendSummary(R.html, R.prompt, d, hpdIntervals(d, 95.0), hpdIntervals(d, 68.0), densityStats(d), R.level, DateFormat::Numeric);
+    };
+    auto probRow = [&](const QString& label, const QString& value) {
+        return QStringLiteral("<tr><td><b>%1</b></td><td>%2</td></tr>").arg(label.toHtmlEscaped(), value.toHtmlEscaped());
+    };
+    // Lignes de tableau en texte pour le modèle : « libellé : valeur ».
+    auto rowsPrompt = [](QString p) {
+        p.replace(QStringLiteral("</td><td>"), QStringLiteral(" : ")).replace(QStringLiteral("</tr>"), QStringLiteral("\n"));
+        static const QRegularExpression tags(QStringLiteral("<[^>]+>"));
+        p.remove(tags);
+        return p.replace(QStringLiteral("&lt;"), QStringLiteral("<")).replace(QStringLiteral("&gt;"), QStringLiteral(">"))
+                .replace(QStringLiteral("&amp;"), QStringLiteral("&"));
+    };
+
+    // Courbe d'une grandeur (G, G′ ou G″) et son enveloppe : médiane et intervalle de crédibilité à 95 % des tirages
+    // (à queues égales : quantiles 2,5 – 97,5 %, date par date ; pas une HPD), sur une
+    // grille de 240 dates de la période d'étude (ou de [tmin ; tmax]), avec P(grandeur > 0) à chaque date.
+    struct Envelope { std::vector<double> t, med, lo, hi, ppos; };
+    auto envelopeOf = [&](int k, double a, double b) {
+        Envelope E;
+        const size_t N = S->rows;
+        const size_t nt = 240, stride = std::max<size_t>(1, N / 2000);
+        const double sc = qScale(k);
+        std::vector<double> col;
+        for (size_t j = 0; j < nt; ++j) {
+            const double t = a + (b - a) * double(j) / double(nt - 1);
+            col.clear();
+            size_t pos = 0;
+            for (size_t i = 0; i < N; i += stride) {
+                const double v = S->quantity(i, dim, t, k) * sc;
+                if (!std::isfinite(v)) continue;
+                col.push_back(v);
+                if (v > 0) ++pos;
+            }
+            if (col.empty()) col.push_back(std::nan(""));
+            std::sort(col.begin(), col.end());
+            auto qt = [&](double p) { return col[std::min(col.size() - 1, size_t(p * double(col.size() - 1) + 0.5))]; };
+            E.t.push_back(t);
+            E.med.push_back(qt(0.5)); E.lo.push_back(qt(0.025)); E.hi.push_back(qt(0.975));
+            E.ppos.push_back(double(pos) / double(std::max<size_t>(1, col.size())));
+        }
+        return E;
+    };
+    // `marks` : dates (t1, t2) et valeurs (y, y ± σ…) de la question sur cette courbe.
+    auto addEnvelope = [&](int k, bool marks) {
+        if (!S) return;
+        const double a = op == "plot" ? wa : S->tmin, b = op == "plot" ? wb : S->tmax();
+        const Envelope E = envelopeOf(k, a, b);
+        QJsonArray xs, med, lo, hi;
+        double gmin = infv, gmax = -infv;
+        for (size_t j = 0; j < E.t.size(); ++j) {
+            xs.append(dateformat::convert(E.t[j], fmt));
+            med.append(E.med[j]); lo.append(E.lo[j]); hi.append(E.hi[j]);
+            if (std::isfinite(E.lo[j])) gmin = std::min(gmin, E.lo[j]);
+            if (std::isfinite(E.hi[j])) gmax = std::max(gmax, E.hi[j]);
+        }
+        const QString col = k == 0 ? QStringLiteral("#1f5080") : k == 1 ? QStringLiteral("#b5541c") : QStringLiteral("#6a3d9a");
+        const QString col2 = k == 0 ? QStringLiteral("#3170b0") : k == 1 ? QStringLiteral("#e1863a") : QStringLiteral("#9b6fc4");
+        QJsonArray S2{ QJsonObject{ { "name", QStringLiteral("Médiane des tirages") }, { "x", xs }, { "y", med }, { "fill", false }, { "width", 2.0 },
+                                    { "color", col } },
+                       QJsonObject{ { "name", QStringLiteral("Intervalle de crédibilité à 95 % (quantiles 2,5 – 97,5 %)") }, { "x", xs }, { "y", lo }, { "fill", false },
+                                    { "dash", true }, { "width", 1.0 }, { "color", col2 } },
+                       QJsonObject{ { "name", QString() }, { "x", xs }, { "y", hi }, { "fill", false }, { "dash", true }, { "width", 1.0 },
+                                    { "color", col2 } } };
+        auto vline = [&](double t, const QString& name) {
+            S2.append(QJsonObject{ { "name", name }, { "x", QJsonArray{ dateformat::convert(t, fmt), dateformat::convert(t, fmt) } },
+                                   { "y", QJsonArray{ gmin, gmax } }, { "dash", true }, { "width", 1.0 }, { "color", QStringLiteral("#e1572a") },
+                                   { "fill", false } });
+        };
+        auto hline = [&](double v, const QString& name, const QString& c = QStringLiteral("#2a9d8f")) {
+            S2.append(QJsonObject{ { "name", name }, { "x", QJsonArray{ dateformat::convert(a, fmt), dateformat::convert(b, fmt) } },
+                                   { "y", QJsonArray{ v, v } }, { "dash", true }, { "width", 1.0 }, { "color", c },
+                                   { "fill", false } });
+        };
+        if (k > 0 && gmin < 0 && gmax > 0) hline(0.0, QString(), QStringLiteral("#888888"));     // vitesse ou accélération nulle
+        if (marks) {
+            for (const Operand* o : { &T1, &T2 })                  // termes non utilisés : année NaN
+                if (o->kind == Operand::Fixed && std::isfinite(o->year)) vline(o->year, QStringLiteral("t = %1").arg(o->label));
+            const QString Qk = qSym(k);
+            if (k == order) {                                      // valeurs de la question : sur la courbe de leur grandeur
+                if (op == "crossing") hline(y, QStringLiteral("%1 = %2").arg(Qk, curveNum(y)));
+                if (op == "rate_values") { hline(y1, QStringLiteral("%1 = %2").arg(Qk, curveNum(y1))); hline(y2, QStringLiteral("%1 = %2").arg(Qk, curveNum(y2))); }
+                if ((op == "value" || op == "derivative") && std::isfinite(y)) hline(y, QStringLiteral("%1 = %2").arg(Qk, curveNum(y)));
+                if (op == "calibrate") {
+                    hline(y, QStringLiteral("%1 = %2").arg(Qk, curveNum(y)));
+                    if (yErr > 0) {
+                        hline(y - yErr, QStringLiteral("%1 ± %2").arg(text::numAuto(y, 6), text::numAuto(yErr, 6)));
+                        hline(y + yErr, QString());
+                    }
+                }
+            }
+        }
+        const QString title = k == 0 ? QStringLiteral("Courbe %1 — %2").arg(D, S->file)
+                            : k == 1 ? QStringLiteral("Vitesse %1 — %2").arg(qSym(1), S->file)
+                                     : QStringLiteral("Accélération %1 — %2").arg(qSym(2), S->file);
+        const QString ylabel = k == 0 ? (unit.isEmpty() ? D : QStringLiteral("%1 (%2)").arg(D, unit))
+                                      : QStringLiteral("%1 (%2)").arg(qSym(k), qUnit(k));
+        QJsonObject plot{ { "title", title }, { "xlabel", dateformat::axisLabel(fmt) },
+                          { "ylabel", ylabel }, { "fill", false }, { "yaxis", true }, { "yzero", false }, { "layout", QStringLiteral("overlay") },
+                          { "series", S2 } };
+        if (dateformat::isAge(fmt)) plot["xreverse"] = true;
+        R.plots << plot;
+    };
+
+    // 3b. Tracé des courbes de la valeur G, de la vitesse G′ (taux d'accumulation d'une courbe âge-profondeur) et de
+    //     l'accélération G″ : médiane et intervalle de crédibilité à 95 % des tirages, date par date. La fiche résume, pour chaque grandeur,
+    //     les extrêmes de la médiane et, pour G′ et G″, les périodes où leur signe est établi (P > 95 % ou < 5 %).
+    if (op == "plot") {
+        const QLocale frl(QLocale::French);
+        R.html += QStringLiteral("<p>Fenêtre : %1 → %2 ; %3 tirages ; 240 dates.</p>")
+                      .arg(dateformat::format(wa, fmt), dateformat::format(wb, fmt), frl.toString(qlonglong(S->rows)));
+        R.prompt += QStringLiteral("Tracé sur %1 → %2 (%3 tirages ; à chaque date, médiane et intervalle de crédibilité à 95 % des tirages, quantiles 2,5 – 97,5 %, pas une HPD).\n")
+                        .arg(dateformat::format(wa, fmt), dateformat::format(wb, fmt), frl.toString(qlonglong(S->rows)));
+        QString rows;
+        for (int k : plotOrders) {
+            const Envelope E = envelopeOf(k, wa, wb);
+            size_t jmin = 0, jmax = 0;
+            for (size_t j = 0; j < E.t.size(); ++j) {
+                if (E.med[j] < E.med[jmin]) jmin = j;
+                if (E.med[j] > E.med[jmax]) jmax = j;
+            }
+            const QString u = qUnit(k).isEmpty() ? QString() : QStringLiteral(" ") + qUnit(k);
+            // Décimales : 2 chiffres significatifs sur la largeur typique (médiane) de l'intervalle à 95 %, ÷ 4.
+            std::vector<double> wid;
+            for (size_t j = 0; j < E.t.size(); ++j) if (std::isfinite(E.hi[j] - E.lo[j])) wid.push_back(E.hi[j] - E.lo[j]);
+            std::nth_element(wid.begin(), wid.begin() + std::ptrdiff_t(wid.size() / 2), wid.end());
+            const double typ = wid.empty() ? 0.0 : wid[wid.size() / 2] / 4.0;
+            auto val = [&](double x) {
+                if (typ > 0 && typ < 1e-4) return frl.toString(x, 'g', 3);     // très petites valeurs (accélération par an²)
+                const dateformat::PrecisionScope ps(typ > 0 ? typ : 1.0);
+                return curveNum(x);
+            };
+            const QString label = k == 0 ? QStringLiteral("Valeur %1").arg(D) : k == 1 ? QStringLiteral("Vitesse %1").arg(qSym(1))
+                                                                                       : QStringLiteral("Accélération %1").arg(qSym(2));
+            QString line = QStringLiteral("médiane de %1%3 (en %2) à %4%6 (en %5)")
+                               .arg(val(E.med[jmin]), dateformat::format(E.t[jmin], fmt), u, val(E.med[jmax]),
+                                    dateformat::format(E.t[jmax], fmt), u);
+            if (k > 0) {
+                // Périodes où le signe est établi : P(> 0) ≥ 95 % (positive) ou ≤ 5 % (négative), morceaux contigus de la grille.
+                QStringList posP, negP;
+                auto flush = [&](int sign, size_t j0, size_t j1) {
+                    const QString iv = QStringLiteral("%1 → %2").arg(dateformat::format(E.t[j0], fmt), dateformat::format(E.t[j1], fmt));
+                    (sign > 0 ? posP : negP) << iv;
+                };
+                int cur = 0;
+                size_t start = 0;
+                for (size_t j = 0; j <= E.t.size(); ++j) {
+                    const int sg = j == E.t.size() ? 0 : E.ppos[j] >= 0.95 ? 1 : E.ppos[j] <= 0.05 ? -1 : 0;
+                    if (sg != cur) {
+                        if (cur != 0) flush(cur, start, j - 1);
+                        cur = sg;
+                        start = j;
+                    }
+                }
+                const QString pw = k == 1 ? QStringLiteral("croissante") : QStringLiteral("vitesse croissante");
+                const QString nw = k == 1 ? QStringLiteral("décroissante") : QStringLiteral("vitesse décroissante");
+                line += QStringLiteral(" ; %1 (P ≥ 95 %) : %2 ; %3 (P ≥ 95 %) : %4")
+                            .arg(pw, posP.isEmpty() ? QStringLiteral("aucune période") : posP.join(QStringLiteral(", ")),
+                                 nw, negP.isEmpty() ? QStringLiteral("aucune période") : negP.join(QStringLiteral(", ")));
+            }
+            rows += probRow(label, line);
+            addEnvelope(k, false);
+        }
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+        R.prompt += rowsPrompt(rows);
+        const QString note = QStringLiteral("Chaque tirage est une spline complète, évaluée comme dans ChronoModel : vitesse = dérivée G′ (pour une "
+                                            "courbe âge-profondeur, taux d'accumulation), accélération = dérivée seconde G″ (nulle hors des "
+                                            "Events, où la spline est prolongée en ligne droite ; elle est continue mais anguleuse aux Events). "
+                                            "Les extrêmes donnés sont ceux de la courbe médiane, date par date, pas la loi d'un extrême.");
+        R.html += QStringLiteral("<p><small>%1</small></p>").arg(note.toHtmlEscaped());
+        R.prompt += note + QStringLiteral(" Les courbes sont DÉJÀ tracées, une par onglet.\n");
+        R.posterior = true;
+        return finish();
+    }
+
+    // 4. Date d'une mesure y ± σ sur la courbe estimée (« calibration » sur la courbe a posteriori) :
+    //    f(t) ∝ (1/n) Σ_i φ_σ(y − G_i(t)), a priori uniforme sur la période ; l'incertitude de la courbe est celle des
+    //    tirages (pas d'erreur « gaussienne » ajoutée). Sur chaque pas de la grille, chaque courbe est prise linéaire et la
+    //    vraisemblance y est MOYENNÉE exactement : |Φ((y − G0)/σ) − Φ((y − G1)/σ)| / |G1 − G0|. Le résultat reste juste
+    //    quand σ est très petit devant la variation de la courbe sur un pas (limite σ → 0 : somme des passages par y,
+    //    pondérés par 1/|G′|), là où une évaluation ponctuelle ne verrait que quelques courbes et donnerait des pics.
+    //    Carte : moyenne de la même vraisemblance sur la colonne (calcul approché).
+    if (op == "calibrate") {
+        const double a = S ? wa : Mp->t.front(), b = S ? wb : Mp->t.back();
+        const int nt = int(std::clamp((b - a), 400.0, 3000.0));
+        Density d;
+        d.step = (b - a) / double(nt);
+        d.t.resize(size_t(nt));
+        d.v.assign(size_t(nt), 0.0);
+        for (int k = 0; k < nt; ++k) d.t[size_t(k)] = a + d.step * (k + 0.5);     // milieux des pas
+        // Carte de G′ : en unités par an ; la mesure (par `per` ans) y est ramenée.
+        const double sigMap = Mp && Mp->y.size() > 1 ? 0.5 * (Mp->y.back() - Mp->y.front()) / double(Mp->y.size() - 1) : 0.0;
+        const double sig = exactValue ? sigMap : (S ? yErr : yErr / scale);   // carte et valeur exacte : demi-case de la carte
+        const double yMap = S ? y : y / scale;
+        std::vector<double> crossT, crossSlope;                    // passages des courbes par y (lissage)
+        double smoothing = 0.0;
+        const double inv2 = sig > 0 ? 1.0 / (2.0 * sig * sig) : 0.0;
+        size_t used = 0;
+        if (S) {
+            const size_t stride = std::max<size_t>(1, size_t(double(S->rows) * nt / 3.0e7));
+            constexpr double invSqrt2 = 0.70710678118654752440;
+            std::vector<double> g(size_t(nt) + 1);
+            for (size_t i = 0; i < S->rows; i += stride, ++used) {
+                for (int k = 0; k <= nt; ++k) g[size_t(k)] = S->quantity(i, dim, a + d.step * k, order) * scale;
+                for (int k = 0; k < nt; ++k) {
+                    const double g0 = g[size_t(k)], g1 = g[size_t(k) + 1], dg = std::abs(g1 - g0);
+                    if (dg > 0 && y >= std::min(g0, g1) && y < std::max(g0, g1) && crossT.size() < 400000) {   // passage par y
+                        crossT.push_back(a + d.step * (k + (y - g0) / (g1 - g0)));
+                        crossSlope.push_back(dg / d.step);
+                    }
+                    double c;
+                    if (exactValue) {                                       // passage exact par y : 1/|ΔG| si y est dans le pas
+                        c = dg > 0 && y >= std::min(g0, g1) && y < std::max(g0, g1) ? 1.0 / dg : 0.0;
+                    } else if (dg > 1e-9 * yErr) {
+                        // moyenne de φ_σ(y − G) sur le pas : (Φ(z0) − Φ(z1)) / ΔG, Φ par erfc
+                        const double z0 = (y - g0) / yErr, z1 = (y - g1) / yErr;
+                        c = std::abs(std::erfc(-z0 * invSqrt2) - std::erfc(-z1 * invSqrt2)) * 0.5 / dg;
+                    } else {
+                        const double r = y - 0.5 * (g0 + g1);
+                        c = std::exp(-r * r * inv2) / (yErr * 2.5066282746310002);
+                    }
+                    d.v[size_t(k)] += c;
+                }
+            }
+            for (double& v : d.v) v /= double(std::max<size_t>(used, 1));
+            // Lissage : avec une erreur petite devant la variation de la courbe, la densité n'est qu'un histogramme des passages
+            // des courbes tirées par y (bruit d'échantillonnage). On la lisse comme une densité de tirages (noyau gaussien,
+            // largeur de Sheather-Jones h sur les dates des passages), en ne gardant que ce que l'erreur ne lisse pas déjà :
+            // h_ajout = √(h² − σ_t²), σ_t = σ / |pente| médiane de la courbe aux passages.
+            if (crossT.size() >= 20) {
+                const double h = kernelBandwidth(crossT, Bandwidth::SheatherJones);
+                std::vector<double> sl = crossSlope;
+                std::nth_element(sl.begin(), sl.begin() + std::ptrdiff_t(sl.size() / 2), sl.end());
+                const double slope = sl[sl.size() / 2];
+                const double sigT = slope > 0 && yErr > 0 ? yErr / slope : 0.0;
+                const double add = h > sigT ? std::sqrt(h * h - sigT * sigT) : 0.0;
+                if (std::isfinite(add) && add > 0.5 * d.step) {
+                    smoothing = add;
+                    const int w = int(std::ceil(4.0 * add / d.step));
+                    std::vector<double> ker(size_t(2 * w + 1));
+                    for (int j = -w; j <= w; ++j) ker[size_t(j + w)] = std::exp(-0.5 * std::pow(j * d.step / add, 2));
+                    std::vector<double> sm(d.v.size(), 0.0);
+                    for (int k = 0; k < nt; ++k) {                       // bords : noyau renormalisé (pas de fuite hors de la fenêtre)
+                        double sum = 0.0, wsum = 0.0;
+                        for (int j = -w; j <= w; ++j) {
+                            const int kk = k + j;
+                            if (kk < 0 || kk >= nt) continue;
+                            sum += ker[size_t(j + w)] * d.v[size_t(kk)];
+                            wsum += ker[size_t(j + w)];
+                        }
+                        sm[size_t(k)] = wsum > 0 ? sum / wsum : 0.0;
+                    }
+                    d.v = sm;
+                }
+            }
+        } else {
+            const CurveMap& M = *Mp;
+            for (int k = 0; k < nt; ++k) {
+                const double t = d.t[size_t(k)];
+                const size_t c1 = std::min(M.t.size() - 1, size_t(std::upper_bound(M.t.begin(), M.t.end(), t) - M.t.begin()));
+                const size_t c0 = c1 > 0 ? c1 - 1 : 0;
+                const double w = c1 > c0 && M.t[c1] > M.t[c0] ? (t - M.t[c0]) / (M.t[c1] - M.t[c0]) : 0.0;
+                double sum = 0.0, tot = 0.0;
+                for (size_t r = 0; r < M.y.size(); ++r) {
+                    const double n = (1.0 - w) * M.at(c0, r) + w * M.at(c1, r), z = yMap - M.y[r];
+                    sum += n * std::exp(-z * z * inv2);
+                    tot += n;
+                }
+                d.v[size_t(k)] = tot > 0 ? sum / tot : 0.0;
+            }
+        }
+        double area = 0.0, peak = 0.0;
+        for (size_t k = 0; k + 1 < d.v.size(); ++k) area += 0.5 * (d.v[k] + d.v[k + 1]) * d.step;
+        for (double v : d.v) peak = std::max(peak, v);
+        if (!(area > 0) || peak < 1e-12)
+            return fail(QStringLiteral("la courbe ne passe jamais près de %1 = %2 ± %3 sur %4 → %5")
+                            .arg(Q, text::numAuto(y, 6), text::numAuto(yErr, 6), dateformat::format(a, fmt), dateformat::format(b, fmt)));
+        for (double& v : d.v) v /= area;
+        const QString qu = order > 0 ? QStringLiteral(" %1").arg(qUnit(order)) : QString();
+        const QString meas = exactValue ? QStringLiteral("%1 = %2%3 (valeur exacte)").arg(Q, text::numAuto(y, 6), qu)
+                                        : QStringLiteral("%1 = %2 ± %3%4").arg(Q, text::numAuto(y, 6), text::numAuto(yErr, 6), qu);
+        R.html += QStringLiteral("<p><b>Date pour %1</b></p>").arg(meas.toHtmlEscaped());
+        R.prompt += QStringLiteral("Date pour %1%2, sur la courbe estimée par ChronoModel :\n").arg(meas, exactValue ? QString() : QStringLiteral(" (1σ)"));
+        const DensityStats dst = densityStats(d);
+        appendSummary(R.html, R.prompt, d, hpdIntervals(d, 95.0), hpdIntervals(d, 68.0), dst, R.level, fmt);
+        // Écart-type et queues : une petite part de probabilité loin du mode (passages de la courbe ailleurs, surtout hors des
+        // Events, où la courbe est prolongée en ligne droite) gonfle l'écart-type sans changer les HPD ni les quartiles.
+        {
+            QStringList notes;
+            const double iqrSd = (dst.q3 - dst.q1) / 1.349;           // écart-type d'une gaussienne de même écart interquartile
+            if (iqrSd > 0 && dst.sd > 1.5 * iqrSd) {
+                double outer = 0.0;
+                for (size_t k = 0; k < d.t.size(); ++k)
+                    if (std::abs(d.t[k] - dst.median) > 3.0 * iqrSd) outer += d.v[k] * d.step;
+                notes << QStringLiteral("l'écart-type (%1) est gonflé par des queues lointaines : %2 de la probabilité est à plus de %3 de la "
+                                        "médiane (la partie centrale correspond à un écart-type d'environ %4) ; résumer par les HPD et les quartiles")
+                             .arg(dateformat::spread(dst.sd, fmt), percentText(outer), dateformat::spread(3.0 * iqrSd, fmt),
+                                  dateformat::spread(iqrSd, fmt));
+            }
+            if (S) {                                                   // étendue des Events (nœuds) : médianes du premier et du dernier
+                std::vector<double> first, last;
+                const size_t st = std::max<size_t>(1, S->rows / 4000);
+                for (size_t i = 0; i < S->rows; i += st) {
+                    first.push_back(S->theta[i * size_t(S->knots)]);
+                    last.push_back(S->theta[i * size_t(S->knots) + size_t(S->knots) - 1]);
+                }
+                std::nth_element(first.begin(), first.begin() + std::ptrdiff_t(first.size() / 2), first.end());
+                std::nth_element(last.begin(), last.begin() + std::ptrdiff_t(last.size() / 2), last.end());
+                const double k1 = first[first.size() / 2], kn = last[last.size() / 2];
+                double out = 0.0;
+                for (size_t k = 0; k < d.t.size(); ++k) if (d.t[k] < k1 || d.t[k] > kn) out += d.v[k] * d.step;
+                if (out > 0.01)
+                    notes << QStringLiteral("%1 de la probabilité est hors de l'étendue des Events (%2 → %3), là où la courbe est prolongée en "
+                                            "ligne droite : cette partie dépend de l'extrapolation, à interpréter avec prudence (tmin, tmax "
+                                            "pour restreindre la fenêtre)")
+                                 .arg(percentText(out), dateformat::format(k1, fmt), dateformat::format(kn, fmt));
+            }
+            for (const QString& n : notes) {
+                R.html += QStringLiteral("<p><i>⚠ %1.</i></p>").arg(n.toHtmlEscaped());
+                R.prompt += QStringLiteral("Avertissement : %1.\n").arg(n);
+            }
+        }
+        R.series.append(plotSeries(R.name, d, fmt));
+        addEnvelope(order, true);
+        if (order > 0) addEnvelope(0, true);
+        QString how = S && exactValue
+            ? QStringLiteral("valeur exacte : chaque passage d'une courbe tirée par la valeur compte en proportion du temps qu'elle y passe "
+                             "(1/|pente|), sur %1 courbes tirées a posteriori évaluées comme dans ChronoModel").arg(QLocale(QLocale::French).toString(qlonglong(used)))
+            : S
+            ? QStringLiteral("vraisemblance gaussienne de la mesure (σ = %1), moyennée sur chaque pas de temps, puis sur %2 courbes tirées a "
+                             "posteriori, chaque courbe évaluée comme dans ChronoModel : l'incertitude de la courbe est prise en compte par les tirages")
+                  .arg(text::numAuto(yErr, 6), QLocale(QLocale::French).toString(qlonglong(used)))
+            : QStringLiteral("vraisemblance gaussienne de la mesure (σ = %1) moyennée sur la carte de densité (calcul approché : les courbes "
+                             "hors de la fenêtre de la carte ne sont pas comptées)").arg(text::numAuto(sig, 6));
+        if (smoothing > 0) {
+            how += QStringLiteral(" ; densité lissée (noyau gaussien de %1, largeur de Sheather-Jones sur les dates des passages des courbes "
+                                  "par la valeur, diminuée de l'étalement déjà dû à l'erreur)").arg(dateformat::spread(smoothing, fmt));
+        }
+        R.html += QStringLiteral("<p><small>Densité de la date : %1 ; a priori uniforme sur %2 → %3, pas de %4. Comme une calibration "
+                                 "archéomagnétique, mais sur la courbe a posteriori de votre modèle ; plusieurs morceaux de HPD signalent "
+                                 "plusieurs passages de la courbe par la valeur.</small></p>")
+                      .arg(how.toHtmlEscaped(), dateformat::format(a, fmt), dateformat::format(b, fmt), dateformat::spread(d.step, fmt));
+        R.prompt += QStringLiteral("Méthode : %1 ; a priori uniforme sur %2 → %3. Le graphique de la densité (avec les autres dates) et celui "
+                                   "de la courbe sont DÉJÀ tracés.\n").arg(how, dateformat::format(a, fmt), dateformat::format(b, fmt));
+        return finish();
+    }
+
+    // 4a. Carte de densité : loi de G (ou G′) dans la colonne de la date t, interpolée entre les deux colonnes voisines.
+    if (!S) {
+        if (T1.kind != Operand::Fixed)
+            return fail(QStringLiteral("avec une carte de densité, la date doit être une année fixe (une colonne des traces ou une datation "
+                                       "demande la trace des splines, Curve_X_Splines.csv)"));
+        const CurveMap& M = *Mp;
+        const double t = T1.year;
+        if (t < M.t.front() || t > M.t.back())
+            return fail(QStringLiteral("la date %1 est hors de la carte (%2 → %3)")
+                            .arg(T1.label, dateformat::format(M.t.front(), fmt), dateformat::format(M.t.back(), fmt)));
+        const size_t c1 = std::min(M.t.size() - 1, size_t(std::upper_bound(M.t.begin(), M.t.end(), t) - M.t.begin()));
+        const size_t c0 = c1 > 0 ? c1 - 1 : 0;
+        const double w = c1 > c0 && M.t[c1] > M.t[c0] ? (t - M.t[c0]) / (M.t[c1] - M.t[c0]) : 0.0;
+        const size_t ny = M.y.size();
+        Density d;
+        d.t = M.y;
+        d.v.assign(ny, 0.0);
+        d.step = ny > 1 ? (M.y.back() - M.y.front()) / double(ny - 1) : 1.0;
+        double total = 0.0;
+        for (size_t r = 0; r < ny; ++r) { d.v[r] = (1.0 - w) * M.at(c0, r) + w * M.at(std::max(c0, c1), r); total += d.v[r]; }
+        if (!(total > 0)) return fail(QStringLiteral("aucun tirage dans la carte à la date %1").arg(T1.label));
+        for (double& v : d.v) v /= total * d.step;
+        const QString qty = op == "value" ? QStringLiteral("Loi de %1 à la date %2").arg(D, T1.label)
+                                          : QStringLiteral("Loi de la vitesse %1′ à la date %2 (unités de %1 par an)").arg(D, T1.label);
+        numericSummary(d, qty);
+        QString rows;
+        const CdfTable C(d);
+        if (std::isfinite(y)) {
+            rows += probRow(QStringLiteral("P(%1 < %2)").arg(D, curveNum(y)), percentText(C.at(y)));
+            rows += probRow(QStringLiteral("P(%1 > %2)").arg(D, curveNum(y)), percentText(1.0 - C.at(y)));
+            rows += probRow(QStringLiteral("Densité en %1 = %2").arg(D, curveNum(y)), text::numAuto(densityAt(d, y), 6));
+        }
+        if (std::isfinite(ymin) && std::isfinite(ymax))
+            rows += probRow(QStringLiteral("P(%1 ≤ %2 ≤ %3)").arg(curveNum(std::min(ymin, ymax)), D, curveNum(std::max(ymin, ymax))),
+                            percentText(C.at(std::max(ymin, ymax)) - C.at(std::min(ymin, ymax))));
+        if (!rows.isEmpty()) {
+            R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+            R.prompt += rowsPrompt(rows);
+        }
+        const double edge = (d.v.front() + d.v.back()) * d.step;
+        R.html += QStringLiteral("<p><small>Lecture de la carte de densité exportée par ChronoModel (%1 tirages dans cette colonne, "
+                                 "interpolation linéaire entre les dates %2 et %3 de la grille, histogramme au pas de %4). Les tirages "
+                                 "hors de la fenêtre de la carte (%5 → %6) n'y sont pas comptés : la loi est celle des valeurs dans la "
+                                 "fenêtre.%7 %8</small></p>")
+                      .arg(fr.toString(qlonglong(std::llround(total))), dateformat::format(M.t[c0], fmt), dateformat::format(M.t[c1], fmt),
+                           curveNum(d.step), curveNum(M.y.front()), curveNum(M.y.back()),
+                           edge > 0.01 ? QStringLiteral(" ⚠ Des tirages touchent le bord de la fenêtre : la loi est sans doute tronquée.") : QString(),
+                           M.notes.isEmpty() ? QString() : QStringLiteral("Lecture : ") + M.notes.join(QStringLiteral(" ; ")).toHtmlEscaped() + '.');
+        R.prompt += QStringLiteral("Calcul approché sur la carte de densité (%1 tirages dans la fenêtre de la carte, de %2 à %3 ; les valeurs "
+                                   "hors de la fenêtre ne sont pas comptées). Pour un calcul exact, joindre Curve_X_Splines.csv.\n")
+                        .arg(fr.toString(qlonglong(std::llround(total))), curveNum(M.y.front()), curveNum(M.y.back()));
+        R.plots << valuePlot(qty, op == "value" ? D : QStringLiteral("%1′ (unités par an)").arg(D), R.name, d, R.level, y, std::nan(""), D);
+        R.posterior = true;
+        return finish();
+    }
+
+    // 4b. Trace des splines : tirage par tirage
+    const size_t N = S->rows;
+    QString chainsFrom;
+    const std::vector<size_t> chainStarts = curveChains(*S, &chainsFrom);
+    std::mt19937 rng(12345);
+    auto samplesOf = [&](const Operand& o, std::vector<double>& out, QString& e) {
+        if (o.kind == Operand::Fixed) { out.assign(N, o.year); return true; }
+        if (o.kind == Operand::Column) {
+            if (o.set->rows() != N) {
+                e = QStringLiteral("la colonne « %1 » (%2 tirages) ne vient pas du même calcul que la trace des splines (%3 tirages)")
+                        .arg(o.label).arg(o.set->rows()).arg(N);
+                return false;
+            }
+            out = *o.col;
+            return true;
+        }
+        out = sampleDensity(o.d, N, rng);
+        return true;
+    };
+    std::vector<double> t1s, t2s;
+    if (op == "value" || op == "derivative" || op == "rate") {
+        if (!samplesOf(T1, t1s, err)) return fail(err);
+        if (op == "rate" && !samplesOf(T2, t2s, err)) return fail(err);
+    }
+    for (const Operand* o : { &T1, &T2 }) {
+        if (o->kind != Operand::Independent) continue;
+        const QString w = QStringLiteral("Date incertaine « %1 » : tirée à chaque tirage selon sa loi, indépendamment de la courbe ; le "
+                                         "résultat combine l'incertitude de la date et celle de la courbe. Si c'est la date d'un Event du "
+                                         "modèle, donner plutôt son nom (trace jointe), sinon elle compterait deux fois.").arg(o->label);
+        R.html += QStringLiteral("<p><i>⚠ %1</i></p>").arg(w.toHtmlEscaped());
+        R.prompt += QStringLiteral("Avertissement : %1\n").arg(w);
+    }
+    for (const Operand* o : { &T1, &T2 })
+        if (o->kind == Operand::Fixed && std::isfinite(o->year) && (o->year < S->tmin || o->year > S->tmax())) {
+            const QString w = QStringLiteral("la date %1 est hors de la période d'étude (%2 → %3) : la spline y est prolongée en ligne droite")
+                                  .arg(o->label, dateformat::format(S->tmin, fmt), dateformat::format(S->tmax(), fmt));
+            R.html += QStringLiteral("<p><i>⚠ %1.</i></p>").arg(w.toHtmlEscaped());
+            R.prompt += QStringLiteral("Avertissement : %1.\n").arg(w);
+        }
+
+    // Grandeur par tirage (NaN si non définie dans ce tirage), et par chaîne pour la convergence.
+    std::vector<double> q(N, std::nan("")), q2;                  // q2 : durée (rate_values)
+    size_t multi = 0, reached = 0, totalCross = 0;
+    if (op == "rate_values") q2.assign(N, std::nan(""));
+    std::vector<double> allCross;                               // crossing / which = all
+    for (size_t i = 0; i < N && op != "extremum"; ++i) {
+        double G, GP;
+        if (op == "value") { S->eval(i, dim, t1s[i], G, GP); q[i] = G; }
+        else if (op == "derivative") q[i] = S->quantity(i, dim, t1s[i], order) * scale;
+        else if (op == "rate") {
+            const double dt = t2s[i] - t1s[i];
+            if (dt != 0.0) q[i] = (S->value(i, dim, t2s[i]) - S->value(i, dim, t1s[i])) / dt * per;
+        } else if (op == "crossing") {
+            const std::vector<double> c = curves::crossings(*S, i, dim, y / scale, wa, wb, 2000, order);
+            if (c.empty()) continue;
+            ++reached;
+            totalCross += c.size();
+            if (c.size() > 1) ++multi;
+            q[i] = which == "last" ? c.back() : c.front();
+            if (which == "all") allCross.insert(allCross.end(), c.begin(), c.end());
+        } else {
+            const std::vector<double> c1 = curves::crossings(*S, i, dim, y1, wa, wb);
+            if (c1.empty()) continue;
+            const std::vector<double> c2 = curves::crossings(*S, i, dim, y2, c1.front(), wb);
+            if (c1.size() > 1 || c2.size() > 1) ++multi;
+            if (c2.empty()) continue;
+            ++reached;
+            const double dt = c2.front() - c1.front();
+            if (dt > 0) { q2[i] = dt; q[i] = (y2 - y1) / dt * per; }
+        }
+    }
+    auto finiteOf = [](const std::vector<double>& v) {
+        std::vector<double> o;
+        for (double x : v) if (std::isfinite(x)) o.push_back(x);
+        return o;
+    };
+    auto convergenceOf = [&](const std::vector<double>& v) -> QString {
+        if (chainStarts.size() < 2) return {};
+        std::vector<std::vector<double>> byChain(chainStarts.size());
+        size_t ch = 0;
+        for (size_t i = 0; i < N; ++i) {
+            while (ch + 1 < chainStarts.size() && i >= chainStarts[ch + 1]) ++ch;
+            if (std::isfinite(v[i])) byChain[ch].push_back(v[i]);
+        }
+        size_t len = std::numeric_limits<size_t>::max();
+        for (const auto& c : byChain) len = std::min(len, c.size());
+        if (len < 4) return {};
+        for (auto& c : byChain) c.resize(len);
+        const mcmcdiag::RhatEss re = mcmcdiag::computeRhatAndEss(byChain);
+        const double M = double(byChain.size());
+        const bool good = re.rhat < mcmcdiag::kRhatGood && std::min(re.bulkEss, re.tailEss) >= mcmcdiag::kEssGoodPerChain * M;
+        const bool warnc = re.rhat < mcmcdiag::kRhatWarning && std::min(re.bulkEss, re.tailEss) >= mcmcdiag::kEssWarningPerChain * M;
+        return QStringLiteral("%1 (R̂ = %2 ; ESS bulk = %3 ; ESS tail = %4)")
+            .arg(good ? QStringLiteral("✅ satisfaisante") : warnc ? QStringLiteral("⚠️ à surveiller") : QStringLiteral("❌ insuffisante"),
+                 rhatText(re.rhat), essText(re.bulkEss), essText(re.tailEss));
+    };
+    // 4c. Date de l'extremum (« variation la plus forte », maximum, minimum) : pour chaque courbe tirée, date où la grandeur
+    //     (G, G′ ou G″) atteint son extremum sur l'étendue de SES Events (premier → dernier nœud de ce tirage), intersectée
+    //     avec [tmin ; tmax] : hors des nœuds la spline est une droite (G′ constante, G″ nulle), l'extremum n'y a pas de date
+    //     propre. Grille de 400 pas, puis section dorée sur les deux pas voisins. On obtient la loi a posteriori de la date
+    //     et celle de la valeur extrême ; un extremum au bord de l'intervalle est compté à part.
+    if (op == "extremum") {
+        const size_t stride = std::max<size_t>(1, N / 20000);
+        const int ng = 400;
+        std::vector<double> dates(N, std::nan("")), vals, datesF;
+        size_t used = 0, atEdge = 0, positive = 0;
+        auto score = [&](double v) { return sense == "abs" ? std::abs(v) : sense == "absmin" ? -std::abs(v) : sense == "max" ? v : -v; };
+        for (size_t i = 0; i < N; i += stride) {
+            const double k1 = S->theta[i * size_t(S->knots)], kn = S->theta[i * size_t(S->knots) + size_t(S->knots) - 1];
+            double a = std::max(wa, k1), b = std::min(wb, kn);
+            if (S->knots < 2 || !(b > a)) { a = wa; b = wb; }       // nœuds hors de la fenêtre : toute la fenêtre
+            const double dt = (b - a) / ng;
+            int kb = 0;
+            double best = -infv;
+            for (int k = 0; k <= ng; ++k) {
+                const double v = score(S->quantity(i, dim, a + dt * k, order));
+                if (std::isfinite(v) && v > best) { best = v; kb = k; }
+            }
+            if (!std::isfinite(best)) continue;
+            double lo = a + dt * std::max(0, kb - 1), hi = a + dt * std::min(ng, kb + 1);
+            constexpr double gr = 0.61803398874989485;
+            double c = hi - gr * (hi - lo), e = lo + gr * (hi - lo);
+            double fc = score(S->quantity(i, dim, c, order)), fe = score(S->quantity(i, dim, e, order));
+            for (int it = 0; it < 40 && hi - lo > 1e-6 * (b - a); ++it) {
+                if (fc > fe) { hi = e; e = c; fe = fc; c = hi - gr * (hi - lo); fc = score(S->quantity(i, dim, c, order)); }
+                else { lo = c; c = e; fc = fe; e = lo + gr * (hi - lo); fe = score(S->quantity(i, dim, e, order)); }
+            }
+            double te = 0.5 * (lo + hi);
+            const double fa = score(S->quantity(i, dim, a, order)), fb = score(S->quantity(i, dim, b, order)), fm = score(S->quantity(i, dim, te, order));
+            if (fa >= fm && fa >= fb) te = a;
+            else if (fb >= fm && fb > fa) te = b;
+            const double v = S->quantity(i, dim, te, order) * scale;
+            ++used;
+            if (te <= a + 1e-3 * (b - a) || te >= b - 1e-3 * (b - a)) ++atEdge;   // à une extrémité (premier ou dernier Event, ou fenêtre)
+            dates[i] = te;
+            datesF.push_back(te);
+            vals.push_back(v);
+            if (v > 0) ++positive;
+        }
+        if (datesF.size() < 10) return fail(QStringLiteral("moins de 10 tirages exploitables"));
+        const QString what = sense == "abs" ? QStringLiteral("%1 la plus forte en valeur absolue (|%2| maximale)").arg(qWord(order), Q)
+                           : sense == "absmin" ? QStringLiteral("%1 la plus faible en valeur absolue (|%2| minimale)").arg(qWord(order), Q)
+                           : sense == "max" ? QStringLiteral("%1 maximale (%2 maximale)").arg(qWord(order), Q)
+                                            : QStringLiteral("%1 minimale (%2 minimale)").arg(qWord(order), Q);
+        double hd = 0.0;
+        Bandwidth ruleD = Bandwidth::SheatherJones;
+        const Density dd = kernelDensity(datesF, -infv, infv, Bandwidth::SheatherJones, &hd, &ruleD);
+        if (!dd.valid()) return fail(QStringLiteral("toutes les dates d'extremum sont identiques : densité impossible"));
+        R.html += QStringLiteral("<p><b>Date de la %1</b></p>").arg(what.toHtmlEscaped());
+        R.prompt += QStringLiteral("Date de la %1, dans chaque courbe tirée, sur l'étendue de ses Events :\n").arg(what);
+        appendSummary(R.html, R.prompt, dd, hpdIntervals(dd, 95.0), hpdIntervals(dd, 68.0), densityStats(dd), R.level, fmt);
+        R.series.append(plotSeries(R.name, dd, fmt));
+        const Density dv = kernelDensity(vals, -infv, infv, Bandwidth::SheatherJones);
+        if (dv.valid()) {
+            numericSummary(dv, QStringLiteral("Valeur de %1 à cette date, en %2").arg(Q, qUnit(order).isEmpty() ? QStringLiteral("unités de %1").arg(D) : qUnit(order)));
+            R.plots << valuePlot(QStringLiteral("%1 à l'extremum — %2").arg(Q, S->file), QStringLiteral("%1 (%2)").arg(Q, qUnit(order)), R.name, dv, R.level,
+                                 order > 0 ? 0.0 : std::nan(""));
+        }
+        QString rows;
+        const double nIn = double(datesF.size());
+        rows += probRow(QStringLiteral("Tirages dont l'extremum est à une extrémité (premier ou dernier Event, ou bord de [tmin ; tmax])"),
+                        percentText(double(atEdge) / double(std::max<size_t>(used, 1))));
+        if (order > 0 && sense == "abs")
+            rows += probRow(QStringLiteral("P(la variation la plus forte est une %1)").arg(order == 1 ? QStringLiteral("croissance (%1 > 0)").arg(Q)
+                                                                                                  : QStringLiteral("accélération positive (%1 > 0)").arg(Q)),
+                            percentText(double(positive) / nIn));
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+        R.prompt += rowsPrompt(rows);
+        if (atEdge > used / 4) {
+            const QString w = QStringLiteral("dans %1 des tirages l'extremum est à une extrémité (premier ou dernier Event, ou bord de la "
+                                             "fenêtre) : la date est alors celle de cette extrémité, pas d'un pic intérieur ; au-delà des "
+                                             "Events la spline est prolongée en ligne droite (vitesse constante, accélération nulle)")
+                                  .arg(percentText(double(atEdge) / double(used)));
+            R.html += QStringLiteral("<p><i>⚠ %1.</i></p>").arg(w.toHtmlEscaped());
+            R.prompt += QStringLiteral("Avertissement : %1.\n").arg(w);
+        }
+        addEnvelope(order, false);
+        if (order > 0) addEnvelope(0, false);
+        const QString conv = convergenceOf(dates);
+        const QString chains = chainStarts.size() > 1
+            ? QStringLiteral("%1 chaînes, repérées dans « %2 »").arg(chainStarts.size()).arg(chainsFrom)
+            : QStringLiteral("chaînes non séparées : joindre aussi Chain_all_Events.csv du même calcul pour la convergence");
+        const QString how = QStringLiteral("pour chacune des %1 courbes tirées a posteriori (évaluées comme dans ChronoModel), date où %2 est "
+                                           "extrême sur l'étendue de ses Events (premier → dernier nœud de ce tirage%3), grille de 400 pas "
+                                           "puis section dorée ; densité de ces dates lissée par noyau gaussien (h = %4, %5) ; %6")
+                                .arg(fr.toString(qlonglong(used)), sense == "abs" || sense == "absmin" ? QStringLiteral("|%1|").arg(Q) : Q,
+                                     (wa > S->tmin || wb < S->tmax()) ? QStringLiteral(", dans %1 → %2").arg(dateformat::format(wa, fmt), dateformat::format(wb, fmt)) : QString(),
+                                     dateformat::spread(hd, fmt), ruleD == Bandwidth::SheatherJones ? QStringLiteral("Sheather-Jones") : QStringLiteral("Silverman"),
+                                     chains);
+        R.html += QStringLiteral("<p><small>Méthode : %1%2. C'est la loi de la date de l'extremum de chaque courbe, pas la date de "
+                                 "l'extremum de la courbe médiane ; plusieurs morceaux de HPD signalent plusieurs pics comparables.</small></p>")
+                      .arg(how.toHtmlEscaped(), conv.isEmpty() ? QString() : QStringLiteral(" ; convergence de la date : %1").arg(conv.toHtmlEscaped()));
+        R.prompt += QStringLiteral("Méthode : %1.%2 C'est la loi de la date de l'extremum de chaque courbe tirée, pas celle de la courbe médiane. "
+                                   "Les graphiques (densité de la date, loi de la valeur extrême, courbes médianes et leurs intervalles de crédibilité à 95 %) "
+                                   "sont DÉJÀ tracés.\n")
+                        .arg(how, conv.isEmpty() ? QString() : QStringLiteral(" Convergence de la date : %1.").arg(conv));
+        R.posterior = true;
+        return finish();
+    }
+    const std::vector<double> qf = finiteOf(op == "crossing" && which == "all" ? allCross : q);
+    if (op == "crossing" || op == "rate_values") {
+        const double pr = double(reached) / double(N);
+        const QString what = op == "crossing" ? QStringLiteral("P(la courbe atteint %1 = %2 entre %3 et %4)").arg(Q, curveNum(y))
+                                                    .arg(dateformat::format(wa, fmt), dateformat::format(wb, fmt))
+                                              : QStringLiteral("P(la courbe va de %1 = %2 à %1 = %3 entre %4 et %5)").arg(D, curveNum(y1), curveNum(y2))
+                                                    .arg(dateformat::format(wa, fmt), dateformat::format(wb, fmt));
+        QString rows = probRow(what, probabilityText(pr, double(N)));
+        if (multi > 0)
+            rows += probRow(op == "crossing" ? QStringLiteral("Tirages qui atteignent la valeur plusieurs fois") : QStringLiteral("Tirages qui passent plusieurs fois par y1 ou y2"),
+                            percentText(double(multi) / double(N)));
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+        R.prompt += QStringLiteral("%1 : %2.%3\n").arg(what, probabilityText(pr, double(N)),
+                        multi > 0 ? QStringLiteral(" %1 des tirages passent plusieurs fois par la valeur (courbe non monotone).")
+                                        .arg(percentText(double(multi) / double(N))) : QString());
+    }
+    if (qf.size() < 10) {
+        if (op == "crossing" || op == "rate_values")
+            return fail(QStringLiteral("la courbe n'atteint pas %1 dans moins de 10 tirages : valeur hors de la courbe sur %2 → %3")
+                            .arg(op == "crossing" ? QStringLiteral("%1 = %2").arg(Q, curveNum(y)) : QStringLiteral("les deux valeurs"),
+                                 dateformat::format(wa, fmt), dateformat::format(wb, fmt)));
+        return fail(QStringLiteral("moins de 10 tirages exploitables"));
+    }
+    double h = 0.0;
+    Bandwidth rule = Bandwidth::SheatherJones;
+    const Density d = kernelDensity(qf, -infv, infv, Bandwidth::SheatherJones, &h, &rule);
+    if (!d.valid()) return fail(QStringLiteral("tous les tirages ont la même valeur : densité impossible"));
+    const DensityStats st = densityStats(d);
+    QString rows;
+    double marker = std::nan(""), marker2 = std::nan("");
+    if (op == "value") {
+        numericSummary(d, QStringLiteral("Loi de %1 à %2").arg(D, termText(T1)));
+        size_t lo = 0, in = 0;
+        if (std::isfinite(y)) {
+            for (double x : qf) if (x < y) ++lo;
+            rows += probRow(QStringLiteral("P(%1 < %2)").arg(D, curveNum(y)), percentText(double(lo) / double(qf.size())));
+            rows += probRow(QStringLiteral("P(%1 > %2)").arg(D, curveNum(y)), percentText(1.0 - double(lo) / double(qf.size())));
+            rows += probRow(QStringLiteral("Densité en %1 = %2").arg(D, curveNum(y)), text::numAuto(densityAt(d, y), 6));
+            marker = y;
+        }
+        if (std::isfinite(ymin) && std::isfinite(ymax)) {
+            const double a = std::min(ymin, ymax), b = std::max(ymin, ymax);
+            for (double x : qf) if (x >= a && x <= b) ++in;
+            rows += probRow(QStringLiteral("P(%1 ≤ %2 ≤ %3)").arg(curveNum(a), D, curveNum(b)), percentText(double(in) / double(qf.size())));
+            marker = a;
+            marker2 = b;
+        }
+    } else if (op == "derivative" || op == "rate") {
+        numericSummary(d, op == "derivative" && order == 2 ? QStringLiteral("Accélération instantanée %1 à %2, en %3").arg(Q, termText(T1), unitAcc)
+                        : op == "derivative" ? QStringLiteral("Vitesse instantanée %1′ à %2, en %3").arg(D, termText(T1), unitRate)
+                                             : QStringLiteral("Vitesse moyenne entre %1 et %2, (%3(t2) − %3(t1)) / (t2 − t1), en %4")
+                                                   .arg(termText(T1), termText(T2), D, unitRate));
+        size_t pos = 0;
+        for (double x : qf) if (x > 0) ++pos;
+        if (order == 2) {
+            rows += probRow(QStringLiteral("P(%1 > 0 : vitesse croissante, courbe convexe)").arg(Q), percentText(double(pos) / double(qf.size())));
+            rows += probRow(QStringLiteral("P(%1 < 0 : vitesse décroissante, courbe concave)").arg(Q), percentText(1.0 - double(pos) / double(qf.size())));
+        } else {
+            rows += probRow(QStringLiteral("P(%1 croissante)").arg(D), percentText(double(pos) / double(qf.size())));
+            rows += probRow(QStringLiteral("P(%1 décroissante)").arg(D), percentText(1.0 - double(pos) / double(qf.size())));
+        }
+        marker = 0.0;
+        // Seuil de vitesse (« y » ou « speed ») : P(vitesse > seuil), et P(|vitesse| > seuil) pour un seuil positif.
+        const double v = std::isfinite(curveNumber(rq, { "speed", "threshold", "seuil" })) ? curveNumber(rq, { "speed", "threshold", "seuil" }) : y;
+        if (std::isfinite(v)) {
+            size_t above = 0, absAbove = 0;
+            for (double x : qf) { if (x > v) ++above; if (std::abs(x) > std::abs(v)) ++absAbove; }
+            const QString vw = order == 2 ? QStringLiteral("accélération") : QStringLiteral("vitesse");
+            const QString vu = order == 2 ? unitAcc : unitRate;
+            rows += probRow(QStringLiteral("P(%1 > %2 %3)").arg(vw, curveNum(v), vu), percentText(double(above) / double(qf.size())));
+            if (v != 0.0)
+                rows += probRow(QStringLiteral("P(|%1| > %2 %3)").arg(vw, curveNum(std::abs(v)), vu),
+                                percentText(double(absAbove) / double(qf.size())));
+            marker2 = v;
+        }
+    } else if (op == "crossing") {
+        R.html += QStringLiteral("<p><b>Date où %1 = %2 (%3)</b></p>").arg(Q, curveNum(y),
+                      which == "first" ? QStringLiteral("première atteinte") : which == "last" ? QStringLiteral("dernière atteinte")
+                                                                                  : QStringLiteral("toutes les atteintes"));
+        R.prompt += QStringLiteral("Date où la courbe atteint %1 = %2 (%3), dans les tirages où elle l'atteint :\n").arg(Q, curveNum(y),
+                        which == "first" ? QStringLiteral("première atteinte") : which == "last" ? QStringLiteral("dernière atteinte")
+                                                                                    : QStringLiteral("toutes les atteintes"));
+        appendSummary(R.html, R.prompt, d, hpdIntervals(d, 95.0), hpdIntervals(d, 68.0), st, R.level, fmt);
+        QJsonObject s = plotSeries(R.name, d, fmt);
+        R.series.append(s);
+    } else {
+        // Durée (années) puis vitesse
+        const std::vector<double> df = finiteOf(q2);
+        double h2 = 0.0;
+        const Density dd = kernelDensity(df, -infv, infv, Bandwidth::SheatherJones, &h2);
+        if (dd.valid()) {
+            R.html += QStringLiteral("<p><b>Temps mis pour aller de %1 = %2 à %1 = %3 (années)</b></p>").arg(D, curveNum(y1), curveNum(y2));
+            R.prompt += QStringLiteral("Temps mis pour aller de %1 = %2 à %1 = %3, en années :\n").arg(D, curveNum(y1), curveNum(y2));
+            appendSummary(R.html, R.prompt, dd, hpdIntervals(dd, 95.0), hpdIntervals(dd, 68.0), densityStats(dd), R.level, DateFormat::Numeric);
+            R.plots << valuePlot(QStringLiteral("Durée — %1").arg(R.name), QStringLiteral("Durée (années)"), R.name, dd, R.level);
+        }
+        numericSummary(d, QStringLiteral("Vitesse moyenne (%1 − %2) / (t2 − t1), en %3")
+                              .arg(curveNum(y2), y1 < 0 ? QStringLiteral("(%1)").arg(curveNum(y1)) : curveNum(y1), unitRate));
+    }
+    if (!rows.isEmpty()) {
+        R.html += QStringLiteral("<table cellspacing='0' cellpadding='3'>%1</table>").arg(rows);
+        R.prompt += rowsPrompt(rows);
+    }
+    if (op != "crossing")
+        R.plots.prepend(valuePlot(R.title.section(QStringLiteral(" ("), 0, 0),
+                                  op == "value" ? D : QStringLiteral("%1 (%2)").arg(op == "rate_values" || op == "rate" ? QStringLiteral("Vitesse moyenne")
+                                                                                    : order == 2 ? QStringLiteral("Accélération") : QStringLiteral("Vitesse"),
+                                                                                    order == 2 ? unitAcc : unitRate),
+                                  R.name, d, R.level, marker, marker2, op == "value" ? D : order == 2 ? QStringLiteral("accélération") : QStringLiteral("vitesse")));
+
+    if (order > 0) addEnvelope(order, true);
+    addEnvelope(0, true);
+
+    // Méthode, lissage, convergence
+    const QString conv = convergenceOf(q);
+    const QString hRule = rule == Bandwidth::SheatherJones ? QStringLiteral("Sheather-Jones") : QStringLiteral("Silverman (repli)");
+    const QString chains = chainStarts.size() > 1
+        ? QStringLiteral("%1 chaînes, repérées dans « %2 »").arg(chainStarts.size()).arg(chainsFrom)
+        : QStringLiteral("chaînes non séparées : joindre aussi Chain_all_Events.csv du même calcul pour la convergence");
+    const QString method = op == "crossing" || op == "rate_values"
+        ? QStringLiteral("atteintes cherchées sur %1 → %2 (grille de 2000 pas, puis bissection)").arg(dateformat::format(wa, fmt), dateformat::format(wb, fmt))
+        : QString();
+    R.html += QStringLiteral("<p><small>Calcul exact tirage par tirage sur %1 splines a posteriori ; %2. Chaque spline est évaluée comme "
+                             "dans ChronoModel (spline cubique, prolongée en ligne droite hors des nœuds)%3. Densité lissée par noyau "
+                             "gaussien, h = %4 (règle de %5)%6.</small></p>")
+                  .arg(fr.toString(qlonglong(N)), chains.toHtmlEscaped(), method.isEmpty() ? QString() : QStringLiteral(" ; ") + method.toHtmlEscaped(),
+                       curveNum(h), hRule, conv.isEmpty() ? QString() : QStringLiteral(" ; convergence de cette grandeur : %1").arg(conv.toHtmlEscaped()));
+    R.prompt += QStringLiteral("Calcul exact tirage par tirage sur %1 splines a posteriori de ChronoModel ; %2%3.%4 Les graphiques (loi de la "
+                               "grandeur, courbe médiane et son intervalle de crédibilité à 95 %, quantiles 2,5 – 97,5 % date par date) sont DÉJÀ tracés.\n")
+                    .arg(fr.toString(qlonglong(N)), chains, method.isEmpty() ? QString() : QStringLiteral(" ; ") + method,
+                         conv.isEmpty() ? QString() : QStringLiteral(" Convergence de cette grandeur : %1.").arg(conv));
+    if (op == "rate" || op == "rate_values" || op == "derivative")
+        R.prompt += QStringLiteral("Vitesse en %1 ; positive = la courbe croît avec le temps.\n").arg(unitRate);
+    return finish();
 }
 
 } // namespace
@@ -1528,6 +3317,81 @@ bool MethodRunner::asksTraces(const QString& question)
         R"(|\b(?:avec|affiche\w*|montre\w*|dessine\w*|trace\w*|ajoute\w*|voir|show|plot) (?:aussi |also )?(?:les |la |the )?traces\b)"
         R"(|\b(?:trace ?plots?|chain traces?|mcmc traces?)\b)"));
     return re.match(text::fold(question)).hasMatch();
+}
+
+bool MethodRunner::asksHowTo(const QString& question)
+{
+    const QString q = text::fold(question).simplified();
+    static const QRegularExpression re(QStringLiteral(
+        R"(\bcomment\s+(?:faire|fait[- ]?on|on\s+fait|fais[- ]je|je\s+fais|puis[- ]je|je\s+peux|peut[- ]on|on\s+peut|dois[- ]je|)"
+        R"(utiliser|utilise[- ]t[- ]on|s'utilise|dater|calibrer|creer|importer|exporter|joindre|charger|lire|interpreter|)"
+        R"(proceder|obtenir|tracer|ajouter|enregistrer|ouvrir|poser|demander|preparer|ecrire|marche|fonctionne|ca\s+marche|cela\s+marche)\b)"
+        R"(|\b(?:que|qu'est[- ]ce\s+que)\s+(?:tu\s+)?(?:peux|sais|sait)[- ]?(?:tu\s+)?(?:faire|calculer)\b|\ba\s+quoi\s+sers[- ]tu\b)"
+        R"(|\bmode\s+d'emploi\b|\bmanuel\b|\btutoriel\b|\bquelles?\s+(?:questions?|fonctions?|fonctionnalites?)\b)"
+        R"(|\bhow\s+(?:do|can|should|would)\s+(?:i|we|you|one)\b|\bhow\s+to\b|\bwhat\s+can\s+you\s+(?:do|compute|calculate)\b)"
+        R"(|\buser\s+guide\b|\bmanual\b|^\s*(?:aide|help)\s*[?!.]*\s*$)"));
+    return re.match(q).hasMatch();
+}
+
+QJsonObject MethodRunner::withAgeUnit(QJsonObject d, const QString& method)
+{
+    const QString unit = d.value("unit").toString(d.value("age_unit").toString()).trimmed();
+    const QString origin = d.value("origin").toString().trimmed();
+    if (unit.isEmpty() && origin.isEmpty()) return d;
+    for (const char* k : { "unit", "age_unit", "origin" }) d.remove(k);
+    text::AgeUnit u = text::ageUnitAt(QStringLiteral(" ") + text::fold(unit.isEmpty() ? QStringLiteral("ans") : unit)
+                                          + (origin.isEmpty() ? QString() : QStringLiteral(" ") + text::fold(origin)), 0);
+    if (u.length == 0) {                                   // « ans », « a », « years » sans origine : années
+        const QString f = text::fold(unit);
+        if (!(f.isEmpty() || f == "a" || f == "an" || f == "ans" || f == "annees" || f == "year" || f == "years" || f == "yr")) return d;
+        u.scale = 1.0;
+        u.label = QStringLiteral("ans");
+    }
+    const double v = d.value("age").toDouble(), e = d.value("error").toDouble();
+    if (u.scale != 1.0 || std::isfinite(u.origin))
+        d["input"] = QStringLiteral("%1 ± %2 %3").arg(text::numAuto(v, 4), text::numAuto(e, 4), u.label);
+    if (method == QLatin1String("tl")) { d["age"] = v * u.scale; d["error"] = e * u.scale; return d; }
+    if (d.value("mode").toString() == QLatin1String("curve")) return d;          // mesure sur une courbe : pas un âge
+    d["age"] = (std::isfinite(u.origin) ? u.origin : 1950.0) - v * u.scale;     // ka BP par défaut
+    d["error"] = e * u.scale;
+    return d;
+}
+
+bool MethodRunner::asksCurveList(const QString& question)
+{
+    const QString q = text::fold(question).simplified();
+    static const QRegularExpression verb(QStringLiteral(
+        R"(\b(?:liste\w*|quelles?|affiche\w*|montre\w*|donne\w*|cite\w*|which|list|show|what)\b.{0,40}\b(?:courbes?|curves?|densites?|densities)\b)"));
+    static const QRegularExpression kind(QStringLiteral(
+        R"(\b(?:ref|refs|reference|references|disponibles?|calibration|available|installees?|gauss|density|densites? tabulees?|plugin)\b)"));
+    static const QRegularExpression bare(QStringLiteral(R"(^(?:les\s+)?(?:courbes?|curves?)\s+(?:de\s+)?(?:ref\w*|disponibles?|calibration|available)\s*[?.!]*$)"));
+    return (verb.match(q).hasMatch() && kind.match(q).hasMatch()) || bare.match(q).hasMatch();
+}
+
+QString MethodRunner::helpHint()
+{
+    return QStringLiteral("[Question sur l'utilisation de SeldonH : réponds en quelques phrases simples, avec 2 à 4 exemples de "
+                          "questions que l'utilisateur peut taper telles quelles, en langage naturel, entre guillemets (par exemple "
+                          "« Calibre 2500 ± 30 BP avec IntCal20 »). N'écris AUCUN bloc de code (ni calcul, ni JSON, ni chronomodel, "
+                          "ni plot), aucun nom d'outil ni de champ technique, et ne lance aucun calcul : les valeurs des exemples ne "
+                          "sont pas des données de l'utilisateur. Si c'est utile, renvoie à la section de l'aide (menu Aide, touche "
+                          "F1) par son titre.]\n");
+}
+
+QString MethodRunner::stripCodeBlocks(const QString& answer)
+{
+    static const QRegularExpression fence(QStringLiteral(R"(\n?```[^\n]*\n.*?(?:\n```|$)[^\n]*)"),
+                                          QRegularExpression::DotMatchesEverythingOption);
+    QString s = answer;
+    s.remove(fence);
+    static const QRegularExpression blank(QStringLiteral(R"(\n{3,})"));
+    s.replace(blank, QStringLiteral("\n\n"));
+    // Phrase d'annonce restée orpheline (« Voici un exemple : »)
+    s = s.trimmed();
+    static const QRegularExpression lead(QStringLiteral(R"((?:\n|^)[^\n]*(?:voici|exemple|example|here is)[^\n]*:\s*$)"),
+                                         QRegularExpression::CaseInsensitiveOption);
+    s.remove(lead);
+    return s.trimmed();
 }
 
 bool MethodRunner::asksCommentary(const QString& question)
@@ -1630,9 +3494,11 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     if (requests.isEmpty()) return out;
     out.found = true;
     out.count = requests.size();
+    for (const QJsonObject& r : requests) out.requests << normalizeRequest(r);
 
     const MethodRegistry& reg = MethodRegistry::instance();
-    QString html = QStringLiteral("<b>🧮 Calcul fait par SeldonH</b> <i>(méthodes de ChronoModel)</i>");
+    QString html;                    // le bandeau de la fiche (cardMarker) est ajouté à la fin, avec les opérations calculées
+    QStringList ops;                 // opérations réellement calculées, en clair : titre de la fiche
     QString prompt = shownResultHeader();
     QJsonArray series;
     QStringList plotNames;           // noms des datations / événements tracés : titre du graphique
@@ -1646,11 +3512,14 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     bool anyEvent = false;
     bool anyCombine = false;
     bool anyPosterior = false;
+    bool anyCurveTrace = false;      // courbe de ChronoModel (splines ou carte de densité)
+    int curveRuns = 0;
     bool anyInverse = false;         // calibration inverse : mesure attendue pour une date       // calcul sur des traces MCMC exportées par ChronoModel
     bool anyTraces = false;
     bool anyCurve = false;           // au moins une courbe de référence : le modèle doit la rappeler
     bool overlay = false;            // « layout »: « overlay » demandé : densités superposées ; sinon une par ligne
     bool anyColor = false;
+    int refPlotCount = 0;            // graphiques de courbes de référence des datations simples
     // Un modèle de langage met parfois un calcul « traces » ou « inverse » dans un événement ou une combinaison
     // ({"method":"event","dates":[{"method":"traces",…}]}) : ce ne sont pas des datations, ils sont exécutés seuls.
     QVector<QJsonObject> todo;
@@ -1688,6 +3557,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         const QVector<QJsonObject> dates = datatable::requestsOf(T, S.rows, &skipped);
         static const QHash<QString, QString> verb = { { "extract", "extraction" }, { "date", "datation ligne par ligne" },
                                                       { "event", "événement" }, { "combine", "combinaison" }, { "model", "modèle ChronoModel" } };
+        ops << QStringLiteral("Tableau « %1 » : %2").arg(T.title(), verb.value(action));
         tableHtml += QStringLiteral("<p><b>📋 Tableau « %1 »</b> — %2 : %3 → <b>%4 ligne(s)</b>%5.</p>")
                          .arg(T.title().toHtmlEscaped(), verb.value(action), S.criteria.toHtmlEscaped()).arg(S.rows.size())
                          .arg(action == QLatin1String("extract") ? QString() : QStringLiteral(", %1 datable(s)").arg(dates.size()));
@@ -1773,7 +3643,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
             QVector<QJsonObject> inner;
             for (const QJsonValue& d : n.value("dates").toArray()) {
                 const QString dm = d.toObject().value("method").toString();
-                if (dm == QLatin1String("traces") || dm == QLatin1String("inverse")) inner << d.toObject();
+                if (dm == QLatin1String("relation") || dm == QLatin1String("inverse")) inner << d.toObject();
             }
             if (inner.size() == n.value("dates").toArray().size()) {
                 for (QJsonObject d : inner) { if (n.contains("level") && !d.contains("level")) d["level"] = n.value("level"); todo << d; }
@@ -1795,6 +3665,8 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         if (rq0.value("layout").toString() == QLatin1String("overlay")) overlay = true;
         if (!colorOf(rq0).isEmpty()) anyColor = true;
         const QJsonObject rq = normalizeRequest(rq0);
+        if (rq.value("method").toString() != QLatin1String("relation") && rq.value("method").toString() != QLatin1String("curve"))
+            ops << operationTitle(rq);
         if (const QString bad = obsoleteFieldError(rq0); !bad.isEmpty()) {     // nom de champ d'une ancienne version
             html += QStringLiteral("<p><i>Calcul impossible : %1.</i></p>").arg(bad.toHtmlEscaped());
             prompt += QStringLiteral("Calcul impossible : %1. Réécris la demande avec ces noms.\n").arg(bad);
@@ -1851,29 +3723,34 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
             }
             continue;
         }
-        if (rq.value("method").toString() == "traces") {
-            const TracesRun T = runTraces(rq, fmt);
-            html += T.html;
-            prompt += T.prompt;
-            if (T.ok) {
-                anyPosterior = true;
-                levelsUsed << T.level;
-                for (const QJsonValue& s : T.series) series.append(s);
-                if (!T.series.isEmpty() && !plotNames.contains(T.name)) plotNames << T.name;
-                if (!T.durationPlot.isEmpty()) out.extraPlots << T.durationPlot;
+        if (rq.value("method").toString() == "relation") {
+            const RelationRun Rl = runRelation(rq, fmt);
+            ops << (Rl.title.isEmpty() ? QStringLiteral("Relation entre dates") : Rl.title);
+            html += Rl.html;
+            prompt += Rl.prompt;
+            if (Rl.ok) {
+                anyPosterior = anyPosterior || Rl.posterior;
+                anyCurve = anyCurve || Rl.curves;
+                levelsUsed << Rl.level;
+                for (const QJsonValue& s : Rl.series) series.append(s);
+                if (!Rl.series.isEmpty() && !plotNames.contains(Rl.name)) plotNames << Rl.name;
+                if (!Rl.extraPlot.isEmpty()) out.extraPlots << Rl.extraPlot;
+                out.extraPlots += Rl.scatterPlots;
             }
             continue;
         }
-        if (rq.value("method").toString() == "order") {
-            const OrderRun O = runOrder(rq, fmt);
-            html += O.html;
-            prompt += O.prompt;
-            if (O.ok) {
-                anyCurve = anyCurve || O.curves;
-                levelsUsed << O.level;
-                for (const QJsonValue& s : O.series) series.append(s);
-                if (!plotNames.contains(O.name)) plotNames << O.name;
-                out.extraPlots << O.gapPlot;
+        if (rq.value("method").toString() == "curve") {
+            const CurveRun Cv = runCurve(rq, fmt);
+            ops << (Cv.title.isEmpty() ? QStringLiteral("Courbe de ChronoModel") : Cv.title);
+            html += Cv.html;
+            prompt += Cv.prompt;
+            ++curveRuns;
+            if (Cv.ok) {
+                anyCurveTrace = true;
+                levelsUsed << Cv.level;
+                for (const QJsonValue& s : Cv.series) series.append(s);
+                if (!Cv.series.isEmpty() && !plotNames.contains(Cv.name)) plotNames << Cv.name;
+                out.extraPlots += Cv.plots;
             }
             continue;
         }
@@ -1915,6 +3792,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         const QString dateName = rq.value("name").toString().trimmed();
         if (!dateName.isEmpty()) head = head.isEmpty() ? dateName : QStringLiteral("%1 — %2").arg(dateName, head);
         MethodResult r = reg.compute(rq);
+        const Density measureDensity = r.ok ? r.density : Density();     // densité de la mesure seule : graphique de la courbe
 
         // Décalage (wiggle) d'une date seule : comme ChronoModel (Date::calibrateWiggle), la densité de t + δ est la
         // convolution de la densité calibrée par la loi de δ ; HPD et statistiques sont recalculées sur cette densité.
@@ -1952,7 +3830,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
                 for (double& y : d.v) y /= kept;
                 QStringList warn;
                 for (const QString& w : r.warnings)        // la limite de la courbe n'est plus en cause si la période la coupe avant
-                    if (!(cutOld && w.contains(QLatin1String("limite ancienne"))) && !(cutNew && w.contains(QLatin1String("limite récente"))))
+                    if (!(cutOld && w.contains(QLatin1String("limite ancienne"))) && !(cutNew && w.contains(QStringLiteral("limite récente"))))
                         warn << w;
                 if (full > 0 && kept / full < 0.99)
                     warn << QStringLiteral("la %1 ne contient que %2 % de la probabilité calculée sur toute la courbe : résultat restreint à cette période")
@@ -2004,6 +3882,24 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         if (const QString col = colorOf(rq); !col.isEmpty()) ser["color"] = col;
         series.append(ser);
         if (!dateName.isEmpty() && !plotNames.contains(dateName)) plotNames << dateName;
+
+        // Courbe(s) de référence de la datation, avec la mesure et son erreur (onglet à part ; 8 au plus par calcul, pas pour
+        // les lignes d'un grand tableau).
+        if (refPlotCount < 8 && !(tableRow >= 0 && tableDates > 3)) {
+            const QVector<QJsonObject> rp = referenceCurvePlots(rq, measureDensity, dateName, fmt);
+            for (const QJsonObject& pl : rp) {
+                if (refPlotCount >= 8) break;
+                out.extraPlots << pl;
+                ++refPlotCount;
+            }
+            if (!rp.isEmpty()) {
+                const QString w = wg.type != Wiggle::None ? QStringLiteral(" (mesure seule, sans le décalage δ)") : QString();
+                html += QStringLiteral("<p><small>📈 Courbe%1 de référence tracée%1 avec la mesure et son erreur (1σ), et la densité "
+                                       "calibrée%2 : onglet%1 à part.</small></p>").arg(rp.size() > 1 ? "s" : "", w.toHtmlEscaped());
+                prompt += QStringLiteral("Le graphique de la courbe de référence (moyenne ± 1,96 σ), avec la mesure en trait et son erreur à "
+                                         "1σ, est DÉJÀ tracé dans un onglet à part%1.\n").arg(w);
+            }
+        }
     }
 
     // Récapitulatif des lignes d'un tableau datées une par une (au début de la fiche).
@@ -2042,6 +3938,19 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
     const QString summary = custom
         ? QStringLiteral("Résume d'abord par la HPD au niveau demandé par l'utilisateur, puis par les HPD à 95 % et 68 % pour comparaison")
         : QStringLiteral("Résume par les HPD à 95 % et 68 %");
+    if (curveRuns > 0 && curveRuns == todo.size()) {
+        prompt += QStringLiteral("\nConsigne : présente ces résultats pour un archéologue ou un géologue : ce sont des probabilités a "
+                                 "posteriori sur la courbe estimée par ChronoModel (chaque tirage est une courbe complète, avec les "
+                                 "contraintes et les données du modèle). Les graphiques (loi de la grandeur, courbe médiane et son "
+                                 "intervalle de crédibilité à 95 %, quantiles 2,5 – 97,5 % date par date, pas une HPD) sont DÉJÀ tracés dans des onglets à part : n'écris aucun bloc « plot ». %1 Une "
+                                 "vitesse est en unités de la composante par an (ou par la durée indiquée) ; une vitesse moyenne entre "
+                                 "deux dates n'est pas la vitesse instantanée. Une accélération (dérivée seconde) est en unités par an² (ou par la durée "
+                                 "indiquée, au carré) ; pour une courbe âge-profondeur, la vitesse est le taux d'accumulation. Une date d'atteinte d'une valeur peut être multiple si la "
+                                 "courbe n'est pas monotone : signale-le s'il est indiqué. Signale une convergence insuffisante si elle "
+                                 "est indiquée. N'invente aucune autre valeur.\n")
+                      .arg(fmt == DateFormat::BcAd ? QStringLiteral("Les années sont des années astronomiques signées.")
+                                                   : QStringLiteral("Les dates sont exprimées en %1.").arg(dateformat::title(fmt)));
+    } else
     prompt += QStringLiteral("\nConsigne : présente ces résultats (intervalles, éventuelle multimodalité, précision) "
                              "pour un archéologue et rappelle les hypothèses de la méthode. Le graphique est DÉJÀ tracé par l'application "
                              "dans le panneau de droite (%4, région HPD à %2 % remplie, sans échelle verticale) : n'écris aucun "
@@ -2061,6 +3970,9 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
                                  "la courbe de référence (valeur ± erreur de la courbe, plus l'incertitude de la date et l'erreur de mesure "
                                  "si elles sont données) ; le graphique (à part) est sur l'axe de la mesure, pas des dates. Signale les "
                                  "plateaux ou inversions de la courbe s'ils rendent la date peu discriminante.\n");
+    if (anyCurveTrace && curveRuns < todo.size())
+        prompt += QStringLiteral("Pour la courbe de ChronoModel : probabilités a posteriori sur les courbes tirées (une courbe complète par "
+                                 "tirage) ; les graphiques de la courbe sont dans des onglets à part.\n");
     if (anyPosterior)
         prompt += QStringLiteral("Pour les traces MCMC : ces valeurs sont calculées sur les tirages a posteriori du modèle ChronoModel de "
                                  "l'utilisateur, tirage par tirage ; elles dépendent de ce modèle (contraintes, phases). Une durée est en "
@@ -2097,9 +4009,56 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         out.plot["series"] = series;
         out.plot["layout"] = overlay ? QStringLiteral("overlay") : QStringLiteral("rows");
     }
-    out.noticeHtml = html;
+    // Titre : opérations dans l'ordre, les identiques regroupées (« Calibration 14C ×3 · Event « Four » (MCMC, 3 datations) »).
+    QStringList uniq;
+    QHash<QString, int> times;
+    for (const QString& o : std::as_const(ops)) { if (!times.contains(o)) uniq << o; ++times[o]; }
+    QStringList parts;
+    for (const QString& o : std::as_const(uniq)) parts << (times.value(o) > 1 ? QStringLiteral("%1 ×%2").arg(o).arg(times.value(o)) : o);
+    out.title = parts.join(QStringLiteral(" · "));
+    if (out.title.size() > 200) out.title = out.title.left(199) + QChar(0x2026);
+    out.noticeHtml = cardMarker(out.title) + html;
     out.promptBlock = prompt;
     return out;
+}
+
+QString MethodRunner::cardMarker(const QString& title)
+{
+    QString t = title.toHtmlEscaped();
+    t.replace(QStringLiteral("--"), QStringLiteral("–"));      // un commentaire HTML ne peut pas contenir « -- »
+    return QStringLiteral("<!--seldon-calc:%1-->").arg(t);
+}
+
+QString MethodRunner::operationTitle(const QJsonObject& request)
+{
+    const QJsonObject n = normalizeRequest(request);
+    const QString m = n.value("method").toString();
+    const QString name = n.value("name").toString().trimmed();
+    const int nd = int(n.value("dates").toArray().size());
+    const QString s = nd > 1 ? QStringLiteral("s") : QString();
+    if (m == QLatin1String("c14")) return QStringLiteral("Calibration 14C");
+    if (m == QLatin1String("f14c")) return QStringLiteral("Calibration F14C");
+    if (m == QLatin1String("tl")) return QStringLiteral("Datation TL/OSL");
+    if (m == QLatin1String("am")) {
+        const QString p = n.value("process").toString();
+        return p.isEmpty() ? QStringLiteral("Calibration archéomagnétique") : QStringLiteral("Calibration archéomagnétique (%1)").arg(p);
+    }
+    if (m == QLatin1String("gauss"))
+        return n.value("mode").toString() == QLatin1String("eq") ? QStringLiteral("Date gaussienne calibrée par équation")
+                                                                 : QStringLiteral("Date gaussienne");
+    if (m == QLatin1String("unif")) return QStringLiteral("Date uniforme");
+    if (m == QLatin1String("density")) return QStringLiteral("Densité tabulée");
+    if (m == QLatin1String("event"))
+        return QStringLiteral("%1 (MCMC, %2 datation%3)")
+            .arg(name.isEmpty() ? QStringLiteral("Event") : QStringLiteral("Event « %1 »").arg(name)).arg(nd).arg(s);
+    if (m == QLatin1String("combine"))
+        return QStringLiteral("Combinaison de %1 datation%2%3").arg(nd).arg(s, name.isEmpty() ? QString() : QStringLiteral(" « %1 »").arg(name));
+    if (m == QLatin1String("inverse")) return QStringLiteral("Calibration inverse");
+    if (m == QLatin1String("density_file")) return QStringLiteral("Fichier de densité pour ChronoModel");
+    if (m == QLatin1String("relation")) return QStringLiteral("Relation entre dates");
+    if (m == QLatin1String("curve")) return QStringLiteral("Courbe de ChronoModel");
+    if (m == QLatin1String("information")) return QStringLiteral("Courbes disponibles");
+    return m.isEmpty() ? QStringLiteral("Calcul") : QStringLiteral("Calcul « %1 »").arg(m);
 }
 
 QString MethodRunner::obsoleteFieldError(const QJsonObject& request)
@@ -2205,17 +4164,48 @@ bool MethodRunner::isAgeDepthRequest(const QString& question)
     return ageDepth.match(q).hasMatch() || csvHeader.match(q).hasMatch();
 }
 
-RunOutcome MethodRunner::analyzeQuestion(const QString& question, DateFormat format)
+static QStringList fuzzyKeepNames();
+
+RunOutcome MethodRunner::analyzeQuestion(const QString& questionIn, DateFormat format)
 {
-    QVector<QJsonObject> rq = requestsFromQuestion(question);
+    QString question = questionIn, fixes;
+    QVector<QJsonObject> rq = requestsFromQuestionExact(question);
+    if (rq.isEmpty()) {                      // mots déclencheurs mal orthographiés : question corrigée (FuzzyWords)
+        QVector<fuzzy::Fix> fx;
+        const QString corrected = fuzzy::correct(question, &fx, fuzzyKeepNames());
+        if (!fx.isEmpty()) {
+            rq = requestsFromQuestionExact(corrected);
+            if (!rq.isEmpty()) { question = corrected; fixes = fuzzy::describe(fx); }
+        }
+    }
     if (rq.isEmpty()) return RunOutcome();
-    const DateFormat fmt = dateformat::detect(question, format);
+    DateFormat fmt = dateformat::detect(question, format);
+    // Mesures toutes en ka (ou Ma), sans format demandé et réglage en années calendaires : résultats en ka BP (Ma BP), l'usage
+    // des géologues (05/11/2026).
+    if (fmt == format && (format == DateFormat::BcAd || format == DateFormat::Historic || format == DateFormat::BceCe)) {
+        const double sc = text::questionAgeScale(text::fold(question));
+        if (sc == 1e3) fmt = DateFormat::KaBP;
+        else if (sc == 1e6) fmt = DateFormat::MaBP;
+    }
     double a = 0, b = 0;
-    if (periodFromQuestion(question, a, b)) {
+    const bool curveOnly = rq.size() == 1 && rq.first().value("method").toString() == QLatin1String("curve");   // « entre » = dates ou valeurs
+    if (!curveOnly && periodFromQuestion(question, a, b)) {
         const double c1 = dateformat::toCalendar(a, fmt), c2 = dateformat::toCalendar(b, fmt);
         for (QJsonObject& o : rq) { o["tmin"] = std::min(c1, c2); o["tmax"] = std::max(c1, c2); }
     }
-    return run(rq, fmt);
+    RunOutcome out = run(rq, fmt);
+    if (!fixes.isEmpty()) {
+        // Correction visible dans la fiche, après la marque de titre (« <!--seldon-calc:…--> ») que lit ChatView.
+        const QString note = QStringLiteral("<p><i>↻ Compris : %1.</i></p>").arg(fixes.toHtmlEscaped());
+        qsizetype at = 0;
+        if (out.noticeHtml.startsWith(QLatin1String("<!--seldon-calc:"))) {
+            const qsizetype e = out.noticeHtml.indexOf(QLatin1String("-->"));
+            if (e >= 0) at = e + 3;
+        }
+        out.noticeHtml.insert(at, note);
+        out.promptBlock += QStringLiteral("\nNote : avant le calcul, SeldonH a corrigé des mots mal orthographiés de la question : %1.\n").arg(fixes);
+    }
+    return out;
 }
 
 namespace {
@@ -2314,12 +4304,12 @@ QVector<QJsonObject> MethodRunner::followUpRequests(const QString& question, con
     return out;
 }
 
-QVector<QJsonObject> MethodRunner::tracesFromQuestion(const QString& question)
+namespace {
+
+// Mots d'une question sur deux ou trois termes (colonnes des traces, datations), sur le texte passé par fold().
+struct RelationWords { bool duration = false, between = false, value = false, inside = false, order = false, correlation = false; };
+RelationWords relationWords(const QString& q)
 {
-    if (traces::loaded().isEmpty()) return {};
-    const QVector<traces::Mention> ms = traces::mentions(question);
-    if (ms.isEmpty()) return {};
-    const QString q = text::fold(question);
     static const QRegularExpression duration(QStringLiteral(
         R"(\b(?:durees?|ecarts?|ecoule\w*|combien d'annees|combien de temps|temps (?:entre|ecoule|separant|qui separe)|separ\w*|)"
         R"(intervalle de temps|difference|duration|how long|time between|elapsed|time span)\b)"));
@@ -2327,7 +4317,7 @@ QVector<QJsonObject> MethodRunner::tracesFromQuestion(const QString& question)
         R"(\b(?:date|niveau|couche|evenement|event|episode|moment|occupation|sol|structure)\b.{0,60}\b(?:entre|between)\b|\bintermediaire\b|\bsitue\w* entre\b|\bin between\b)"));
     static const QRegularExpression value(QStringLiteral(
         R"(\b(?:debut|fin|commencement|begin\w*|end|start|hpd|densite|date|quand|when|intervalle)\b)"));
-    // Appartenance à un intervalle (deux colonnes, une phase, ou deux années) ; antéro-postérité de deux colonnes.
+    // Appartenance à un intervalle (deux termes, une phase, ou deux années) ; antéro-postérité de deux termes.
     static const QRegularExpression inside(QStringLiteral(
         R"(\b(?:appartien\w*|appartenance|dans l'intervalle|inclu\w*|compris\w* (?:entre|dans)|contenu\w*|a l'interieur|pendant|durant|)"
         R"(au cours de|fait partie|dans la phase|within|inside|during|belong\w*|est(?:-(?:il|elle)| (?:il|elle))?\s+(?:bien\s+)?entre|)"
@@ -2335,43 +4325,457 @@ QVector<QJsonObject> MethodRunner::tracesFromQuestion(const QString& question)
     static const QRegularExpression order(QStringLiteral(
         R"(\b(?:anterieur\w*|posterieur\w*|anteriorite|posteriorite|antero-?posteriorite|precede\w*|avant|apres|plus anciens?|)"
         R"(plus ancienne|plus recents?|plus recente|older|younger|earlier|later|before|after)\b)"));
-    QJsonObject o{ { "method", "traces" } };
-    const QStringList phases = traces::phasesIn(question);
-    if (ms.size() >= 2 && duration.match(q).hasMatch()) {
+    static const QRegularExpression correlation(QStringLiteral(
+        R"(\b(?:correl\w*|covarian\w*|nuages? de points|scatter\s*plots?|dependance entre|dependence between|lien entre|)"
+        R"(varient ensemble|vary together)\b)"));
+    RelationWords w;
+    w.correlation = correlation.match(q).hasMatch();
+    w.duration = duration.match(q).hasMatch();
+    w.between = between.match(q).hasMatch();
+    w.value = value.match(q).hasMatch();
+    w.inside = inside.match(q).hasMatch();
+    w.order = order.match(q).hasMatch();
+    return w;
+}
+
+// « compris entre -500 et -400 » : deux années fixes (texte en années astronomiques, passé par fold()).
+bool fixedYearsIn(const QString& q, QString& from, QString& to)
+{
+    static const QRegularExpression years(QStringLiteral(R"(\b(?:entre|between|de|from)\s+(-?\d+(?:[.,]\d+)?)\s*(?:et|a|and|to|-)\s*(-?\d+(?:[.,]\d+)?))"));
+    const auto m = years.match(q);
+    if (!m.hasMatch()) return false;
+    from = m.captured(1);
+    to = m.captured(2);
+    return true;
+}
+
+// Demande « relation » sur des termes rangés dans l'ordre de la question ; vide si l'opération n'est pas reconnue.
+// `phase` : phase citée (bornes « X Begin » / « X End ») ; `fixed` : années fixes de la question pour « inside ».
+QJsonObject relationRequest(const RelationWords& w, const QVector<QJsonValue>& t, const QString& phase, const QString& folded,
+                            bool preferOrder)
+{
+    QJsonObject o{ { "method", "relation" } };
+    QString y0, y1;
+    if (w.correlation && t.size() >= 2) {                    // « corrélation entre US 12 et Four »
+        o["op"] = QStringLiteral("correlation");
+        QJsonArray terms;
+        for (const QJsonValue& x : t) terms.append(x);
+        o["terms"] = terms;
+        return o;
+    }
+    if (preferOrder && t.size() == 2 && w.order && !w.between) {
+        o["op"] = QStringLiteral("order");
+        o["from"] = t[0]; o["to"] = t[1];
+    } else if (t.size() >= 2 && w.duration) {
         o["op"] = QStringLiteral("duration");
-        o["from"] = ms[0].column;
-        o["to"] = ms[1].column;
-    } else if (inside.match(q).hasMatch() && (ms.size() >= 3 || (ms.size() >= 1 && !phases.isEmpty()))) {
+        o["from"] = t[0]; o["to"] = t[1];
+    } else if (w.inside && (t.size() >= 3 || (!t.isEmpty() && !phase.isEmpty()))) {
         // « N(300) appartient-il à la phase A ? », « US 5 est-il entre US 2 et US 8 ? »
         o["op"] = QStringLiteral("inside");
-        o["of"] = ms[0].column;
-        if (ms.size() >= 3) { o["from"] = ms[1].column; o["to"] = ms[2].column; }
-        else { o["from"] = phases.first() + QStringLiteral(" Begin"); o["to"] = phases.first() + QStringLiteral(" End"); }
-    } else if (inside.match(q).hasMatch() && ms.size() == 1) {
+        o["of"] = t[0];
+        if (t.size() >= 3) { o["from"] = t[1]; o["to"] = t[2]; }
+        else { o["from"] = phase + QStringLiteral(" Begin"); o["to"] = phase + QStringLiteral(" End"); }
+    } else if (w.inside && t.size() == 1 && fixedYearsIn(folded, y0, y1)) {
         // « N(300) est-il compris entre -500 et -400 ? » : bornes fixes
-        static const QRegularExpression years(QStringLiteral(R"(\b(?:entre|between|de|from)\s+(-?\d+(?:[.,]\d+)?)\s*(?:et|a|and|to|-)\s*(-?\d+(?:[.,]\d+)?))"));
-        const auto m = years.match(text::fold(text::erasToAstronomical(question)));
-        if (!m.hasMatch()) return {};
         o["op"] = QStringLiteral("inside");
-        o["of"] = ms[0].column;
-        o["from"] = m.captured(1);
-        o["to"] = m.captured(2);
-    } else if (ms.size() >= 2 && order.match(q).hasMatch() && !between.match(q).hasMatch()) {
+        o["of"] = t[0]; o["from"] = y0; o["to"] = y1;
+    } else if (t.size() >= 2 && w.order && !w.between) {
         // « N(500) est-il antérieur à N(200) ? »
         o["op"] = QStringLiteral("order");
-        o["from"] = ms[0].column;
-        o["to"] = ms[1].column;
-    } else if (ms.size() >= 2 && between.match(q).hasMatch()) {
+        o["from"] = t[0]; o["to"] = t[1];
+    } else if (t.size() >= 2 && w.between) {
         o["op"] = QStringLiteral("between");
-        o["from"] = ms[0].column;
-        o["to"] = ms[1].column;
-    } else if (ms.size() == 1 && value.match(q).hasMatch()) {
+        o["from"] = t[0]; o["to"] = t[1];
+    } else if (t.size() == 1 && w.value) {
         o["op"] = QStringLiteral("value");
-        o["of"] = ms[0].column;
+        o["of"] = t[0];
     } else {
         return {};
     }
+    return o;
+}
+
+// Durée demandée entre deux datations simples (« combien de temps sépare A de B ? ») : du plus ancien au plus récent,
+// d'après la médiane de chaque densité, pour une durée positive. Sans effet sur une autre opération ou un autre terme.
+void durationOldestFirst(QJsonObject& rel)
+{
+    if (rel.value("op").toString() != QLatin1String("duration") || !rel.value("from").isObject() || !rel.value("to").isObject()) return;
+    const MethodRegistry& reg = MethodRegistry::instance();
+    auto median = [&](const QJsonObject& o) {
+        QJsonObject d = MethodRunner::normalizeRequest(o);
+        if (!reg.byId(d.value("method").toString())) return std::nan("");
+        if (d.value("method").toString() == QLatin1String("am")) { d["process"] = d.value("process").toString("I").toUpper(); d["integration_steps"] = 500; }
+        const MethodResult r = reg.compute(d);
+        return r.ok && r.density.valid() ? densityStats(r.density).median : std::nan("");
+    };
+    const double a = median(rel.value("from").toObject()), b = median(rel.value("to").toObject());
+    if (std::isfinite(a) && std::isfinite(b) && b < a) { const QJsonValue f = rel.value("from"); rel["from"] = rel.value("to"); rel["to"] = f; }
+}
+
+// Position dans `q` (texte passé par fold()) de la valeur principale d'une datation, à partir de `from` ; -1 sinon.
+int datingPosition(const QJsonObject& d, const QString& q, int from)
+{
+    for (const char* k : { "age", "f14c", "inc", "dec", "field", "min", "max" }) {
+        if (!d.value(k).isDouble()) continue;
+        const double v = d.value(k).toDouble();
+        for (const QString& s : { QString::number(v, 'g', 12), QString::number(v, 'g', 12).replace('.', ','),
+                                  QString::number(std::abs(v), 'g', 12) }) {
+            static const QRegularExpression digitsAround(QStringLiteral(R"(\d)"));
+            int p = int(q.indexOf(s, from));
+            while (p >= 0) {
+                const bool before = p > 0 && digitsAround.match(q.mid(p - 1, 1)).hasMatch();
+                const bool after = p + s.size() < q.size() && digitsAround.match(q.mid(p + s.size(), 1)).hasMatch();
+                if (!before && !after) return p;
+                p = int(q.indexOf(s, p + 1));
+            }
+        }
+    }
+    return -1;
+}
+
+} // namespace
+
+QVector<QJsonObject> MethodRunner::relationWithPrevious(const QString& question, const QVector<QJsonObject>& previous)
+{
+    if (previous.isEmpty() || isModelRequest(question) || asksEvent(question) || asksCombine(question)) return {};
+    const QString q = text::fold(question);
+    static const QRegularExpression ref(QStringLiteral(
+        R"(\b(?:precedente?s?|d'avant|derniere?s?|ces deux|les deux|deux (?:dates|datations|mesures|ages|echantillons)|celle-ci|celle-la|)"
+        R"(premiere date|date d'avant|previous|last one|these two|both|the two|former|latter)\b)"));
+    if (!ref.match(q).hasMatch()) return {};
+    const MethodRegistry& reg = MethodRegistry::instance();
+    const QVector<QJsonObject> now = requestsFromQuestion(question);
+    for (const QJsonObject& o : now)
+        if (!reg.byId(o.value("method").toString())) return {};          // déjà une relation, un événement, un tableau…
+    // Terme repris de la conversation : nommé d'après sa mesure (« 3560 ± 20 BP ») s'il n'a pas de nom.
+    auto term = [&](QJsonObject o) {
+        if (o.contains("_column")) return QJsonValue(o.value("_column").toString());     // colonne des traces jointes
+        for (const char* k : { "level", "layout" }) o.remove(k);
+        if (o.value("name").toString().trimmed().isEmpty()) {
+            QString d = reg.describe(normalizeRequest(o));
+            if (const qsizetype k = d.indexOf(QStringLiteral(" — ")); k > 0) d = d.left(k);      // « 14C : 3560 ± 20 BP »
+            if (const qsizetype k = d.indexOf(QStringLiteral(" : ")); k > 0 && k < 12) d = d.mid(k + 3);   // « 3560 ± 20 BP »
+            if (!d.isEmpty()) o["name"] = d;
+        }
+        return QJsonValue(o);
+    };
+    QVector<QJsonValue> t;
+    if (now.size() == 1) t = { term(previous.last()), term(now.first()) };
+    else if (now.isEmpty() && previous.size() >= 2) t = { term(previous[previous.size() - 2]), term(previous.last()) };
+    else return {};
+    RelationWords w = relationWords(q);
+    w.order = asksOrder(question);
+    w.value = w.inside = false;
+    QJsonObject rel = relationRequest(w, t, QString(), q, true);
+    if (rel.isEmpty()) return {};
+    durationOldestFirst(rel);
+    if (const double lv = requestedLevel(question); lv > 0) rel["level"] = lv;
+    return { rel };
+}
+
+bool MethodRunner::asksRelation(const QString& question)
+{
+    const RelationWords w = relationWords(text::fold(question));
+    return w.duration || w.between || w.inside || w.correlation || asksOrder(question);
+}
+
+QVector<QJsonObject> MethodRunner::tracesFromQuestion(const QString& question)
+{
+    if (traces::loaded().isEmpty()) return {};
+    const QVector<traces::Mention> ms = traces::mentions(question);
+    const QStringList phases = traces::phasesIn(question);
+    if (ms.isEmpty() && phases.isEmpty()) return {};
+    const QString q = text::fold(question);
+    const RelationWords w = relationWords(q);
+
+    // Datations écrites dans la question (« Ly-1234 2450 ± 30 BP ») avec les colonnes : relation mixte. Les colonnes
+    // citées sont masquées avant de lire les datations (« N(500) » ressemble à une loi normale).
+    QVector<QPair<int, QJsonValue>> terms;
+    for (const traces::Mention& m : ms) terms.append({ m.pos, QJsonValue(m.column) });
+    if (q.size() == question.size()) {                       // fold() garde les positions : masque sur le texte d'origine
+        QString masked = question;
+        for (const traces::Mention& m : ms)
+            for (int i = m.pos; i < std::min<int>(int(masked.size()), m.pos + int(m.column.size())); ++i) masked[i] = QLatin1Char(' ');
+        static const QRegularExpression measured(QStringLiteral(R"(±|\+/-|\+-|\bBP\b|\bF14C\b|\balpha\s*95\b|α95|uniforme?\b)"),
+                                                 QRegularExpression::CaseInsensitiveOption);
+        if (measured.match(masked).hasMatch()) {
+            const QString maskedFold = text::fold(masked);
+            int from = 0;
+            for (QJsonObject d : MethodRegistry::instance().parse(text::erasToAstronomical(masked))) {
+                const int p = datingPosition(d, maskedFold, from);
+                d.remove("level");
+                terms.append({ p >= 0 ? p : int(q.size()) + int(terms.size()), QJsonValue(d) });
+                if (p >= 0) from = p + 1;
+            }
+        }
+    }
+    std::stable_sort(terms.begin(), terms.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    QVector<QJsonValue> t;
+    for (const auto& x : terms) t << x.second;
+    // « Durée de la phase A » : de son début à sa fin, si l'export contient les deux bornes.
+    if (t.isEmpty() && phases.size() == 1 && w.duration && !w.correlation) {
+        int s0 = -1, c0 = -1;
+        const QString b = phases.first() + QStringLiteral(" Begin"), e = phases.first() + QStringLiteral(" End");
+        if (traces::resolve(b, s0, c0) && traces::resolve(e, s0, c0))
+            return { QJsonObject{ { "method", "relation" }, { "op", "duration" }, { "from", b }, { "to", e } } };
+    }
+    if (t.isEmpty()) return {};
+    const QJsonObject o = relationRequest(w, t, phases.value(0), text::fold(text::erasToAstronomical(question)), false);
+    if (o.isEmpty()) return {};
+    // Sans colonne citée, seule l'appartenance d'une datation à une phase des traces concerne les traces.
+    if (ms.isEmpty() && !(o.value("op").toString() == QLatin1String("inside") && o.value("to").toString().endsWith(QLatin1String(" End"))))
+        return {};
     return { o };
+}
+
+QJsonObject MethodRunner::curveFromQuestion(const QString& question)
+{
+    if (!curves::anyLoaded()) return {};
+    QString q = text::fold(text::erasToAstronomical(question));
+    q.replace(QChar(0x2212), '-').replace(QChar(0x00A0), ' ').replace(QChar(0x2019), '\'');
+    static const QString num = QStringLiteral(R"((-?\d+(?:[.,]\d+)?))");
+    static const QRegularExpression curveWord(QStringLiteral(
+        R"(\b(?:courbes?|splines?|curves?|composante|dimension|component|inclinaison|declinaison|intensite)\b|\b(?:[xyzidft]|inc|dec)\s*=)"));
+    static const QRegularExpression rateWord(QStringLiteral(
+        R"(vitesse|taux de variation|\bpentes?\b|derivee|\brates?\b|\bspeed|velocity|rythme|accumulation|taux de sedimentation)"));
+    // Accélération (dérivée seconde) et demande de tracé des courbes (05/11/2026).
+    static const QRegularExpression accWord(QStringLiteral(R"(acceleration|derivee seconde|second derivative|\bcourbure\b)"));
+    static const QRegularExpression plotWord(QStringLiteral(
+        R"(\b(?:trace|tracer|tracez|traces? moi|dessine\w*|affiche\w*|montre\w*|plot|draw|graphiques?|graphs?)\b)"));
+    static const QRegularExpression crossWord(QStringLiteral(
+        R"(\bquand\b|a quelle date|a quel moment|date a laquelle|\bdates? ou\b|\bwhen\b|\batteint|\breach|passe par)"));
+    static const QRegularExpression valueWord(QStringLiteral(
+        R"(valeur|probabilite|densite|\bvaut\b|\bvalue\b|probability|\bloi\b|distribution)"));
+    // « quelle date pour x = 0 », « probabilité de date pour X = 10 » : date où la courbe vaut la valeur.
+    static const QRegularExpression dateFor(QStringLiteral(R"(\bdates?\s+(?:pour|de|d'|ou|quand)|\bprobabilite\s+de\s+(?:la\s+)?date|\bdater\b|\bdate\s+for\b)"));
+    const bool isAcc = accWord.match(q).hasMatch();
+    const bool isRate = rateWord.match(q).hasMatch() && !(isAcc && !q.contains(QLatin1String("vitesse et")) && !q.contains(QLatin1String("vitesse,"))
+                                                         && !q.contains(QLatin1String("speed and")));
+    const bool isRateOrAcc = isRate || isAcc;
+    // « date pour une mesure à 45 ± 1 » (prompt réel du 05/11/2026) : sans nom de méthode de datation, une mesure à dater
+    // vise la courbe jointe.
+    static const QRegularExpression measureAsk(QStringLiteral(R"(\b(?:dates?|dater|probabilite de date)\b.*\b(?:mesure|mesuree|measured?|measurement)\b)"));
+    static const QRegularExpression methodWord(QStringLiteral(R"(\b(?:c14|14c|bp|f14c|tl|osl|luminescence|archeomag\w*|am|gauss\w*|uniforme?|radiocarbone)\b)"));
+    const bool curveMeasure = measureAsk.match(q).hasMatch() && !methodWord.match(q).hasMatch();
+    // Datation avec une méthode nommée ou une courbe de RÉFÉRENCE (« date une gaussienne à x = 45 ± 1 avec la courbe de
+    // référence curve_x_gauss_ref.csv ») : pas la courbe estimée jointe.
+    static const QRegularExpression refCurve(QStringLiteral(R"(courbes? de reference|reference curves?|courbes? de calibration|calibration curves?)"));
+    if (methodWord.match(q).hasMatch() || refCurve.match(q).hasMatch()) return {};
+    // Date d'un extremum (prompt réel du 05/11/2026 : « où est la variation la plus forte », « quand date la variation la plus
+    // grande ») : « vitesse maximale », « pente la plus forte », « maximum de la courbe », « varie le plus », « steepest change ».
+    static const QRegularExpression extremeWord(QStringLiteral(
+        R"(\bvariations?\s+(?:la\s+)?plus\s+(?:forte|grande|importante|rapide|brutale|marquee|faible|lente)\b)"
+        R"(|\bplus\s+(?:forte|grande|importante|rapide|brutale)\s+(?:variation|pente|vitesse|croissance|decroissance|acceleration|changement|evolution|hausse|baisse)\b)"
+        R"(|\b(?:pente|vitesse|acceleration|croissance|decroissance|evolution|changement|hausse|baisse|taux d'accumulation|variation)\s+(?:est(?:-elle|-il)?\s+|etait\s+|a ete\s+)?(?:la\s+)?plus\s+(?:forte|grande|elevee|importante|rapide|raide|brutale|faible|lente)\b)"
+        R"(|\b(?:vitesse|pente|acceleration|taux d'accumulation|variation|derivee)\s+(?:est\s+|etait\s+)?(?:maximale|maximum|max|minimale|minimum|min|extreme)\b)"
+        R"(|\b(?:maximum|minimum|max|min|pic|extremum|sommet)\s+(?:de\s+la\s+|du\s+|de\s+|of\s+the\s+)?(?:courbe|vitesse|pente|derivee|acceleration|taux|variation|curve|speed|rate|slope)\b)"
+        R"(|\bcourbe\s+(?:est\s+)?(?:maximale|minimale|au maximum|au minimum)\b)"
+        R"(|\b(?:varie|change|evolue)(?:-t-(?:elle|il))?\s+le\s+plus\b|\b(?:monte|croit|descend|decroit|baisse)\s+le\s+plus\s+vite\b)"
+        R"(|\b(?:steepest|fastest|largest|strongest|biggest|greatest)\s+(?:change|variation|slope|increase|decrease|rate)\b)"
+        R"(|\b(?:max(?:imum)?|min(?:imum)?|peak)\s+(?:rate|speed|slope|velocity)\b)"));
+    const bool isExtreme = extremeWord.match(q).hasMatch();
+    // Valeur nommée par ce qu'elle mesure (courbe âge-profondeur : « date le niveau 50 », « quelle date pour la profondeur
+    // 120 ± 5 ? », « date à la cote 2,5 ») ; pas « niveau de confiance », ni « niveau 95 % ».
+    static const QRegularExpression levelRe(QStringLiteral(
+        R"(\b(?:niveau|profondeur|cote|hauteur|altitude|depth|level|height)\s+(?:de\s+|d'|a\s+|=\s*|:\s*)?)") + num
+        + QStringLiteral(R"((?:\s*)") + text::plusMinus() + QStringLiteral(R"(\s*(\d+(?:[.,]\d+)?))?(?!\s*%|[.,]?\d))"));
+    static const QRegularExpression confidence(QStringLiteral(R"(\b(?:niveau|level)\s+(?:de\s+)?(?:confiance|credibilite|probabilite|confidence|credibility))"));
+    const bool isLevel = levelRe.match(q).hasMatch() && !confidence.match(q).hasMatch();
+    if (!curveWord.match(q).hasMatch() && !isRateOrAcc && !curveMeasure && !isExtreme && !isLevel) return {};
+
+    // Valeurs de la composante : « Y = 1,5 », « vaut 10 », « atteint (la valeur) 0 », « valeur 12 ».
+    // Valeur éventuellement mesurée avec son erreur : « x = 0 ± 1 », « mesure de 55 +- 2 ».
+    struct Hit { double v; qsizetype pos, len; double err = 0.0; };
+    QVector<Hit> ys;
+    QString dimLetter;
+    const QString errPart = QStringLiteral(R"((?:\s*)") + text::plusMinus() + QStringLiteral(R"(\s*(\d+(?:[.,]\d+)?))?)");
+    static const QRegularExpression yEq(QStringLiteral(R"(\b([xyzidf]|inc|dec)\s*=\s*)") + num + errPart);
+    for (auto it = yEq.globalMatch(q); it.hasNext();) {
+        const auto m = it.next();
+        ys.append({ text::toNumber(m.captured(2)), m.capturedStart(), m.capturedLength(),
+                    m.captured(3).isEmpty() ? 0.0 : text::toNumber(m.captured(3)) });
+        if (dimLetter.isEmpty()) dimLetter = m.captured(1).toUpper();
+    }
+    if (ys.isEmpty() && isRateOrAcc) {
+        // « une vitesse de 0,05 », « accélération égale à 0 », « taux d'accumulation = 1,2 ± 0,1 » ; « vitesse nulle »,
+        // « la vitesse s'annule » : 0.
+        static const QRegularExpression rv(QStringLiteral(R"(\b(?:vitesse|acceleration|taux d'accumulation|taux de sedimentation|speed|rate)\s+(?:de|d'|=|egale a|valant|vaut|of|equal to|equals)\s*)")
+                                           + num + errPart + QStringLiteral(R"((?!\s*(?:av|apr|ans?\b|bc|ad\b)))"));
+        for (auto it = rv.globalMatch(q); it.hasNext();) {
+            const auto m = it.next();
+            ys.append({ text::toNumber(m.captured(1)), m.capturedStart(), m.capturedLength(),
+                        m.captured(2).isEmpty() ? 0.0 : text::toNumber(m.captured(2)) });
+        }
+        static const QRegularExpression zero(QStringLiteral(R"(\b(?:vitesse|acceleration|speed)\s+(?:nulle|s'annule|zero|is zero)|s'annule)"));
+        if (ys.isEmpty()) if (const auto m = zero.match(q); m.hasMatch()) ys.append({ 0.0, m.capturedStart(), m.capturedLength(), 0.0 });
+    }
+    if (ys.isEmpty() && isLevel) {
+        for (auto it = levelRe.globalMatch(q); it.hasNext();) {
+            const auto m = it.next();
+            ys.append({ text::toNumber(m.captured(1)), m.capturedStart(), m.capturedLength(),
+                        m.captured(2).isEmpty() ? 0.0 : text::toNumber(m.captured(2)) });
+        }
+    }
+    if (ys.isEmpty()) {
+        static const QRegularExpression yWord(QStringLiteral(R"(\b(?:vaut|atteint|atteindre|atteigne|valeur|mesure|mesuree|measured?|reaches?|equals?)\s+(?:la valeur\s+|de\s+|a\s+)?)") + num
+                                              + errPart + QStringLiteral(R"((?!\s*(?:av|apr|ans?\b|bc|ad\b)))"));
+        for (auto it = yWord.globalMatch(q); it.hasNext();) {
+            const auto m = it.next();
+            ys.append({ text::toNumber(m.captured(1)), m.capturedStart(), m.capturedLength(),
+                        m.captured(2).isEmpty() ? 0.0 : text::toNumber(m.captured(2)) });
+        }
+    }
+    // « entre A et B » / « de A à B »
+    struct Pair { double a, b; qsizetype pos, len; bool valueCtx; };
+    QVector<Pair> pairs;
+    static const QRegularExpression between(QStringLiteral(R"(\b(?:entre|between|de|from)\s+(?:les (?:dates|annees|valeurs)\s+|l'an\s+)?)") + num
+                                            + QStringLiteral(R"(\s*(?:et|and|a|to|-)\s+(?:l'an\s+)?)") + num);
+    for (auto it = between.globalMatch(q); it.hasNext();) {
+        const auto m = it.next();
+        const QString before = q.mid(std::max<qsizetype>(0, m.capturedStart() - 30), std::min<qsizetype>(30, m.capturedStart()));
+        const bool valueCtx = before.contains(QLatin1String("valeur")) || before.contains(QLatin1String("value"))
+                              || m.captured(0).contains(QLatin1String("valeurs"));
+        pairs.append({ text::toNumber(m.captured(1)), text::toNumber(m.captured(2)), m.capturedStart(), m.capturedLength(), valueCtx });
+    }
+    // Dates isolées : « en 200 », « à t = -100 », « à la date 50 », « en l'an 1200 ».
+    QString masked = q;
+    for (const Hit& h : ys) masked.replace(h.pos, h.len, QString(h.len, ' '));
+    for (const Pair& p : pairs) masked.replace(p.pos, p.len, QString(p.len, ' '));
+    // Une date peut avoir une incertitude (« t = 100 ± 20 ») : elle devient une date gaussienne, tirée à chaque tirage.
+    QStringList times;
+    static const QRegularExpression timeRe(QStringLiteral(
+        R"((?:\bt\s*=\s*|\ben\s+(?:l'an\s+|l'annee\s+)?|\ba la date\s+(?:de\s+)?|\bdate\s+|\bl'an\s+|\bannee\s+|\bat\s+(?:year\s+)?|\bin\s+(?:year\s+)?|\bvers\s+))") + num
+        + QStringLiteral(R"((?!\d|[.,]\d))") + errPart);
+    for (auto it = timeRe.globalMatch(masked); it.hasNext();) {
+        const auto m = it.next();
+        const double t = text::toNumber(m.captured(1)), e = m.captured(2).isEmpty() ? 0.0 : text::toNumber(m.captured(2));
+        if (e > 0) {
+            const QJsonObject g{ { "method", "gauss" }, { "age", t }, { "error", e },
+                                 { "name", QStringLiteral("t = %1 ± %2").arg(text::numAuto(t, 6), text::numAuto(e, 6)) } };
+            times << QString::fromUtf8(QJsonDocument(g).toJson(QJsonDocument::Compact));
+        } else {
+            times << QString::number(t, 'g', 12);
+        }
+    }
+    // Dates d'Events des traces jointes citées par leur nom.
+    QStringList cols;
+    for (const traces::Mention& mn : traces::mentions(question)) cols << mn.column;
+
+    QJsonObject rq{ { "method", "curve" } };
+    static const QRegularExpression dimRe(QStringLiteral(R"(\b(?:composante|dimension|component|courbe)\s+([xyzidf])(?![\w'’]))"));
+    static const QRegularExpression dimOfRe(QStringLiteral(R"(\b(?:probabilite|loi|valeur|densite|vitesse|distribution)\s+(?:de|d')\s*([xyzidf])(?![\w'’]))"));
+    if (const auto m = dimRe.match(q); m.hasMatch()) rq["dim"] = m.captured(1).toUpper();
+    else if (const auto m2 = dimOfRe.match(q); m2.hasMatch()) rq["dim"] = m2.captured(1).toUpper();
+    else if (q.contains(QLatin1String("inclinaison")) || q.contains(QLatin1String("inclination"))) rq["dim"] = QStringLiteral("I");
+    else if (q.contains(QLatin1String("declinaison")) || q.contains(QLatin1String("declination"))) rq["dim"] = QStringLiteral("D");
+    else if (q.contains(QLatin1String("intensite")) || q.contains(QLatin1String("intensity"))) rq["dim"] = QStringLiteral("F");
+    else if (!dimLetter.isEmpty()) rq["dim"] = dimLetter;
+    if (q.contains(QLatin1String("par siecle")) || q.contains(QLatin1String("per century"))) rq["per"] = 100;
+    else if (q.contains(QLatin1String("par millenaire"))) rq["per"] = 1000;
+    auto year = [](double v) { return QString::number(v, 'g', 12); };
+    auto term = [](const QString& t) -> QJsonValue {             // date incertaine écrite en JSON : objet
+        if (t.startsWith('{')) { const QJsonDocument d = QJsonDocument::fromJson(t.toUtf8()); if (d.isObject()) return d.object(); }
+        return t;
+    };
+
+    const QString qty = isAcc && !isRate ? QStringLiteral("acceleration") : QStringLiteral("vitesse");
+    if (isExtreme) {
+        rq["op"] = QStringLiteral("extremum");
+        static const QRegularExpression valueExt(QStringLiteral(
+            R"(\b(?:maximum|minimum|max|min|pic|sommet|extremum)\s+(?:de\s+la\s+|du\s+|de\s+|of\s+the\s+)?(?:courbe|curve)\b|\bcourbe\s+(?:est\s+)?(?:maximale|minimale|au maximum|au minimum)\b)"));
+        const bool onValue = valueExt.match(q).hasMatch() && !isRateOrAcc;
+        rq["quantity"] = onValue ? QStringLiteral("value") : isAcc && !isRate ? QStringLiteral("acceleration") : QStringLiteral("derivative");
+        static const QRegularExpression minW(QStringLiteral(R"(\b(?:decroissance|descend|decroit|baisse|decrease|minimum|minimale|min)\b)"));
+        static const QRegularExpression maxW(QStringLiteral(R"(\b(?:croissance|monte|croit|hausse|increase|maximum|maximale|max|pic|sommet|peak)\b)"));
+        static const QRegularExpression weakW(QStringLiteral(R"(\bplus\s+(?:faible|lente)\b|\bslowest\b|\bflattest\b)"));
+        static const QRegularExpression strongW(QStringLiteral(R"(\bvariations?\b|\bchange|\bvarie\b|\bevolu|\bplus\s+(?:forte|raide|brutale|marquee|importante)\b|steepest|strongest|largest|biggest|greatest)"));
+        static const QRegularExpression absW(QStringLiteral(R"(valeur absolue|\babsolute\b|\ben absolu\b)"));
+        if (weakW.match(q).hasMatch()) rq["sense"] = QStringLiteral("absmin");
+        else if (absW.match(q).hasMatch()) rq["sense"] = q.contains(QLatin1String("minim")) ? QStringLiteral("absmin") : QStringLiteral("abs");
+        else if (minW.match(q).hasMatch() && !strongW.match(q).hasMatch()) rq["sense"] = QStringLiteral("min");
+        else if (maxW.match(q).hasMatch() && (onValue || !strongW.match(q).hasMatch())) rq["sense"] = QStringLiteral("max");
+        else if (q.contains(QLatin1String("decroissance")) || q.contains(QLatin1String("baisse"))) rq["sense"] = QStringLiteral("min");
+        else if (q.contains(QLatin1String("croissance")) || q.contains(QLatin1String("hausse"))) rq["sense"] = QStringLiteral("max");
+        else rq["sense"] = onValue ? QStringLiteral("max") : QStringLiteral("abs");
+        for (const Pair& p : pairs) if (!p.valueCtx) { rq["tmin"] = std::min(p.a, p.b); rq["tmax"] = std::max(p.a, p.b); break; }
+        return rq;
+    }
+    // Tracé des courbes de valeur, de vitesse, d'accélération : « trace les courbes de vitesse et d'accélération »,
+    // « affiche le taux d'accumulation entre -500 et 300 ».
+    if (plotWord.match(q).hasMatch() && ys.isEmpty() && times.isEmpty() && cols.isEmpty()) {
+        rq["op"] = QStringLiteral("plot");
+        QJsonArray qs;
+        const bool wantValue = valueWord.match(q).hasMatch() && !q.contains(QLatin1String("probabilite"));
+        if (wantValue || (!rateWord.match(q).hasMatch() && !isAcc)) qs.append(QStringLiteral("value"));
+        if (rateWord.match(q).hasMatch()) qs.append(QStringLiteral("derivative"));
+        if (isAcc) qs.append(QStringLiteral("acceleration"));
+        if (!rateWord.match(q).hasMatch() && !isAcc && !wantValue) qs = QJsonArray{ "value", "derivative", "acceleration" };
+        rq["quantities"] = qs;
+        for (const Pair& p : pairs) if (!p.valueCtx) { rq["tmin"] = std::min(p.a, p.b); rq["tmax"] = std::max(p.a, p.b); break; }
+        return rq;
+    }
+    // Date d'une vitesse ou d'une accélération mesurée, ou date où elle atteint une valeur (« quand la vitesse s'annule »).
+    if (isRateOrAcc && ys.size() == 1 && times.isEmpty() && cols.isEmpty() && pairs.isEmpty()) {
+        rq["quantity"] = qty;
+        rq["y"] = ys[0].v;
+        if (crossWord.match(q).hasMatch() && !(ys[0].err > 0)) {
+            rq["op"] = QStringLiteral("crossing");
+            if (q.contains(QLatin1String("derniere")) || q.contains(QLatin1String("last"))) rq["which"] = QStringLiteral("last");
+            else if (q.contains(QLatin1String("toutes")) || q.contains(QLatin1String("chaque fois"))) rq["which"] = QStringLiteral("all");
+        } else {
+            rq["op"] = QStringLiteral("calibrate");
+            rq["error"] = ys[0].err;
+        }
+        return rq;
+    }
+    if (isAcc && !isRate) {                                          // accélération à une date
+        QStringList tv = times;
+        tv += cols;
+        if (tv.size() == 1) { rq["op"] = QStringLiteral("acceleration"); rq["t"] = term(tv[0]); return rq; }
+        return {};
+    }
+    if (isRate) {
+        QVector<double> yv;
+        for (const Hit& h : ys) yv << h.v;
+        for (const Pair& p : pairs) if (p.valueCtx || !ys.isEmpty()) { yv << p.a << p.b; }
+        if (yv.size() >= 2) { rq["op"] = QStringLiteral("rate_values"); rq["y1"] = yv[0]; rq["y2"] = yv[1]; return rq; }
+        QStringList tv;
+        for (const Pair& p : pairs) if (!p.valueCtx) tv << year(p.a) << year(p.b);
+        tv += times;
+        tv += cols;
+        if (tv.size() >= 2) { rq["op"] = QStringLiteral("rate"); rq["from"] = term(tv[0]); rq["to"] = term(tv[1]); return rq; }
+        if (tv.size() == 1) { rq["op"] = QStringLiteral("derivative"); rq["t"] = term(tv[0]); return rq; }
+        return {};
+    }
+    QStringList tv = times;
+    tv += cols;
+    // Valeur mesurée, sans date : date de la mesure sur la courbe (« quelle date pour x = 0 ± 1 ? », « date pour x = 40 »,
+    // ou une valeur seule en suite de question, « et x = 50 ») ; sans erreur, valeur exacte (limite σ → 0).
+    const bool bareValue = tv.isEmpty() && ys.size() == 1 && !valueWord.match(q).hasMatch() && pairs.isEmpty();
+    if (tv.isEmpty() && ys.size() == 1 && !crossWord.match(q).hasMatch()
+        && (ys[0].err > 0 || dateFor.match(q).hasMatch() || bareValue)) {
+        rq["op"] = QStringLiteral("calibrate");
+        rq["y"] = ys[0].v;
+        rq["error"] = ys[0].err;
+        return rq;
+    }
+    if (crossWord.match(q).hasMatch() && tv.isEmpty() && ys.size() == 1) {
+        rq["op"] = QStringLiteral("crossing");
+        rq["y"] = ys[0].v;
+        if (q.contains(QLatin1String("derniere")) || q.contains(QLatin1String("last"))) rq["which"] = QStringLiteral("last");
+        else if (q.contains(QLatin1String("toutes")) || q.contains(QLatin1String("chaque fois")) || q.contains(QLatin1String("every time")))
+            rq["which"] = QStringLiteral("all");
+        return rq;
+    }
+    if (tv.size() == 1 && (valueWord.match(q).hasMatch() || !ys.isEmpty() || !pairs.isEmpty())) {
+        rq["op"] = QStringLiteral("value");
+        rq["t"] = term(tv[0]);
+        if (ys.size() == 1) rq["y"] = ys[0].v;
+        if (ys.size() >= 2) { rq["ymin"] = std::min(ys[0].v, ys[1].v); rq["ymax"] = std::max(ys[0].v, ys[1].v); }
+        else if (!pairs.isEmpty()) { rq["ymin"] = std::min(pairs[0].a, pairs[0].b); rq["ymax"] = std::max(pairs[0].a, pairs[0].b); }
+        return rq;
+    }
+    return {};
 }
 
 QJsonObject MethodRunner::inverseFromQuestion(const QString& question)
@@ -2443,8 +4847,41 @@ QJsonObject MethodRunner::inverseFromQuestion(const QString& question)
     return o;
 }
 
-QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question)
+// Noms à ne jamais corriger : colonnes des traces (Events, phases), fichiers de courbes et de traces joints.
+static QStringList fuzzyKeepNames()
 {
+    QStringList keep;
+    for (const TraceSet& ts : traces::loaded()) { keep += ts.columns; keep << ts.file; }
+    for (const SplineTrace& s : curves::splines()) keep << s.file;
+    for (const CurveMap& m : curves::maps()) keep << m.file;
+    return keep;
+}
+
+QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question, QString* fixes)
+{
+    if (fixes) fixes->clear();
+    QVector<QJsonObject> r = requestsFromQuestionExact(question);
+    if (!r.isEmpty()) return r;
+    QVector<fuzzy::Fix> fx;
+    const QString corrected = fuzzy::correct(question, &fx, fuzzyKeepNames());
+    if (fx.isEmpty()) return r;
+    r = requestsFromQuestionExact(corrected);
+    if (!r.isEmpty() && fixes) *fixes = fuzzy::describe(fx);
+    return r;
+}
+
+QVector<QJsonObject> MethodRunner::requestsFromQuestionExact(const QString& question)
+{
+    // Appel d'outil écrit par l'utilisateur (« calibrer_radiocarbone(age=2500, error=30) », « courbe_chronomodel
+    // {"op":"plot"} ») : exécuté tel quel s'il est complet ; sinon le modèle de langage s'en charge (il voit l'outil).
+    {
+        QString toolName;
+        QJsonObject toolArgs;
+        if (tools::callFromText(question, toolName, toolArgs)) {
+            const QJsonObject r = tools::requestFor(toolName, toolArgs);
+            if (!r.isEmpty()) return { r };
+        }
+    }
     // Tableau courant : « extrais les 14C du tableau », « date les TL », « un modèle avec le tableau »… (sélection simple).
     if (QJsonObject t = datatable::requestFromQuestion(question); !t.isEmpty()) {
         if (const double lv = requestedLevel(question); lv > 0) t["level"] = lv;
@@ -2454,6 +4891,11 @@ QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question)
     // avec le lecteur de tableaux (datatable) avant d'arriver ici.
     if (datatable::looksLikeTable(question)) return {};
     if (isModelRequest(question)) return {};
+    // Courbe de ChronoModel jointe (trace des splines, carte de densité) et question sur elle : valeur, vitesse, atteinte.
+    if (QJsonObject cv = curveFromQuestion(question); !cv.isEmpty()) {
+        if (const double lv = requestedLevel(question); lv > 0) cv["level"] = lv;
+        return { cv };
+    }
     // Traces MCMC jointes et colonnes citées (« durée entre N(500) et N(200) ») : calcul sur les tirages, avant toute
     // lecture de datations (« N(500) » ressemble à une loi normale, « Event » à un événement à calculer).
     if (QVector<QJsonObject> tr = tracesFromQuestion(question); !tr.isEmpty()) {
@@ -2495,12 +4937,22 @@ QVector<QJsonObject> MethodRunner::requestsFromQuestion(const QString& question)
         }
     }
     const double level = requestedLevel(question);
-    // « Laquelle de ces deux dates est la plus ancienne ? » : une seule demande « order » (P(A antérieure à B), écart).
-    if (rq.size() == 2 && asksOrder(question) && !asksEvent(question) && !asksCombine(question)) {
-        QJsonObject a = rq[0], b = rq[1];
-        a.remove("level"); b.remove("level");
-        QJsonObject od{ { "method", "order" }, { "a", a }, { "b", b } };
-        rq = { od };
+    // Deux ou trois datations reliées par la question : une seule demande « relation » (calcul exact, datations
+    // indépendantes). « Laquelle est la plus ancienne ? » : ordre (P(A antérieure à B) et écart) ; « combien de temps
+    // entre… » : durée ; « date d'un niveau situé entre… » : date entre ; « C est-elle comprise entre A et B ? » ou
+    // « entre 800 et 500 av. J.-C. ? » : appartenance.
+    if (!rq.isEmpty() && rq.size() <= 3 && !asksEvent(question) && !asksCombine(question)) {
+        const QString q = text::fold(datesText);
+        RelationWords w = relationWords(q);
+        w.order = asksOrder(question);
+        w.value = false;                                  // une datation seule reste une datation
+        if (rq.size() == 1 && !rq[0].value("method").toString().startsWith(QLatin1String("unif"))) w.duration = w.between = w.order = false;
+        else if (rq.size() == 1) w = RelationWords();     // « uniforme entre 800 et 500 » : la datation elle-même
+        if (rq.size() == 2) w.inside = false;
+        if (rq.size() == 3) { const bool in = w.inside; w = RelationWords(); w.inside = in; }
+        QVector<QJsonValue> t;
+        for (QJsonObject o : rq) { o.remove("level"); t << QJsonValue(o); }
+        if (QJsonObject rel = relationRequest(w, t, QString(), q, true); !rel.isEmpty()) { durationOldestFirst(rel); rq = { rel }; }
     }
     // « Combine ces datations » : une seule demande « combine » (produit des vraisemblances, « Combine » de ChronoModel).
     if (rq.size() >= 2 && asksCombine(question)) {
@@ -2642,7 +5094,7 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
     // Bloc chronomodel de SeldonH : la méthode d'une date est dans « type » ({"type":"gauss","age":250,"error":10}).
     if (!o.contains("method") && o.value("type").isString()) {
         const QString t = text::fold(o.value("type").toString()).trimmed();
-        static const QStringList known = { "c14", "14c", "f14c", "tl", "tl/osl", "osl", "gauss", "unif", "uniforme", "am", "radiocarbone" };
+        static const QStringList known = { "c14", "14c", "f14c", "tl", "tl/osl", "osl", "gauss", "unif", "uniforme", "am", "radiocarbone", "density" };
         if (known.contains(t)) { o["method"] = t; o.remove("type"); }
     }
     o.remove("plugin_id");
@@ -2683,7 +5135,22 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
 
     // Méthode : alias et noms d'outils (le modèle écrit parfois « calculer_evenement » ou « 14C »).
     QString m = text::fold(o.value("method").toString()).trimmed();
+    // Anciens noms (« traces », « order ») et noms d'outils : même calcul « relation », avec l'opération par défaut de
+    // chacun (traces : durée, ou densité d'une colonne avec « of » ; order : antéro-postérité).
+    QString defaultOp;
+    static const QHash<QString, QString> relationAlias = {
+        { "traces", "traces" }, { "trace", "traces" }, { "chaines", "traces" }, { "chains", "traces" }, { "analyser_traces", "traces" },
+        { "order", "order" }, { "ordre", "order" }, { "anteriorite", "order" }, { "comparer", "order" }, { "comparaison", "order" },
+        { "compare", "order" }, { "comparer_dates", "order" },
+        { "relation", "relation" }, { "relations", "relation" } };
+    if (relationAlias.contains(m)) {
+        const QString legacy = relationAlias.value(m);
+        if (legacy == QLatin1String("traces")) defaultOp = o.contains("of") ? QStringLiteral("value") : QStringLiteral("duration");
+        else if (legacy == QLatin1String("order")) defaultOp = QStringLiteral("order");
+        m = QStringLiteral("relation");
+    }
     if (const tools::ToolDef* def = tools::find(m); def && !def->methodId.isEmpty()) m = def->methodId;
+    if (!defaultOp.isEmpty() && o.value("op").toString().trimmed().isEmpty()) o["op"] = defaultOp;
     static const QHash<QString, QString> alias = {
         { "14c", "c14" }, { "c-14", "c14" }, { "radiocarbone", "c14" }, { "radiocarbon", "c14" }, { "carbone 14", "c14" },
         { "tl/osl", "tl" }, { "osl", "tl" }, { "luminescence", "tl" },
@@ -2694,9 +5161,9 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
         { "density file", "density_file" }, { "densityfile", "density_file" },
         { "evenement", "event" }, { "events", "event" },
         { "combinaison", "combine" }, { "combination", "combine" }, { "combiner", "combine" }, { "combined", "combine" },
-        { "trace", "traces" }, { "chaines", "traces" }, { "chains", "traces" },
-        { "ordre", "order" }, { "anteriorite", "order" }, { "comparer", "order" }, { "comparaison", "order" }, { "compare", "order" },
-        { "calibration inverse", "inverse" }, { "inverse calibration", "inverse" }, { "inverse_calibration", "inverse" } };
+        { "calibration inverse", "inverse" }, { "inverse calibration", "inverse" }, { "inverse_calibration", "inverse" },
+        { "courbe", "curve" }, { "courbes", "curve" }, { "curves", "curve" }, { "spline", "curve" }, { "splines", "curve" },
+        { "courbe chronomodel", "curve" }, { "chronomodel curve", "curve" } };
     if (alias.contains(m)) m = alias.value(m);
     if (!m.isEmpty()) o["method"] = m;
 
@@ -2711,13 +5178,17 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
             if (std::isfinite(d)) o[k] = d;
         }
 
-    if ((m == "event" || m == "combine" || m == "order") && o.value("dates").isArray()) {
+    if (m == "tl" || m == "gauss") o = withAgeUnit(o, m);
+    if ((m == "event" || m == "combine" || m == "relation") && o.value("dates").isArray()) {
         QJsonArray ds;
         for (const QJsonValue& v : o.value("dates").toArray()) ds.append(v.isObject() ? QJsonValue(normalizeRequest(v.toObject())) : v);
         o["dates"] = ds;
     }
-    if (m == "order")
-        for (const char* k : { "a", "b" })
+    if (m == "curve")
+        for (const char* k : { "t", "from", "to", "t1", "t2" })
+            if (o.value(k).isObject()) o[k] = normalizeRequest(o.value(k).toObject());
+    if (m == "relation")
+        for (const char* k : { "a", "b", "c", "from", "to", "of" })
             if (o.value(k).isObject()) o[k] = normalizeRequest(o.value(k).toObject());
     return o;
 }
@@ -2765,7 +5236,7 @@ QVector<QJsonObject> MethodRunner::jsonRequests(const QString& text)
     for (const QJsonObject& raw : topLevelObjects(text)) {
         const QJsonObject o = normalizeRequest(raw);
         const QString m = o.value("method").toString();
-        static const QStringList extra = { "event", "combine", "order", "traces", "inverse", "density_file" };
+        static const QStringList extra = { "event", "combine", "relation", "inverse", "density_file" };
         if (!m.isEmpty() && (extra.contains(m) || MethodRegistry::instance().byId(m)) && out.size() < 12) out << o;
     }
     return out;
@@ -2803,16 +5274,35 @@ QVector<JsonSpan> jsonSpans(const QString& t)
 bool isCalcRequest(const QJsonObject& raw)
 {
     const QString m = MethodRunner::normalizeRequest(raw).value("method").toString();
-    static const QStringList extra = { "event", "combine", "order", "traces", "inverse", "density_file" };
+    static const QStringList extra = { "event", "combine", "relation", "inverse", "density_file" };
     return !m.isEmpty() && (extra.contains(m) || MethodRegistry::instance().byId(m));
 }
 
 } // namespace
 
+bool MethodRunner::lastCalcBlock(const QString& md, qsizetype* start, qsizetype* end)
+{
+    static const QRegularExpression block(QStringLiteral("^```[ \\t]*(calcul|json)[ \\t]*\\n(.*?)^```[ \\t]*$"),
+                                          QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption |
+                                          QRegularExpression::CaseInsensitiveOption);
+    bool found = false;
+    auto it = block.globalMatch(md);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        bool calc = m.captured(1).compare(QLatin1String("calcul"), Qt::CaseInsensitive) == 0;
+        if (!calc) for (const QJsonObject& o : objectsOfBlock(m.captured(2))) calc = calc || isCalcRequest(o);
+        if (!calc) continue;
+        found = true;
+        if (start) *start = m.capturedStart();
+        if (end) *end = m.capturedEnd();
+    }
+    return found;
+}
+
 QString MethodRunner::hideCalcBlocks(const QString& md, bool showJson)
 {
     if (showJson) return md;
-    const QString note = QStringLiteral("*🧮 Calcul confié à SeldonH.*");
+    const QString note = QStringLiteral("*Calcul confié à SeldonH.*");
     // 1. Blocs ```calcul, et ```json qui contiennent une demande de calcul (pas un modèle ChronoModel).
     static const QRegularExpression block(QStringLiteral("^```[ \\t]*(calcul|json)[ \\t]*\\n(.*?)^```[ \\t]*$"),
                                           QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption |
@@ -2831,7 +5321,7 @@ QString MethodRunner::hideCalcBlocks(const QString& md, bool showJson)
     QString rest = md.mid(pos);
     // Bloc ```calcul encore ouvert (réponse en cours) : rien de partiel à l'écran.
     static const QRegularExpression open(QStringLiteral("^```[ \\t]*calcul[ \\t]*$"), QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
-    if (const auto mo = open.match(rest); mo.hasMatch()) rest = rest.left(mo.capturedStart()) + QStringLiteral("*🧮 Préparation du calcul…*");
+    if (const auto mo = open.match(rest); mo.hasMatch()) rest = rest.left(mo.capturedStart()) + QStringLiteral("*Préparation du calcul…*");
     out += rest;
     // 2. JSON de calcul écrit dans le texte, sans balise : retiré (l'utilisateur n'a pas à écrire de requête).
     const QVector<JsonSpan> spans = jsonSpans(out);
@@ -2860,7 +5350,7 @@ QVector<QJsonObject> MethodRunner::extractCalcBlocks(const QString& answer)
             if (raw.value("method").toString().isEmpty() && !(calcFence && raw.contains("plugin_id"))) continue;
             const QJsonObject o = normalizeRequest(raw);
             const QString m = o.value("method").toString();
-            static const QStringList extra = { "event", "combine", "order", "traces", "inverse", "density_file" };
+            static const QStringList extra = { "event", "combine", "relation", "inverse", "density_file" };
             if (!calcFence && !extra.contains(m) && !MethodRegistry::instance().byId(m)) continue;
             out << o;
         }

@@ -60,7 +60,9 @@ namespace seldon {
 
 // BcAd : années astronomiques signées (l'année 0 existe), format de ChronoModel et des .chr, par défaut.
 // Historic : les mêmes années écrites av./apr. J.-C. (sans année 0 : -499 = 500 av. J.-C.), sur demande.
-enum class DateFormat { BcAd, Historic, BceCe, CalBP, CalB2K, DatBP, DatB2K, Ka, Ma, Numeric };
+// KaBP, MaBP (05/11/2026, SeldonH seulement) : âge en ka / Ma avant 1950, l'usage des géologues ; Ka et Ma gardent la
+// convention de ChronoModel (« Age ka » = −année / 1000, origine en l'an 0).
+enum class DateFormat { BcAd, Historic, BceCe, CalBP, CalB2K, DatBP, DatB2K, Ka, Ma, KaBP, MaBP, Numeric };
 
 namespace dateformat {
 
@@ -76,17 +78,19 @@ inline const char* id(DateFormat f)
     case DateFormat::DatB2K: return "datb2k";
     case DateFormat::Ka:     return "ka";
     case DateFormat::Ma:     return "ma";
+    case DateFormat::KaBP:   return "kabp";
+    case DateFormat::MaBP:   return "mabp";
     case DateFormat::Numeric: return "numeric";
     }
     return "bcad";
 }
 
 // Tous les formats, dans l'ordre des menus.
-inline const std::array<DateFormat, 10>& all()
+inline const std::array<DateFormat, 12>& all()
 {
-    static const std::array<DateFormat, 10> l = { DateFormat::BcAd, DateFormat::Historic, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
+    static const std::array<DateFormat, 12> l = { DateFormat::BcAd, DateFormat::Historic, DateFormat::BceCe, DateFormat::CalBP, DateFormat::CalB2K,
                                                          DateFormat::DatBP, DateFormat::DatB2K, DateFormat::Ka, DateFormat::Ma,
-                                                         DateFormat::Numeric };
+                                                         DateFormat::KaBP, DateFormat::MaBP, DateFormat::Numeric };
     return l;
 }
 
@@ -108,8 +112,10 @@ inline QString title(DateFormat f)
     case DateFormat::CalB2K: return QStringLiteral("Âge cal. B2K (2000 − année)");
     case DateFormat::DatBP:  return QStringLiteral("Date cal. BP (année − 1950)");
     case DateFormat::DatB2K: return QStringLiteral("Date cal. B2K (année − 2000)");
-    case DateFormat::Ka:     return QStringLiteral("Âge ka (milliers d'années)");
-    case DateFormat::Ma:     return QStringLiteral("Âge Ma (millions d'années)");
+    case DateFormat::Ka:     return QStringLiteral("Âge ka (milliers d'années, comme ChronoModel : −année / 1000)");
+    case DateFormat::Ma:     return QStringLiteral("Âge Ma (millions d'années, comme ChronoModel : −année / 10⁶)");
+    case DateFormat::KaBP:   return QStringLiteral("Âge ka BP (milliers d'années avant 1950)");
+    case DateFormat::MaBP:   return QStringLiteral("Âge Ma BP (millions d'années avant 1950)");
     case DateFormat::Numeric: return QStringLiteral("Sans unité (valeurs signées, sans suffixe)");
     }
     return {};
@@ -128,6 +134,8 @@ inline QString axisLabel(DateFormat f)
     case DateFormat::DatB2K: return QStringLiteral("Date cal. B2K (année − 2000)");
     case DateFormat::Ka:     return QStringLiteral("Âge (ka)");
     case DateFormat::Ma:     return QStringLiteral("Âge (Ma)");
+    case DateFormat::KaBP:   return QStringLiteral("Âge (ka BP)");
+    case DateFormat::MaBP:   return QStringLiteral("Âge (Ma BP)");
     case DateFormat::Numeric: return QStringLiteral("Valeur");
     }
     return {};
@@ -136,7 +144,8 @@ inline QString axisLabel(DateFormat f)
 // Les formats « âge » croissent vers le passé : l'axe des graphiques est inversé pour garder l'ordre chronologique.
 inline bool isAge(DateFormat f)
 {
-    return f == DateFormat::CalBP || f == DateFormat::CalB2K || f == DateFormat::Ka || f == DateFormat::Ma;
+    return f == DateFormat::CalBP || f == DateFormat::CalB2K || f == DateFormat::Ka || f == DateFormat::Ma
+           || f == DateFormat::KaBP || f == DateFormat::MaBP;
 }
 
 // ------------------------------------------------------------------ décimales
@@ -149,7 +158,15 @@ inline std::atomic<int>& decimalsSetting() { static std::atomic<int> d{ kAutoDec
 inline void setDecimals(int d) { decimalsSetting() = d < 0 ? kAutoDecimals : std::min(d, kMaxDecimals); }
 
 // Années par unité affichée.
-inline double unitYears(DateFormat f) { return f == DateFormat::Ka ? 1e3 : f == DateFormat::Ma ? 1e6 : 1.0; }
+inline double unitYears(DateFormat f)
+{
+    return f == DateFormat::Ka || f == DateFormat::KaBP ? 1e3 : f == DateFormat::Ma || f == DateFormat::MaBP ? 1e6 : 1.0;
+}
+// Unité courte (« ka », « Ma ») ; vide pour les formats en années.
+inline QString unitLabel(DateFormat f)
+{
+    return f == DateFormat::Ka || f == DateFormat::KaBP ? QStringLiteral("ka") : f == DateFormat::Ma || f == DateFormat::MaBP ? QStringLiteral("Ma") : QString();
+}
 
 // Écart-type (années) du résultat en cours d'affichage, pour le mode automatique ; NaN = inconnu.
 inline double& precisionContext() { thread_local double sd = std::numeric_limits<double>::quiet_NaN(); return sd; }
@@ -178,7 +195,7 @@ inline int decimals(DateFormat f)
 {
     if (const int d = decimalsSetting(); d >= 0) return d;
     if (const int d = decimalsForSpread(precisionContext(), f); d >= 0) return d;
-    return f == DateFormat::Ka ? 3 : f == DateFormat::Ma ? 5 : 0;      // sans contexte : à l'année près
+    return unitYears(f) == 1e3 ? 3 : unitYears(f) == 1e6 ? 5 : 0;      // sans contexte : à l'année près
 }
 
 // Nombre à d décimales, virgule décimale, sans « -0 ».
@@ -199,6 +216,8 @@ inline double convert(double year, DateFormat f)
     case DateFormat::DatB2K: return year - 2000.0;
     case DateFormat::Ka:     return -year / 1e3;
     case DateFormat::Ma:     return -year / 1e6;
+    case DateFormat::KaBP:   return (1950.0 - year) / 1e3;
+    case DateFormat::MaBP:   return (1950.0 - year) / 1e6;
     default:                 return year;
     }
 }
@@ -213,6 +232,8 @@ inline double toCalendar(double v, DateFormat f)
     case DateFormat::DatB2K: return v + 2000.0;
     case DateFormat::Ka:     return -v * 1e3;
     case DateFormat::Ma:     return -v * 1e6;
+    case DateFormat::KaBP:   return 1950.0 - v * 1e3;
+    case DateFormat::MaBP:   return 1950.0 - v * 1e6;
     default:                 return v;
     }
 }
@@ -238,6 +259,8 @@ inline QString format(double year, DateFormat f)
     case DateFormat::DatB2K:  return QStringLiteral("%1 (date cal. B2K)").arg(number(v, d));
     case DateFormat::Ka:      return QStringLiteral("%1 ka").arg(number(v, d));
     case DateFormat::Ma:      return QStringLiteral("%1 Ma").arg(number(v, d));
+    case DateFormat::KaBP:    return QStringLiteral("%1 ka BP").arg(number(v, d));
+    case DateFormat::MaBP:    return QStringLiteral("%1 Ma BP").arg(number(v, d));
     case DateFormat::Numeric: return number(v, d);
     }
     return {};
@@ -248,10 +271,9 @@ inline QString spread(double sdYears, DateFormat f)
 {
     int d = decimalsSetting();
     if (d < 0) d = decimalsForSpread(sdYears, f);
-    if (d < 0) d = f == DateFormat::Ka ? 3 : f == DateFormat::Ma ? 5 : 1;
+    if (d < 0) d = unitYears(f) == 1e3 ? 3 : unitYears(f) == 1e6 ? 5 : 1;
     const QString n = number(sdYears / unitYears(f), d);
-    if (f == DateFormat::Ka) return n + QStringLiteral(" ka");
-    if (f == DateFormat::Ma) return n + QStringLiteral(" Ma");
+    if (!unitLabel(f).isEmpty()) return n + QStringLiteral(" ") + unitLabel(f);
     if (f == DateFormat::Numeric) return n;
     return n + QStringLiteral(" ans");
 }
@@ -274,6 +296,9 @@ inline DateFormat detect(const QString& question, DateFormat fallback)
     };
 
     if (has(R"(\bsans\s+unites?\b|\bwithout\s+units?\b|\bno\s+units?\b|\bunitless\b)")) return DateFormat::Numeric;
+    // « résultats en ka BP » avant « cal BP » et « en BP » (sinon pris pour des années cal BP)
+    if (after(QStringLiteral(R"(ka\s*(?:cal\.?\s*)?bp)")))      return DateFormat::KaBP;
+    if (after(QStringLiteral(R"(ma\s*(?:cal\.?\s*)?bp)")))      return DateFormat::MaBP;
     if (has(R"(\bdate\s+cal\.?\s*b2k\b|\bb2k\s+date\b)")) return DateFormat::DatB2K;
     if (has(R"(\bdate\s+cal\.?\s*bp\b)"))                 return DateFormat::DatBP;
     if (has(R"(\bcal\.?\s*b2k\b|\bb2k\b)"))              return DateFormat::CalB2K;
@@ -309,7 +334,7 @@ inline std::string systemHint(DateFormat f)
         h += std::string("L'utilisateur a choisi le format « ") + title(f).toStdString() +
              "». Exprime les dates dans ce format, en reprenant les valeurs des blocs de résultat de SeldonH (déjà converties). "
              "Si tu dois convertir toi-même une année calendaire signée A : "
-             "cal BP = 1950 − A ; cal B2K = 2000 − A ; ka = −A / 1000.";
+             "cal BP = 1950 − A ; cal B2K = 2000 − A ; ka = −A / 1000 ; ka BP = (1950 − A) / 1000.";
     if (d >= 0) h += std::string(" Garde ") + std::to_string(d) +
                      (d > 1 ? " décimales" : " décimale") + " pour les valeurs, comme dans les blocs de résultat.";
     return h;

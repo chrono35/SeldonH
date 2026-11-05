@@ -35,6 +35,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // de calibration g(t) = a t² + b t + c (mode "eq").  Formule de ChronoModel (plugin_gauss) :
 //   L(t) = exp( -½ (age - g(t))² / error² ) / error      (g(t) = t sans calibration)
 // Domaine : age ± 5 σ (mode none) ou intervalle où g(t) ∈ age ± 5 σ (mode eq).
+// Mode "curve" (05/11/2026) : courbe de référence G(t) ± e(t) du dossier Gauss (Calib/Gauss de ChronoModel, dossier de
+// l'utilisateur, ou fichier joint ; « t, G, err », virgules et point décimal, comme PluginGauss::loadRefFile) :
+//   L(t) = exp( -½ (age - G(t))² / (error² + e(t)²) ) / √(error² + e(t)²), sur le domaine de la courbe.
 #pragma once
 
 #include <QRegularExpression>
@@ -52,6 +55,8 @@ public:
     bool usesValueErrors() const override { return true; }
     MethodResult compute(const QJsonObject& p) const override;
     QString describe(const QJsonObject& p) const override;
+    QStringList curveNames() const override;
+    QStringList referenceCurves(const QJsonObject& p) const override;
 };
 
 } // namespace seldon

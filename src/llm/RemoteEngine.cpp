@@ -105,7 +105,7 @@ void RemoteEngine::send()
     rq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
     timer_.start();
-    const bool withTools = toolsActive();
+    const bool withTools = toolsActive() && !toolsSuspended_;
     sentTools_ = withTools;
     reply_ = nam_.post(rq, remote::buildChatBody(cfg_, chat_, sp_, useMaxCompletionTokens_, omitTemperature_,
                                                  withTools ? tools_ : QJsonArray(), extra_, toolRounds_ >= kMaxToolRounds));

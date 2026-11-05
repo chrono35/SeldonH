@@ -540,6 +540,9 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
                 for (const char* k : { "ref", "reference", "code", "lab_ref", "labo" })
                     if (d.value(k).isString()) { d["name"] = d.value(k); break; }
             const QString type = (d.contains("type") ? d.value("type") : d.value("method")).toString().trimmed().toLower();
+            // Âge en ka, Ma (« "unit":"ka" ») : ChronoModel attend des années.
+            if (type == QLatin1String("gauss")) d = MethodRunner::withAgeUnit(d, QStringLiteral("gauss"));
+            else if (type == QLatin1String("tl") || type == QLatin1String("osl") || type == QLatin1String("tl/osl")) d = MethodRunner::withAgeUnit(d, QStringLiteral("tl"));
             // Erreurs que le modèle de langage doit corriger (pas de devinette silencieuse) :
             if (type == QLatin1String("bound") || type == QLatin1String("borne")) {          // borne écrite comme une date
                 R.errors << QStringLiteral("« %1 » : une borne se déclare sur l'événement ({\"name\":\"%1\",\"type\":\"bound\",\"known_fixed\":…}), "
@@ -583,9 +586,18 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
                 }
                 out["plugin_id"] = "gauss";
                 out["sampler"] = kDateSampler;
-                out["data"] = QJsonObject{ { "age", age }, { "error", err }, { "mode", "none" },
-                                           { "curve", "" }, { "a", 0 }, { "b", 1 }, { "c", 0 } };
-                addSpan(age - 3 * err, age + 3 * err);
+                // Courbe de référence du plugin Gauss (fichier de Calib/Gauss, nom avec « .csv » comme ChronoModel) : mode curve.
+                QString gc = d.value("curve").toString().trimmed();
+                const bool onCurve = d.value("mode").toString() == QLatin1String("curve") || (!gc.isEmpty() && d.value("mode").toString().isEmpty());
+                if (onCurve && !gc.isEmpty() && !gc.endsWith(QLatin1String(".csv"), Qt::CaseInsensitive)) gc += QStringLiteral(".csv");
+                out["data"] = QJsonObject{ { "age", age }, { "error", err }, { "mode", onCurve && !gc.isEmpty() ? "curve" : "none" },
+                                           { "curve", onCurve ? gc.toLower() : QString() }, { "a", 0 }, { "b", 1 }, { "c", 0 } };
+                if (onCurve && !gc.isEmpty()) {
+                    R.warnings << QStringLiteral("Date gaussienne sur la courbe « %1 » : le fichier doit être dans Calib/Gauss de ChronoModel.").arg(gc);
+                    if (const RefCurve* c = CurveStore::get(QStringLiteral("gauss"), gc, CurveFormat::Simple)) addSpan(c->tmin(), c->tmax());
+                } else {
+                    addSpan(age - 3 * err, age + 3 * err);
+                }
             } else if (type == "unif" || type == "uniform") {
                 const double mn = d.value("min").toDouble(std::nan(""));
                 const double mx = d.value("max").toDouble(std::nan(""));
