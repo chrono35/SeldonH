@@ -75,14 +75,19 @@ class ChrBuilder {
 public:
     static ChrResult build(const QJsonObject& spec);
 
-    // Extrait le premier bloc de code « chronomodel » (ou « json » contenant "events") d'un texte.
-    static bool extractSpec(const QString& markdown, QJsonObject& spec, QString* err = nullptr);
+    // Extrait le premier bloc de code « chronomodel » (ou « json » contenant "events") d'un texte. Une clé écrite deux fois
+    // au premier niveau (deux "events" : QJsonDocument ne garderait que le dernier) et un Event écrit deux fois sous le
+    // même nom sont réunis ; `notes` reçoit alors une phrase par réunion (prompt réel du 13/11/2026).
+    static bool extractSpec(const QString& markdown, QJsonObject& spec, QString* err = nullptr, QStringList* notes = nullptr);
 
     // Texte d'une réponse tel qu'affiché : le bloc de modèle (```chronomodel, ou ```json avec "events") est remplacé par
     // un résumé (« Modèle ChronoModel prêt : 2 événements… ») ou, si le modèle est incomplet, par la liste de ce qui
     // manque ; un bloc encore ouvert (réponse en cours) devient « Préparation du modèle… ». `showJson` : l'utilisateur a
     // demandé le JSON, le bloc reste visible (avec le résumé).
     static QString displayMarkdown(const QString& markdown, bool showJson = false);
+    // Texte pour l'utilisateur : noms de champs, de réglages et d'outils (« event_constraints », « known_fixed »,
+    // « calibrer_radiocarbone ») remplacés par des mots courants ; blocs de code inchangés.
+    static QString humanizeNames(const QString& markdown);
     // Retire les blocs de modèle (```chronomodel, ou ```json avec "events") d'une réponse qui n'en demandait pas, avec
     // la ligne d'annonce qui les précède (« **Modèle ChronoModel** (à exporter) : ») et un séparateur --- resté seul.
     static QString stripModelBlocks(const QString& markdown);
@@ -90,6 +95,12 @@ public:
     static bool asksForJson(const QString& question);
     // Résumé compact d'un .chr existant, injectable dans un prompt (interprétation, relecture).
     static QString summarize(const QJsonObject& chr, int maxEvents = 60);
+    // Durée d'une phase d'un .chr, comme ChronoModel l'affiche (PhaseItem::getTauString) : « Durée ≤ 20 » (tau_type 1),
+    // « Span uniforme » (tau_type 2), vide si elle est inconnue (tau_type 0, rien à signaler).
+    static QString durationText(const QJsonObject& phase);
+    // Hiatus d'une contrainte de phases d'un .chr (ArrowItem::getBubbleText) : « hiatus ≥ 50 » (gamma_type 1),
+    // « hiatus min ∈ [a ; b] » (gamma_type 2), vide s'il est inconnu (gamma_type 0).
+    static QString hiatusText(const QJsonObject& constraint);
 
     // Vérification croisée de la spécification écrite par le modèle de langage avec ce qu'a donné l'utilisateur
     // (`source` : ses questions et ses fichiers joints). Renvoie les écarts, en français :
@@ -97,6 +108,17 @@ public:
     //   - nom de date (référence) absent de la source (référence inventée) ;
     //   - « valeur ± erreur » ou référence de laboratoire (Ly-12345, Bdx-478) de la source absente du modèle (oubli).
     static QStringList crossCheck(const QJsonObject& spec, const QString& source);
+
+    // Courbe âge-profondeur, convention de ChronoModel (Philippe, 12/11/2026) : la profondeur la plus PETITE (valeur
+    // négative permise) est l'Event le plus ancien. Profondeurs données toutes positives ou nulles (sous la surface : « à 13 cm ») :
+    // écrites en négatif (13 -> -13) ; dès qu'une valeur donnée est négative, les profondeurs sont signées et gardées
+    // telles quelles (convention de ChronoModel, tableau CSV, cote sous un repère). `events` : « events » de la spécification.
+    static bool signedDepths(const QJsonArray& events);
+    // Même règle pour une spécification ; « depth_sign »: "as_given" à la racine (tableau CSV de ChronoModel, profondeur
+    // mesurée depuis la base : 0 au fond, croissante avec le temps) : profondeurs toujours gardées telles quelles.
+    static bool signedDepths(const QJsonObject& spec);
+    // Valeur de X_Inc_Depth d'un Event de la spécification (« depth » ou « profondeur ») ; NaN sans profondeur.
+    static double chronoDepth(const QJsonObject& event, bool signedDepths);
 
     // Convention de contrainte : [a, b] = a plus ancien que b. ChronoModel stocke bwd_id (plus ancien) / fwd_id (plus récent) ;
     // sens vérifié sur trois projets réels.

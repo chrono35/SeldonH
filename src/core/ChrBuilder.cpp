@@ -367,6 +367,224 @@ QJsonArray eventDates(const QJsonObject& e, bool* flat = nullptr)
     return QJsonArray{ d };
 }
 
+// Mesures d'un Event en mode courbe (I, D, F ou X, Y, Z), sur l'événement et pas dans une date. Clés de ChronoModel
+// (X_Inc_Depth…) ou noms simples écrits par le modèle de langage (inc, dec, alpha95, field, error_f, en français aussi).
+// Clés de ChronoModel relevées sur test_curveIDF.chr (projet I, D, F qui fonctionne, Philippe, 12/11/2026).
+struct CurveKey { const char* chrKey; std::initializer_list<const char*> aliases; };
+const CurveKey kCurveKeys[] = {
+    { "X_Inc_Depth",       { "inc", "inclinaison", "inclination", "I" } },
+    { "Y_Dec",             { "dec", "declinaison", "déclinaison", "declination", "D" } },
+    { "Z_Field",           { "field", "intensite", "intensité", "intensity", "F" } },
+    { "sX_Alpha95_sDepth", { "alpha95", "a95" } },
+    { "sZ_sF",             { "error_f", "erreur_f", "sF", "sigma_f" } },
+    { "sY",                {} },
+    { "SDec",              {} },
+};
+
+QJsonObject curveMeasures(const QJsonObject& e)
+{
+    QJsonObject m;
+    for (const CurveKey& k : kCurveKeys) {
+        QJsonValue v = e.value(k.chrKey);
+        for (const char* a : k.aliases) {
+            if (!v.isUndefined()) break;
+            v = e.value(a);
+        }
+        if (v.isUndefined() || v.isNull()) continue;
+        const double d = v.isString() ? text::toNumber(v.toString()) : v.toDouble(std::nan(""));
+        if (std::isfinite(d)) m[k.chrKey] = d;
+    }
+    return m;
+}
+
+// Nombre d'une valeur JSON (nombre ou texte « 20 », « 20,5 ») ; NaN si absent ou illisible.
+double jsonNumber(const QJsonValue& v)
+{
+    if (v.isDouble()) return v.toDouble();
+    if (v.isString()) return text::toNumber(v.toString());
+    return std::nan("");
+}
+
+// Durée d'une phase écrite par le modèle de langage : "duration_max": 20 (durée maximale connue) ou
+// "uniform_span": true (« Uniform Span » de ChronoModel). Rien : durée inconnue (type 0, rien à signaler).
+struct PhaseDuration { int type = 0; double max = 0.0; QString error; };
+PhaseDuration phaseDuration(const QJsonObject& o)
+{
+    PhaseDuration d;
+    QJsonValue mv(QJsonValue::Undefined);
+    for (const char* k : { "duration_max", "duree_max", "durée_max", "max_duration", "tau_fixed" })
+        if (o.contains(k)) { mv = o.value(k); break; }
+    bool span = false;
+    for (const char* k : { "uniform_span", "span_uniforme", "span" }) {
+        const QJsonValue sv = o.value(k);
+        span = span || sv.toBool(false) || (sv.isString() && text::fold(sv.toString()).contains(QLatin1String("unif")));
+    }
+    const QString dt = text::fold(o.value("duration").toString(o.value("duree").toString()));
+    span = span || dt.contains(QLatin1String("unif")) || dt.contains(QLatin1String("span"));
+    if (!mv.isUndefined()) {
+        const double m = jsonNumber(mv);
+        if (!std::isfinite(m) || m <= 0) { d.error = QStringLiteral("durée maximale illisible ou nulle (« duration_max »)."); return d; }
+        if (span) { d.error = QStringLiteral("durée maximale ET span uniforme : choisir l'un des deux."); return d; }
+        d.type = 1; d.max = m;
+    } else if (span) d.type = 2;
+    return d;
+}
+
+// Hiatus entre deux phases (PhaseConstraint::GammaType de ChronoModel) : "hiatus": 50 (hiatus ≥ 50, type 1) ou
+// "hiatus_min" / "hiatus_max" (hiatus minimal dans [min ; max], type 2). Rien : inconnu (type 0).
+struct Hiatus { int type = 0; double fixed = 1.0, min = 0.0, max = 1.0; QString error; };
+Hiatus hiatusOf(const QJsonObject& o)
+{
+    Hiatus h;
+    const QJsonValue f = o.contains("hiatus") ? o.value("hiatus") : o.value("gamma");
+    const QJsonValue a = o.contains("hiatus_min") ? o.value("hiatus_min") : o.value("gamma_min");
+    const QJsonValue b = o.contains("hiatus_max") ? o.value("hiatus_max") : o.value("gamma_max");
+    if (!f.isUndefined()) {
+        const double v = jsonNumber(f);
+        if (!std::isfinite(v) || v < 0) { h.error = QStringLiteral("hiatus illisible ou négatif."); return h; }
+        h.type = 1; h.fixed = v;
+    } else if (!a.isUndefined() || !b.isUndefined()) {
+        const double lo = jsonNumber(a), hi = jsonNumber(b);
+        if (!std::isfinite(lo) || !std::isfinite(hi) || lo < 0 || hi < lo) {
+            h.error = QStringLiteral("hiatus : il faut « hiatus_min » et « hiatus_max » avec 0 ≤ min ≤ max."); return h;
+        }
+        h.type = 2; h.min = lo; h.max = hi;
+    }
+    return h;
+}
+
+// ---------- Clés en double dans le bloc du modèle d'IA ----------
+// Prompt réel du 13/11/2026 (mistral-small-3.2) : le bloc avait deux clés "events", la seconde ne servant qu'à mettre
+// deux Events dans une phase ; QJsonDocument garde la dernière, tous les Events datés étaient perdus.
+
+// Membres du premier niveau d'un objet JSON, dans l'ordre et doublons compris : (clé, texte de la valeur).
+bool topLevelMembers(const QByteArray& s, QVector<QPair<QString, QByteArray>>& out)
+{
+    qsizetype i = 0;
+    const qsizetype n = s.size();
+    auto ws = [&] { while (i < n && QChar::isSpace(uchar(s[i]))) ++i; };
+    auto skipString = [&]() -> bool {                     // s[i] == '"' ; i après le guillemet fermant
+        ++i;
+        while (i < n) {
+            if (s[i] == '\\') { i += 2; continue; }
+            if (s[i] == '"') { ++i; return true; }
+            ++i;
+        }
+        return false;
+    };
+    ws();
+    if (i >= n || s[i] != '{') return false;
+    ++i;
+    for (;;) {
+        ws();
+        if (i < n && s[i] == '}') return true;
+        if (i >= n || s[i] != '"') return false;
+        const qsizetype k0 = i;
+        if (!skipString()) return false;
+        const QJsonArray ka = QJsonDocument::fromJson("[" + s.mid(k0, i - k0) + "]").array();
+        const QString key = ka.isEmpty() ? QString() : ka.at(0).toString();
+        ws();
+        if (i >= n || s[i] != ':') return false;
+        ++i;
+        ws();
+        const qsizetype v0 = i;
+        int depth = 0;
+        while (i < n) {
+            const char c = s[i];
+            if (c == '"') { if (!skipString()) return false; continue; }
+            if (c == '{' || c == '[') ++depth;
+            else if (c == '}' || c == ']') { if (depth == 0) break; --depth; }
+            else if (c == ',' && depth == 0) break;
+            ++i;
+        }
+        out.append({ key, s.mid(v0, i - v0).trimmed() });
+        if (i >= n) return false;
+        if (s[i] == ',') { ++i; continue; }
+        if (s[i] == '}') return true;
+        return false;
+    }
+}
+
+// Ajoute à `a` les éléments de `b` qui n'y sont pas déjà.
+void appendNew(QJsonArray& a, const QJsonArray& b)
+{
+    for (const QJsonValue& v : b) if (!a.contains(v)) a.append(v);
+}
+
+// Clé de comparaison d'un nom d'Event ou de phase : sans accents, casse ni espaces (« US 3 » = « us3 »).
+QString nameKey(const QString& n) { return text::fold(n).remove(QLatin1Char(' ')); }
+
+// Réunit les Events (ou phases) de même nom : champs manquants complétés, listes (dates, phases) jointes ; en cas de
+// valeurs différentes, la première est gardée.
+QJsonArray mergeByName(const QJsonArray& list, const QString& what, QStringList* notes)
+{
+    QJsonArray out;
+    QHash<QString, int> at;
+    for (const QJsonValue& v : list) {
+        if (!v.isObject()) { out.append(v); continue; }
+        const QJsonObject o = v.toObject();
+        const QString key = nameKey(o.value("name").toString());
+        if (key.isEmpty() || !at.contains(key)) { if (!key.isEmpty()) at.insert(key, out.size()); out.append(o); continue; }
+        QJsonObject m = out.at(at.value(key)).toObject();
+        QStringList added, kept;
+        for (auto it = o.begin(); it != o.end(); ++it) {
+            if (it.key() == QLatin1String("name")) continue;
+            if (!m.contains(it.key())) { m.insert(it.key(), it.value()); added << it.key(); continue; }
+            const QJsonValue old = m.value(it.key());
+            if (old == it.value()) continue;
+            if (old.isArray() && it.value().isArray()) { QJsonArray a = old.toArray(); appendNew(a, it.value().toArray()); m.insert(it.key(), a); added << it.key(); }
+            else kept << it.key();
+        }
+        out[at.value(key)] = m;
+        if (notes) {
+            QString n = QStringLiteral("%1 « %2 » écrit deux fois par le modèle d'IA : réuni").arg(what, o.value("name").toString());
+            if (!added.isEmpty()) n += QStringLiteral(" (ajouté : %1)").arg(added.join(QStringLiteral(", ")));
+            if (!kept.isEmpty()) n += QStringLiteral(" ; valeurs différentes, la première est gardée : %1").arg(kept.join(QStringLiteral(", ")));
+            *notes << n + QLatin1Char('.');
+        }
+    }
+    return out;
+}
+
+// Objet du bloc : clés en double réunies (listes jointes, objets complétés, sinon première valeur), puis Events et
+// phases de même nom réunis.
+QJsonObject mergedSpec(const QByteArray& raw, const QJsonObject& parsed, QStringList* notes)
+{
+    QJsonObject spec = parsed;
+    QVector<QPair<QString, QByteArray>> members;
+    if (topLevelMembers(raw, members)) {
+        QHash<QString, QVector<QJsonValue>> byKey;
+        QStringList order;
+        for (const auto& m : std::as_const(members)) {
+            if (!byKey.contains(m.first)) order << m.first;
+            const QJsonArray wrap = QJsonDocument::fromJson("[" + m.second + "]").array();
+            byKey[m.first].append(wrap.isEmpty() ? QJsonValue() : wrap.at(0));
+        }
+        for (const QString& k : std::as_const(order)) {
+            const QVector<QJsonValue>& vals = byKey.value(k);
+            if (vals.size() < 2) continue;
+            QJsonValue merged = vals.first();
+            for (int j = 1; j < vals.size(); ++j) {
+                if (merged.isArray() && vals[j].isArray()) { QJsonArray a = merged.toArray(); for (const QJsonValue& x : vals[j].toArray()) a.append(x); merged = a; }
+                else if (merged.isObject() && vals[j].isObject()) {
+                    QJsonObject o = merged.toObject();
+                    const QJsonObject b = vals[j].toObject();
+                    for (auto it = b.begin(); it != b.end(); ++it) if (!o.contains(it.key())) o.insert(it.key(), it.value());
+                    merged = o;
+                }
+            }
+            spec.insert(k, merged);
+            if (notes) *notes << QStringLiteral("Le bloc du modèle d'IA contenait %1 fois la clé « %2 » : les %1 ont été réunies "
+                                                "(sinon seule la dernière était lue).").arg(vals.size()).arg(k);
+        }
+    }
+    for (const char* k : { "events", "phases" })
+        if (spec.value(k).isArray())
+            spec.insert(k, mergeByName(spec.value(k).toArray(), k == QLatin1String("events") ? QStringLiteral("L'événement")
+                                                                                              : QStringLiteral("La phase"), notes));
+    return spec;
+}
+
 struct Range { double lo =  std::numeric_limits<double>::infinity();
                double hi = -std::numeric_limits<double>::infinity();
                void add(double v) { lo = std::min(lo, v); hi = std::max(hi, v); }
@@ -400,6 +618,43 @@ QJsonValue yearsToNumbers(const QJsonValue& v, const QString& key = QString())
 
 } // namespace
 
+namespace {
+double depthNumber(const QJsonValue& v)
+{
+    if (v.isDouble()) return v.toDouble();
+    if (v.isString()) {
+        bool ok = false;
+        const double x = v.toString().trimmed().replace(QChar(0x2212), QLatin1Char('-')).replace(',', '.').toDouble(&ok);
+        if (ok) return x;
+    }
+    return std::nan("");
+}
+double givenDepth(const QJsonObject& e) { return depthNumber(e.contains("depth") ? e.value("depth") : e.value("profondeur")); }
+} // namespace
+
+bool ChrBuilder::signedDepths(const QJsonArray& events)
+{
+    for (const QJsonValue& v : events) {
+        const double d = givenDepth(v.toObject());
+        if (!std::isnan(d) && d < 0) return true;
+    }
+    return false;
+}
+
+bool ChrBuilder::signedDepths(const QJsonObject& spec)
+{
+    const QString sign = text::fold(spec.value("depth_sign").toString()).trimmed();
+    if (sign == QLatin1String("as_given") || sign == QLatin1String("signed") || sign == QLatin1String("tel_quel")) return true;
+    return signedDepths(spec.value("events").toArray());
+}
+
+double ChrBuilder::chronoDepth(const QJsonObject& event, bool signedDepths)
+{
+    const double d = givenDepth(event);
+    if (std::isnan(d)) return d;
+    return signedDepths ? d : -d;          // -0 évité : 0 reste 0
+}
+
 ChrResult ChrBuilder::build(const QJsonObject& specIn)
 {
     ChrResult R;
@@ -413,10 +668,14 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
     bool curveKnown = true;
     QString curveName = spec.value("curve").toString();
     // Courbe âge-profondeur : type Profondeur de ChronoModel (process_type 80, 'P'). Convention de ChronoModel : la
-    // profondeur est négative, 0 à la surface (10 m s'écrit -10) ; elle va dans X_Inc_Depth, son erreur dans
-    // sX_Alpha95_sDepth. Des profondeurs sans « curve » suffisent à la demander.
+    // profondeur la plus basse (valeur négative permise) est l'Event le plus ancien ; des profondeurs sous la surface
+    // données en positif s'écrivent en négatif (10 m -> -10), des profondeurs signées restent telles quelles (voir
+    // signedDepths). Elle va dans X_Inc_Depth, son erreur dans sX_Alpha95_sDepth. Des profondeurs sans « curve »
+    // suffisent à la demander.
     static const QSet<QString> ageDepthNames = { "age_depth", "age-depth", "agedepth", "age_profondeur", "age-profondeur",
-                                                 "age profondeur", "profondeur", "courbe age-profondeur", "depth" };
+                                                 "age profondeur", "profondeur", "courbe age-profondeur", "depth",
+                                                 // « niveau » : pas un type de ChronoModel, c'est la profondeur (Philippe, 12/11/2026)
+                                                 "niveau", "niveaux", "age-niveau", "age niveau", "courbe age-niveau", "level" };
     bool anyDepth = false;
     for (const QJsonValue& ev : evSpec) anyDepth = anyDepth || ev.toObject().contains("depth") || ev.toObject().contains("profondeur");
     if (curveName.trimmed().isEmpty() && anyDepth) {
@@ -424,6 +683,7 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
         R.warnings << QStringLiteral("Profondeurs données sans type de courbe : courbe âge-profondeur utilisée.");
     }
     const bool ageDepth = ageDepthNames.contains(text::fold(curveName).trimmed());
+    const bool depthsSigned = signedDepths(spec);
     const int processType = ageDepth ? 80 : curveProcessType(curveName, &curveKnown);
     if (!curveKnown)
         R.warnings << QStringLiteral("Type de courbe « %1 » inconnu : modèle sans courbe utilisé.").arg(curveName);
@@ -472,6 +732,13 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
                 if (phases[i].toObject().value("id").toInt() == pid) {
                     QJsonObject p = phases[i].toObject();
                     applyColor(p, v.toObject(), QStringLiteral("la phase « %1 »").arg(n.trimmed()));
+                    // Durée de la phase (Phase::TauType de ChronoModel) : 0 inconnue, 1 durée maximale connue (tau_fixed),
+                    // 2 « Uniform Span » (eZOnly). Relevé sur test_unif_span.chr (Philippe, 13/11/2026).
+                    const PhaseDuration du = phaseDuration(v.toObject());
+                    if (!du.error.isEmpty())
+                        R.errors << QStringLiteral("Phase « %1 » : %2").arg(n.trimmed(), du.error);
+                    else if (du.type == 1) { p["tau_type"] = 1; p["tau_fixed"] = du.max; }
+                    else if (du.type == 2) p["tau_type"] = 2;
                     phases[i] = p;
                 }
     }
@@ -801,27 +1068,42 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
         for (const char* k : { "X_Inc_Depth", "Y_Dec", "Z_Field", "sX_Alpha95_sDepth", "sY", "sZ_sF" })
             o[k] = 0.0;
         if (ageDepth) {
-            const QJsonValue dv = e.contains("depth") ? e.value("depth") : e.value("profondeur");
             const QJsonValue de = e.contains("depth_error") ? e.value("depth_error") : e.value("erreur_profondeur");
-            auto toNum = [](const QJsonValue& v) {
-                if (v.isDouble()) return v.toDouble();
-                if (v.isString()) { bool ok = false; const double x = v.toString().trimmed().replace(',', '.').toDouble(&ok); if (ok) return x; }
-                return std::nan("");
-            };
-            const double depth = toNum(dv), derr = toNum(de);
+            const double depth = chronoDepth(e, depthsSigned), derr = std::abs(depthNumber(de));
             if (std::isnan(depth))
                 R.errors << QStringLiteral("Courbe âge-profondeur : l'événement « %1 » n'a pas de profondeur (« depth »).").arg(name);
             else {
-                o["X_Inc_Depth"] = -std::abs(depth);
+                o["X_Inc_Depth"] = depth == 0.0 ? 0.0 : depth;
                 if (!std::isnan(derr) && derr > 0) o["sX_Alpha95_sDepth"] = derr;
                 else R.warnings << QStringLiteral("Courbe âge-profondeur : pas d'erreur sur la profondeur de « %1 » (0 utilisé).").arg(name);
             }
             o["sampler"] = isBound ? -1 : 1;
         } else if (withCurve) {
-            o["sampler"] = isBound ? -1 : (processType == 85 ? 1 : 2);
-            for (const char* k : { "X_Inc_Depth", "Y_Dec", "Z_Field", "SDec",
-                                   "sX_Alpha95_sDepth", "sY", "sZ_sF" })
-                if (e.contains(k)) o[k] = e.value(k).toDouble();
+            // test_curveIDF.chr (projet I, D, F qui fonctionne) : sampler 1 pour les Events comme pour la borne, et les
+            // sept champs de mesure toujours écrits (SDec et sY compris).
+            o["sampler"] = kEventSampler;
+            const QJsonObject m = curveMeasures(e);
+            for (const CurveKey& k : kCurveKeys) o[k.chrKey] = m.value(k.chrKey).toDouble(0.0);
+            // Composantes demandées par le type de courbe (table du schéma) ; magnétisme : erreurs α95 et σF.
+            const bool magnetic = processType != 85 && processType != 50;
+            const bool useX = processType != 68 && processType != 70;
+            const bool useY = processType == 50 || processType == 51 || processType == 68 || processType == 83 || processType == 86;
+            const bool useZ = processType == 51 || processType == 70 || processType == 75 || processType == 86;
+            QStringList missing, missingErr;
+            if (useX && !m.contains("X_Inc_Depth")) missing << (magnetic ? QStringLiteral("inc") : QStringLiteral("X_Inc_Depth"));
+            if (useY && !m.contains("Y_Dec"))       missing << (magnetic ? QStringLiteral("dec") : QStringLiteral("Y_Dec"));
+            if (useZ && !m.contains("Z_Field"))     missing << QStringLiteral("field");
+            if (magnetic && (useX || useY) && m.value("sX_Alpha95_sDepth").toDouble(0.0) <= 0) missingErr << QStringLiteral("alpha95");
+            if (useZ && m.value("sZ_sF").toDouble(0.0) <= 0) missingErr << QStringLiteral("error_f");
+            if (!missing.isEmpty())
+                R.errors << QStringLiteral("Courbe « %1 » : l'événement « %2 » n'a pas %3. En mode courbe, chaque Event porte ses mesures "
+                                           "sur l'événement (pas dans une date) : \"inc\", \"dec\", \"alpha95\" (degrés), \"field\", "
+                                           "\"error_f\" (µT).").arg(curveName, name, missing.join(QStringLiteral(", ")));
+            if (!missingErr.isEmpty())
+                R.errors << QStringLiteral("Courbe « %1 » : l'événement « %2 » n'a pas d'erreur %3 (une erreur nulle n'est pas possible) : "
+                                           "demandez-la si le texte ne la donne pas.").arg(curveName, name, missingErr.join(QStringLiteral(", ")));
+            if (!magnetic && useX && m.value("sX_Alpha95_sDepth").toDouble(0.0) <= 0)
+                R.warnings << QStringLiteral("Courbe « %1 » : pas d'erreur sur X pour « %2 » (0 utilisé).").arg(curveName, name);
         }
         events.append(o);
     }
@@ -838,8 +1120,12 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
                                 const QString& what) {
         QJsonArray out;
         int cid = 1;
+        const bool forPhases = &ids == &phaseId;
         QVector<QPair<QString, QString>> pairs;          // (plus ancien, plus récent)
+        QHash<QString, Hiatus> hiatusOfPair;             // « ancien\nrécent » -> hiatus (contraintes de phases)
+        Hiatus current;                                  // hiatus de l'élément de liste en cours
         auto add = [&](const QString& olderName, const QString& youngerName, const QString& shown) {
+            if (current.type != 0) hiatusOfPair.insert(olderName + QLatin1Char('\n') + youngerName, current);
             if (!ids.contains(olderName) || !ids.contains(youngerName)) {
                 R.errors << QStringLiteral("Contrainte %1 « %2 » : nom inconnu (il ne correspond à aucun élément du modèle).").arg(what, shown);
                 return;
@@ -858,6 +1144,19 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
                                        "antérieur / postérieur, en dessous / au-dessus, précède / succède).").arg(what, shown);
         };
         for (const QJsonValue& v : list) {
+            // Hiatus : clés de l'objet, ou objet en dernier élément d'une liste (["A", "avant", "B", {"hiatus": 50}]).
+            current = Hiatus();
+            QJsonObject hobj = v.isObject() ? v.toObject() : QJsonObject();
+            QJsonArray arrIn = v.toArray();
+            if (v.isArray() && !arrIn.isEmpty() && arrIn.last().isObject()) { hobj = arrIn.last().toObject(); arrIn.removeLast(); }
+            if (!hobj.isEmpty()) {
+                current = hiatusOf(hobj);
+                if (!current.error.isEmpty()) { R.errors << QStringLiteral("Contrainte %1 : %2").arg(what, current.error); current = Hiatus(); }
+                else if (current.type != 0 && !forPhases) {
+                    R.warnings << QStringLiteral("Hiatus ignoré sur une contrainte %1 : ChronoModel ne le permet qu'entre des phases.").arg(what);
+                    current = Hiatus();
+                }
+            }
             if (v.isObject()) {
                 const QJsonObject o = v.toObject();
                 auto str = [&](std::initializer_list<const char*> keys) {
@@ -875,7 +1174,7 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
                 if (ord > 0) add(a, b, shown); else add(b, a, shown);
                 continue;
             }
-            const QJsonArray arr = v.toArray();
+            const QJsonArray arr = arrIn;
             QStringList names;
             for (const QJsonValue& x : arr) names << x.toString().trimmed();
             const QString shown = names.join(" → ");
@@ -915,27 +1214,57 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
             c["id"] = cid++;
             c["bwd_id"] = ids[kBwdIsOlder ? pr.first : pr.second];
             c["fwd_id"] = ids[kBwdIsOlder ? pr.second : pr.first];
+            if (forPhases) {         // champs écrits par ChronoModel (PhaseConstraint::toJson), valeurs par défaut 0, 1, 0, 1
+                const Hiatus h = hiatusOfPair.value(pr.first + QLatin1Char('\n') + pr.second);
+                c["gamma_type"] = h.type;
+                c["gamma_fixed"] = h.fixed;
+                c["gamma_min"] = h.min;
+                c["gamma_max"] = h.max;
+            }
             out.append(c);
         }
         return out;
     };
     QJsonArray evConsSpec = spec.value("event_constraints").toArray();
-    // Courbe âge-profondeur sans contrainte donnée : loi de superposition, du plus profond (plus ancien) au moins profond.
+    // Courbe âge-profondeur sans contrainte donnée : loi de superposition, de la profondeur la plus basse (Event le plus
+    // ancien pour ChronoModel) à la plus haute.
     if (ageDepth && evConsSpec.isEmpty()) {
         QVector<QPair<double, QString>> byDepth;
         for (const QJsonValue& v : std::as_const(events)) {
             const QJsonObject o = v.toObject();
-            if (o.contains("X_Inc_Depth")) byDepth.append({ -o.value("X_Inc_Depth").toDouble(), o.value("name").toString() });
+            if (o.contains("X_Inc_Depth")) byDepth.append({ o.value("X_Inc_Depth").toDouble(), o.value("name").toString() });
         }
-        std::stable_sort(byDepth.begin(), byDepth.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::stable_sort(byDepth.begin(), byDepth.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
         QJsonArray seq;
         for (const auto& pr : std::as_const(byDepth)) seq.append(pr.second);
         if (seq.size() >= 2) {
             evConsSpec.append(seq);
-            R.warnings << QStringLiteral("Courbe âge-profondeur : contraintes ajoutées dans l'ordre des profondeurs (le plus profond est le plus ancien).");
+            R.warnings << QStringLiteral("Courbe âge-profondeur : contraintes ajoutées dans l'ordre des profondeurs (la plus basse est l'Event le plus ancien).");
         }
     }
     const QJsonArray evCons = buildConstraints(evConsSpec, eventId, "d'événements");
+    // Courbe âge-profondeur avec contraintes données : chaque contrainte doit suivre les profondeurs (valeur centrale
+    // seulement, sans l'erreur de profondeur) : l'Event le plus ancien est le plus profond. Avertissement, pas une erreur
+    // (perturbation, remaniement possibles). Une inversion de DATATIONS n'est pas contrôlée ici : ChronoModel la traite.
+    if (ageDepth && !spec.value("event_constraints").toArray().isEmpty()) {
+        QHash<int, QPair<QString, double>> byId;          // id -> nom, profondeur de ChronoModel (X_Inc_Depth)
+        for (const QJsonValue& v : std::as_const(events)) {
+            const QJsonObject o = v.toObject();
+            if (o.contains("X_Inc_Depth")) byId.insert(o.value("id").toInt(), { o.value("name").toString(), o.value("X_Inc_Depth").toDouble() });
+        }
+        for (const QJsonValue& v : evCons) {
+            const QJsonObject c = v.toObject();
+            const int older = c.value(kBwdIsOlder ? "bwd_id" : "fwd_id").toInt(), younger = c.value(kBwdIsOlder ? "fwd_id" : "bwd_id").toInt();
+            if (!byId.contains(older) || !byId.contains(younger)) continue;
+            const auto& o = byId[older];
+            const auto& y = byId[younger];
+            if (o.second > y.second)
+                R.warnings << QStringLiteral("Courbe âge-profondeur : la contrainte « %1 » plus ancien que « %2 » contredit les profondeurs "
+                                             "(%3 au-dessus de %4 dans ChronoModel) : l'Event le plus ancien devrait avoir la profondeur la "
+                                             "plus basse. Vérifiez la contrainte ou les profondeurs.")
+                                  .arg(o.first, y.first, QString::number(o.second), QString::number(y.second));
+        }
+    }
     const QJsonArray phCons = buildConstraints(spec.value("phase_constraints").toArray(), phaseId, "de phases");
 
     // Événements en diagramme stratigraphique (le plus récent en haut).
@@ -945,7 +1274,11 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
     layoutEvents(phases, phCons);
 
     // ---------- Paramètres ----------
+    // Période et pas écrits par le modèle d'IA à la racine du bloc (prompt réel du 13/11/2026 : "tmin", "tmax", "step"
+    // hors de "settings") : repris s'ils manquent dans "settings".
     QJsonObject sIn = spec.value("settings").toObject();
+    for (const char* k : { "tmin", "tmax", "step" })
+        if (!sIn.contains(k) && spec.contains(k)) sIn[k] = spec.value(k);
     int tmin, tmax, step;
     if (sIn.contains("tmin") && sIn.contains("tmax")) {
         tmin = static_cast<int>(std::lround(sIn.value("tmin").toDouble()));
@@ -981,21 +1314,23 @@ ChrResult ChrBuilder::build(const QJsonObject& specIn)
         { "num_burn", 1000 }, { "num_iter", 100000 }, { "num_proc", kChains },
         { "seeds", seeds }, { "thinning_interval", 10 }
     };
-    const QJsonObject mIn = spec.value("mcmc").toObject();
+    // Réglages MCMC écrits dans "settings" (prompt réel Teilleul 2 du 13/11/2026) : repris s'il n'y a pas de "mcmc" à la racine.
+    const QJsonObject mIn = spec.contains("mcmc") ? spec.value("mcmc").toObject() : spec.value("settings").toObject().value("mcmc").toObject();
     for (auto it = mIn.begin(); it != mIn.end(); ++it)
         if (mcmc.contains(it.key())) mcmc[it.key()] = it.value();
 
     // Sans courbe (process_type 78), ChronoModel écrit alpha 0, speed_threshold 0, use_err_mesure vrai, variance_fixed 1.
+    // Avec une courbe : réglages de test_curveIDF.chr (projet I, D, F qui fonctionne, 12/11/2026) : lissage bayésien,
+    // variance individuelle bayésienne, erreurs de mesure utilisées, alpha 0, speed_threshold 0, variance_fixed 0.
     QJsonObject curve{
-        { "alpha", withCurve ? 1.0 : 0.0 }, { "coeff_lissage_type", 66 }, { "process_type", processType },
-        { "speed_threshold", withCurve ? 1.0 : 0.0 }, { "time_type", 66 }, { "use_err_mesure", !withCurve },
-        { "variance_fixed", 1.0 }, { "variance_type", 66 }
+        { "alpha", 0.0 }, { "coeff_lissage_type", 66 }, { "process_type", processType },
+        { "speed_threshold", 0.0 }, { "time_type", 66 }, { "use_err_mesure", true },
+        { "variance_fixed", withCurve ? 0.0 : 1.0 }, { "variance_type", 66 }
     };
+    if (!withCurve) curve["variance_individual"] = true;      // présent sans courbe (test_unif_span.chr, 13/11/2026)
     if (ageDepth)            // réglages de teilleulc2.chr (variance globale « G », erreurs de mesure utilisées)
         curve = QJsonObject{ { "alpha", 0.0 }, { "coeff_lissage_type", 66 }, { "process_type", 80 }, { "speed_threshold", 0.0 },
                              { "time_type", 66 }, { "use_err_mesure", true }, { "variance_fixed", 1.0 }, { "variance_type", 71 } };
-    else if (withCurve)
-        R.warnings << QStringLiteral("Paramètres de courbe (alpha, speed_threshold, variance_fixed) : valeurs par défaut arbitraires.");
 
     QJsonObject root;
     root["app_version"] = "4.0.0";
@@ -1063,9 +1398,54 @@ QString foldText(const QString& s)
 
 } // namespace
 
+// Noms techniques (champs du bloc chronomodel, réglages MCMC, outils de calcul) remplacés par des mots courants dans le
+// texte montré à l'utilisateur (12/11/2026, Philippe : « event_constraints » recopié d'une fiche dans une réponse).
+QString ChrBuilder::humanizeNames(const QString& md)
+{
+    static const QVector<QPair<QString, QString>> names = {
+        { "event_constraints", "ordre entre les événements" }, { "events_constraints", "ordre entre les événements" },
+        { "phase_constraints", "ordre entre les phases" }, { "phases_constraints", "ordre entre les phases" },
+        { "known_fixed", "année de la borne" }, { "ref_year", "année de mesure" }, { "delta_r_error", "erreur sur ΔR" },
+        { "delta_r", "ΔR" }, { "alpha95", "α95" }, { "error_f", "erreur sur l'intensité" }, { "depth_error", "erreur de profondeur" },
+        { "num_iter", "nombre d'itérations" }, { "num_burn", "itérations de chauffe" }, { "num_proc", "nombre de chaînes" },
+        { "thinning_interval", "intervalle d'échantillonnage" }, { "anneal_recurrence", "recuit" }, { "max_adapt", "adaptation" },
+        { "tmin", "début de la période d'étude" }, { "tmax", "fin de la période d'étude" }, { "wiggle", "décalage" },
+        { "calibrer_radiocarbone", "calibration radiocarbone" }, { "calibrer_f14c", "calibration F14C" },
+        { "dater_luminescence", "datation par luminescence" }, { "densite_gauss", "date gaussienne" },
+        { "densite_uniforme", "date uniforme" }, { "densite_tabulee", "densité tabulée" },
+        { "dater_archeomagnetisme", "datation archéomagnétique" }, { "calculer_evenement", "calcul d'un événement" },
+        { "combiner_dates", "combinaison de dates" }, { "comparer_dates", "comparaison de dates" },
+        { "analyser_traces", "calcul sur les traces" }, { "courbe_chronomodel", "calcul sur la courbe" },
+        { "calibration_inverse", "calibration inverse" }, { "creer_densite", "création d'une densité" },
+        { "courbes_disponibles", "liste des courbes" } };
+    static const QVector<QPair<QRegularExpression, QString>> res = [] {
+        QVector<QPair<QRegularExpression, QString>> v;
+        for (const auto& n : names)    // « `event_constraints` », « "event_constraints" », event_constraints
+            v.append({ QRegularExpression(QStringLiteral("[`\"]?\\b%1\\b[`\"]?").arg(QRegularExpression::escape(n.first))), n.second });
+        // « bloc calcul », « bloc « chronomodel » »
+        v.append({ QRegularExpression(QStringLiteral("\\bbloc (?:de code )?(?:«\\s*|`|\")?calcul(?:\\s*»|`|\")?"), QRegularExpression::CaseInsensitiveOption),
+                   QStringLiteral("demande de calcul") });
+        v.append({ QRegularExpression(QStringLiteral("\\bbloc (?:de code )?(?:«\\s*|`|\")?chronomodel(?:\\s*»|`|\")?"), QRegularExpression::CaseInsensitiveOption),
+                   QStringLiteral("modèle") });
+        return v;
+    }();
+    // Les blocs de code (```…```) restent tels quels.
+    static const QRegularExpression fence(QStringLiteral("^[ \\t]*```.*?^[ \\t]*```[^\\n]*$"),
+                                          QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption);
+    QString out;
+    qsizetype pos = 0;
+    auto fix = [&](QString t) { for (const auto& r : res) t.replace(r.first, r.second); return t; };
+    for (auto it = fence.globalMatch(md); it.hasNext();) {
+        const auto m = it.next();
+        out += fix(md.mid(pos, m.capturedStart() - pos)) + m.captured(0);
+        pos = m.capturedEnd();
+    }
+    return out + fix(md.mid(pos));
+}
+
 QString ChrBuilder::displayMarkdown(const QString& md, bool showJson)
 {
-    static const QRegularExpression block("^```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^```[ \\t]*$",
+    static const QRegularExpression block("^[ \\t]*```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^[ \\t]*```[ \\t]*$",
                                           QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption |
                                           QRegularExpression::CaseInsensitiveOption);
     QString out;
@@ -1084,7 +1464,7 @@ QString ChrBuilder::displayMarkdown(const QString& md, bool showJson)
     }
     QString rest = md.mid(pos);
     // Bloc de modèle encore ouvert (réponse en cours d'écriture, ou coupée) : rien d'incomplet à l'écran.
-    static const QRegularExpression open("^```[ \\t]*chronomodel[ \\t]*$",
+    static const QRegularExpression open("^[ \\t]*```[ \\t]*chronomodel[ \\t]*$",
                                          QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
     if (!showJson)
         if (const auto mo = open.match(rest); mo.hasMatch())
@@ -1094,7 +1474,7 @@ QString ChrBuilder::displayMarkdown(const QString& md, bool showJson)
 
 QString ChrBuilder::stripModelBlocks(const QString& md)
 {
-    static const QRegularExpression block("^```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^```[ \\t]*$\\n?",
+    static const QRegularExpression block("^[ \\t]*```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^[ \\t]*```[ \\t]*$\\n?",
                                           QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption |
                                           QRegularExpression::CaseInsensitiveOption);
     // Ligne d'annonce du bloc, juste avant lui : « **Modèle ChronoModel** (à exporter) : ».
@@ -1116,7 +1496,7 @@ QString ChrBuilder::stripModelBlocks(const QString& md)
     }
     if (pos == 0) {
         // Bloc encore ouvert (réponse en cours d'écriture) : rien ne s'affiche à partir de lui.
-        static const QRegularExpression open("^```[ \\t]*chronomodel[ \\t]*$",
+        static const QRegularExpression open("^[ \\t]*```[ \\t]*chronomodel[ \\t]*$",
                                              QRegularExpression::MultilineOption | QRegularExpression::CaseInsensitiveOption);
         const auto mo = open.match(md);
         if (!mo.hasMatch()) return md;
@@ -1135,11 +1515,11 @@ bool ChrBuilder::asksForJson(const QString& question)
     return re.match(foldText(question)).hasMatch();
 }
 
-bool ChrBuilder::extractSpec(const QString& md, QJsonObject& spec, QString* err)
+bool ChrBuilder::extractSpec(const QString& md, QJsonObject& spec, QString* err, QStringList* notes)
 {
     // Les clôtures ``` doivent être en début de ligne (une mention « ```chronomodel » au milieu d'une
     // phrase ne doit pas être prise pour un bloc).
-    static const QRegularExpression re("^```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^```",
+    static const QRegularExpression re("^[ \\t]*```[ \\t]*(chronomodel|json)[ \\t]*\\n(.*?)^[ \\t]*```",
                                        QRegularExpression::DotMatchesEverythingOption |
                                        QRegularExpression::MultilineOption |
                                        QRegularExpression::CaseInsensitiveOption);
@@ -1148,13 +1528,14 @@ bool ChrBuilder::extractSpec(const QString& md, QJsonObject& spec, QString* err)
     while (it.hasNext()) {
         const auto m = it.next();
         QJsonParseError pe;
-        const QJsonDocument d = QJsonDocument::fromJson(m.captured(2).toUtf8(), &pe);
+        const QByteArray raw = m.captured(2).toUtf8();
+        const QJsonDocument d = QJsonDocument::fromJson(raw, &pe);
         if (pe.error != QJsonParseError::NoError) {
             lastError = QStringLiteral("JSON invalide : %1 (position %2)").arg(pe.errorString()).arg(pe.offset);
             continue;
         }
         if (d.isObject() && d.object().contains("events")) {
-            spec = d.object();
+            spec = mergedSpec(raw, d.object(), notes);
             return true;
         }
     }
@@ -1185,6 +1566,18 @@ QStringList ChrBuilder::crossCheck(const QJsonObject& spec, const QString& sourc
     QVector<Pair> specPairs;
     QStringList specNames;
     QStringList unknownValues;
+    // Durées de phases et hiatus : nombres pris au texte, comme les dates.
+    for (const QJsonValue& pv : spec.value("phases").toArray()) {
+        const PhaseDuration du = phaseDuration(pv.toObject());
+        if (du.type == 1 && !known(du.max))
+            unknownValues << QStringLiteral("%1 (durée de la phase « %2 »)").arg(fmt(du.max), pv.toObject().value("name").toString());
+    }
+    for (const QJsonValue& cv : spec.value("phase_constraints").toArray()) {
+        const QJsonObject ho = cv.isObject() ? cv.toObject() : (cv.toArray().isEmpty() ? QJsonObject() : cv.toArray().last().toObject());
+        const Hiatus h = hiatusOf(ho);
+        for (double v : h.type == 1 ? QVector<double>{ h.fixed } : h.type == 2 ? QVector<double>{ h.min, h.max } : QVector<double>{})
+            if (v != 0.0 && !known(v)) unknownValues << QStringLiteral("%1 (hiatus entre phases)").arg(fmt(v));
+    }
     for (const QJsonValue& ev : spec.value("events").toArray()) {
         const QJsonObject e = ev.toObject();
         const QString en = e.value("name").toString();
@@ -1193,6 +1586,13 @@ QStringList ChrBuilder::crossCheck(const QJsonObject& spec, const QString& sourc
         for (const char* k : { "depth", "depth_error" })
             if (e.value(k).isDouble() && !known(e.value(k).toDouble()))
                 unknownValues << QStringLiteral("%1 (%2 de « %3 »)").arg(fmt(e.value(k).toDouble()), QString::fromLatin1(k), en);
+        // Mesures de courbe sur l'événement (I, D, F, α95, σF) : contrôlées comme les valeurs des dates.
+        const QJsonObject cm = curveMeasures(e);
+        for (auto it = cm.begin(); it != cm.end(); ++it)
+            if (it.value().toDouble() != 0.0 && !known(it.value().toDouble()))
+                unknownValues << QStringLiteral("%1 (%2 de « %3 »)").arg(fmt(it.value().toDouble()), it.key(), en);
+        if (cm.contains("Z_Field") && cm.contains("sZ_sF"))
+            specPairs << Pair{ cm.value("Z_Field").toDouble(), cm.value("sZ_sF").toDouble() };
         for (const QJsonValue& dv : eventDates(e)) {
             const QJsonObject d = dv.toObject();
             for (const char* k : valueKeys)
@@ -1202,12 +1602,31 @@ QStringList ChrBuilder::crossCheck(const QJsonObject& spec, const QString& sourc
             if (!dn.isEmpty()) {
                 specNames << text::fold(dn);
                 if (!src.contains(text::fold(dn)))
-                    out << QStringLiteral("Référence « %1 » (événement « %2 ») absente de votre texte : inventée par le modèle ?").arg(dn, en);
+                    out << QStringLiteral("Référence « %1 » (événement « %2 ») absente de votre texte : interprétée par le modèle ?").arg(dn, en);
             }
             const double v = d.value("age").toDouble(d.value("f14c").toDouble(d.value("field").toDouble(std::nan(""))));
             const double er = d.value("error").toDouble(d.value("error_f").toDouble(std::nan("")));
             if (std::isfinite(v) && std::isfinite(er)) specPairs << Pair{ v, er };
         }
+    }
+    // Même référence de laboratoire sur deux dates (prompt réel du 13/11/2026 : « Ly-12345 », donnée pour US6, recopiée
+    // par le modèle d'IA sur une date de US10).
+    {
+        QHash<QString, QStringList> owners;
+        QHash<QString, QString> shown;
+        for (const QJsonValue& ev : spec.value("events").toArray())
+            for (const QJsonValue& dv : eventDates(ev.toObject())) {
+                const QString dn = dv.toObject().value("name").toString().trimmed();
+                if (dn.isEmpty()) continue;
+                owners[text::fold(dn)] << ev.toObject().value("name").toString();
+                shown.insert(text::fold(dn), dn);
+            }
+        for (auto it = owners.cbegin(); it != owners.cend(); ++it)
+            if (it.value().size() > 1 && src.count(it.key()) < it.value().size())
+                out << QStringLiteral("Référence « %1 » donnée à %2 dates (%3) alors que votre texte la cite %4 fois : "
+                                      "mal attribuée par le modèle d'IA ?")
+                           .arg(shown.value(it.key())).arg(it.value().size()).arg(it.value().join(QStringLiteral(", ")))
+                           .arg(src.count(it.key()));
     }
     if (!unknownValues.isEmpty())
         out << QStringLiteral("Valeur(s) absente(s) de votre texte : %1. Inventée(s) ou recopiée(s) d'un exemple par le modèle ?")
@@ -1232,6 +1651,25 @@ QStringList ChrBuilder::crossCheck(const QJsonObject& spec, const QString& sourc
     return out;
 }
 
+QString ChrBuilder::durationText(const QJsonObject& phase)
+{
+    switch (phase.value("tau_type").toInt(0)) {
+    case 1:  return QStringLiteral("Durée ≤ %1").arg(QString::number(phase.value("tau_fixed").toDouble(), 'g', 10));
+    case 2:  return QStringLiteral("Span uniforme");
+    default: return QString();
+    }
+}
+
+QString ChrBuilder::hiatusText(const QJsonObject& c)
+{
+    auto n = [](double v) { return QString::number(v, 'g', 10); };
+    switch (c.value("gamma_type").toInt(0)) {
+    case 1:  return QStringLiteral("hiatus ≥ %1").arg(n(c.value("gamma_fixed").toDouble()));
+    case 2:  return QStringLiteral("hiatus min ∈ [%1 ; %2]").arg(n(c.value("gamma_min").toDouble()), n(c.value("gamma_max").toDouble()));
+    default: return QString();
+    }
+}
+
 QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
 {
     QString s;
@@ -1250,7 +1688,11 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
     const QJsonArray phases = chr.value("phases").toArray();
     for (const QJsonValue& p : phases) phaseName[p.toObject().value("id").toInt()] = p.toObject().value("name").toString();
     s += QStringLiteral("Phases (%1) : ").arg(phases.size());
-    QStringList pn; for (auto it = phaseName.begin(); it != phaseName.end(); ++it) pn << it.value();
+    QStringList pn;
+    for (const QJsonValue& p : phases) {
+        const QString du = durationText(p.toObject());
+        pn << p.toObject().value("name").toString() + (du.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(du));
+    }
     s += pn.join(", ") + "\n";
 
     const QJsonArray events = chr.value("events").toArray();
@@ -1290,6 +1732,17 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
             if (const QString dn = d.value("name").toString().trimmed(); !dn.isEmpty()) ds.last() = QStringLiteral("« %1 » ").arg(dn) + ds.last();
         }
         if (!ds.isEmpty()) s += " : " + ds.join("; ");
+        // Mesures de courbe I, D, F (modes archéomagnétiques, sauf âge-profondeur qui a sa propre lecture).
+        const int cpt = chr.value("curve").toObject().value("process_type").toInt(78);
+        if (cpt == 86 || cpt == 83 || cpt == 75 || cpt == 73 || cpt == 68 || cpt == 70 || cpt == 51) {
+            QStringList mv;
+            if (cpt != 68 && cpt != 70) mv << QStringLiteral("I=%1").arg(e.value("X_Inc_Depth").toDouble());
+            if (cpt == 86 || cpt == 83 || cpt == 68 || cpt == 51) mv << QStringLiteral("D=%1").arg(e.value("Y_Dec").toDouble());
+            if (cpt != 70) mv << QStringLiteral("α95=%1").arg(e.value("sX_Alpha95_sDepth").toDouble());
+            if (cpt == 86 || cpt == 75 || cpt == 70 || cpt == 51)
+                mv << QStringLiteral("F=%1±%2").arg(e.value("Z_Field").toDouble()).arg(e.value("sZ_sF").toDouble());
+            s += QStringLiteral(" | mesure %1").arg(mv.join(", "));
+        }
         s += "\n";
     }
     // Contraintes en clair (plus ancien → plus récent), pour vérifier le sens.
@@ -1300,7 +1753,9 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
         for (const QJsonValue& v : list) {
             const QJsonObject c = v.toObject();
             const int older = c.value(kBwdIsOlder ? "bwd_id" : "fwd_id").toInt(), younger = c.value(kBwdIsOlder ? "fwd_id" : "bwd_id").toInt();
-            l << QStringLiteral("%1 → %2").arg(names.value(older, QString::number(older)), names.value(younger, QString::number(younger)));
+            const QString hi = hiatusText(c);
+            l << QStringLiteral("%1 → %2").arg(names.value(older, QString::number(older)), names.value(younger, QString::number(younger)))
+                     + (hi.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(hi));
         }
         return l;
     };

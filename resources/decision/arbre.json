@@ -1,0 +1,463 @@
+{
+  "version": 1,
+  "description": "Arbre de décision de SeldonH : questions fermées posées au modèle de langage pour aiguiller une demande vers les outils et les fiches. Chaque choix mène à un autre nœud (« suite ») ou à une feuille (« feuille » : outils, fiches, action). Les identifiants de choix sont en minuscules ASCII : le modèle local ne peut répondre qu'avec eux (grammaire). Un choix qui mène à un autre nœud peut apporter des éléments (« ajoute » : fiches, paramètres comme le type de courbe), cumulés jusqu'à la feuille.",
+  "racine": "intention",
+  "noeuds": {
+    "intention": {
+      "titre": "demande",
+      "question": "Que demande l'utilisateur ?",
+      "choix": [
+        {
+          "id": "dater",
+          "libelle": "dater une ou plusieurs mesures (radiocarbone, F14C, luminescence, archéomagnétisme, gaussienne, uniforme, densité tabulée)",
+          "suite": "methode"
+        },
+        {
+          "id": "relation",
+          "libelle": "comparer ou relier des dates : laquelle est la plus ancienne, durée, date entre deux autres, appartenance à un intervalle, corrélation",
+          "suite": "relation_source"
+        },
+        {
+          "id": "evenement",
+          "libelle": "estimer la date d'un événement à partir de plusieurs datations, ou combiner des datations d'une même date",
+          "suite": "evenement"
+        },
+        {
+          "id": "modele",
+          "libelle": "construire ou modifier un modèle ChronoModel (fichier .chr)",
+          "suite": "modele_courbe"
+        },
+        {
+          "id": "resultats",
+          "libelle": "lire ou interpréter des résultats de ChronoModel (journal, traces MCMC, courbe estimée)",
+          "suite": "resultats"
+        },
+        {
+          "id": "tableau",
+          "libelle": "agir sur un tableau de datations joint ou collé (extraire, dater, regrouper)",
+          "feuille": {
+            "outils": [
+              "tableau"
+            ],
+            "fiches": [
+              "22_tableaux"
+            ]
+          }
+        },
+        {
+          "id": "inverse",
+          "libelle": "mesure attendue pour une date connue (calibration inverse)",
+          "feuille": {
+            "outils": [
+              "calibration_inverse"
+            ],
+            "fiches": [
+              "20_combinaison_traces_inverse"
+            ]
+          }
+        },
+        {
+          "id": "densite",
+          "libelle": "créer un fichier de densité tabulée pour le plugin Density de ChronoModel",
+          "feuille": {
+            "outils": [
+              "creer_densite"
+            ],
+            "fiches": [
+              "18_date_densite"
+            ]
+          }
+        },
+        {
+          "id": "courbes",
+          "libelle": "connaître les courbes de référence disponibles",
+          "feuille": {
+            "outils": [
+              "courbes_disponibles"
+            ]
+          }
+        },
+        {
+          "id": "aide",
+          "libelle": "savoir comment utiliser SeldonH",
+          "feuille": {
+            "action": "aide",
+            "fiches": [
+              "10_aide_utilisation"
+            ]
+          }
+        },
+        {
+          "id": "autre",
+          "libelle": "autre chose (question générale, explication)",
+          "feuille": {
+            "action": "libre"
+          }
+        }
+      ]
+    },
+    "methode": {
+      "titre": "méthode",
+      "question": "Quelle méthode de datation ?",
+      "choix": [
+        {
+          "id": "c14",
+          "libelle": "radiocarbone, âge 14C en BP",
+          "feuille": {
+            "outils": [
+              "calibrer_radiocarbone"
+            ],
+            "fiches": [
+              "05_radiocarbone",
+              "14_date_c14"
+            ]
+          }
+        },
+        {
+          "id": "f14c",
+          "libelle": "fraction moderne F14C (après 1950)",
+          "feuille": {
+            "outils": [
+              "calibrer_f14c"
+            ],
+            "fiches": [
+              "15_date_f14c"
+            ]
+          }
+        },
+        {
+          "id": "luminescence",
+          "libelle": "luminescence TL ou OSL",
+          "feuille": {
+            "outils": [
+              "dater_luminescence"
+            ],
+            "fiches": [
+              "16_date_tl"
+            ]
+          }
+        },
+        {
+          "id": "archeomagnetisme",
+          "libelle": "archéomagnétisme : inclinaison, déclinaison, intensité",
+          "feuille": {
+            "outils": [
+              "dater_archeomagnetisme"
+            ],
+            "fiches": [
+              "06_archeomagnetisme",
+              "17_date_am"
+            ]
+          }
+        },
+        {
+          "id": "gaussienne",
+          "libelle": "date gaussienne (valeur ± écart-type), éventuellement sur une courbe de référence",
+          "feuille": {
+            "outils": [
+              "densite_gauss"
+            ],
+            "fiches": [
+              "08_dates_autres_methodes"
+            ]
+          }
+        },
+        {
+          "id": "uniforme",
+          "libelle": "intervalle uniforme (terminus post quem, ante quem, typologie, monnaie)",
+          "feuille": {
+            "outils": [
+              "densite_uniforme"
+            ],
+            "fiches": [
+              "08_dates_autres_methodes"
+            ]
+          }
+        },
+        {
+          "id": "tabulee",
+          "libelle": "densité tabulée (fichier du plugin Density)",
+          "feuille": {
+            "outils": [
+              "densite_tabulee"
+            ],
+            "fiches": [
+              "18_date_densite"
+            ]
+          }
+        }
+      ]
+    },
+    "relation_source": {
+      "titre": "dates à relier",
+      "question": "Les dates à relier sont-elles des datations indépendantes, ou des Events d'un calcul ChronoModel (traces jointes) ?",
+      "choix": [
+        {
+          "id": "independantes",
+          "libelle": "datations indépendantes écrites dans la question",
+          "feuille": {
+            "outils": [
+              "comparer_dates"
+            ],
+            "fiches": [
+              "21_ordre_des_dates"
+            ]
+          }
+        },
+        {
+          "id": "traces",
+          "libelle": "Events ou phases des traces MCMC de ChronoModel",
+          "feuille": {
+            "outils": [
+              "analyser_traces"
+            ],
+            "fiches": [
+              "20_combinaison_traces_inverse",
+              "21_ordre_des_dates"
+            ]
+          }
+        }
+      ]
+    },
+    "evenement": {
+      "titre": "événement ou combinaison",
+      "question": "S'agit-il d'un événement (plusieurs datations d'un même événement archéologique) ou de la combinaison de mesures d'une même date ?",
+      "choix": [
+        {
+          "id": "evenement",
+          "libelle": "événement estimé à partir de plusieurs datations (Event de ChronoModel)",
+          "feuille": {
+            "outils": [
+              "calculer_evenement"
+            ],
+            "fiches": [
+              "02_chronomodel_concepts"
+            ]
+          }
+        },
+        {
+          "id": "combinaison",
+          "libelle": "combinaison de mesures d'une même date (Combine de ChronoModel)",
+          "feuille": {
+            "outils": [
+              "combiner_dates"
+            ],
+            "fiches": [
+              "20_combinaison_traces_inverse"
+            ]
+          }
+        }
+      ]
+    },
+    "modele_courbe": {
+      "titre": "courbe",
+      "question": "Le modèle ChronoModel demandé décrit-il une courbe (mode courbe : âge-profondeur, variation d'une grandeur dans le temps, archéomagnétisme) ?",
+      "choix": [
+        {
+          "id": "non",
+          "libelle": "non : des Events (et éventuellement des phases)",
+          "suite": "modele_strati"
+        },
+        {
+          "id": "oui",
+          "libelle": "oui : une courbe",
+          "suite": "modele_type_courbe"
+        }
+      ]
+    },
+    "modele_type_courbe": {
+      "titre": "type de courbe",
+      "question": "Quel type de courbe ?",
+      "choix": [
+        {
+          "id": "profondeur",
+          "libelle": "âge-profondeur (carotte, niveaux, profondeurs)",
+          "ajoute": {
+            "courbe": "depth",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "13_chronomodel_courbe_age_profondeur"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "univariee",
+          "libelle": "une grandeur X en fonction du temps",
+          "ajoute": {
+            "courbe": "univariate",
+            "fiches": [
+              "03_chronomodel_creer_modele"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "bivariee",
+          "libelle": "deux grandeurs X et Y",
+          "ajoute": {
+            "courbe": "bivariate",
+            "fiches": [
+              "03_chronomodel_creer_modele"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "trivariee",
+          "libelle": "trois grandeurs X, Y et Z",
+          "ajoute": {
+            "courbe": "trivariate",
+            "fiches": [
+              "03_chronomodel_creer_modele"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "inclinaison",
+          "libelle": "archéomagnétisme : inclinaison seule (I)",
+          "ajoute": {
+            "courbe": "inclination",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "06_archeomagnetisme"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "declinaison",
+          "libelle": "archéomagnétisme : déclinaison seule (D)",
+          "ajoute": {
+            "courbe": "declination",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "06_archeomagnetisme"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "intensite",
+          "libelle": "archéomagnétisme : intensité seule (F)",
+          "ajoute": {
+            "courbe": "intensity",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "06_archeomagnetisme"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "inc_dec",
+          "libelle": "archéomagnétisme : inclinaison et déclinaison (I, D)",
+          "ajoute": {
+            "courbe": "spherical",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "06_archeomagnetisme"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "inc_int",
+          "libelle": "archéomagnétisme : inclinaison et intensité (I, F)",
+          "ajoute": {
+            "courbe": "unknown_dec",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "06_archeomagnetisme"
+            ]
+          },
+          "suite": "modele_strati"
+        },
+        {
+          "id": "inc_dec_int",
+          "libelle": "archéomagnétisme : inclinaison, déclinaison et intensité (I, D, F)",
+          "ajoute": {
+            "courbe": "vector",
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "06_archeomagnetisme"
+            ]
+          },
+          "suite": "modele_strati"
+        }
+      ]
+    },
+    "modele_strati": {
+      "titre": "stratigraphie",
+      "question": "Le texte donne-t-il un ordre entre des couches, des unités ou des Events (stratigraphie : au-dessus, au-dessous, recoupe, scelle) ?",
+      "choix": [
+        {
+          "id": "oui",
+          "libelle": "oui, un ordre stratigraphique",
+          "feuille": {
+            "action": "modele",
+            "strati": true,
+            "fiches": [
+              "03_chronomodel_creer_modele",
+              "24_contrainte_stratigraphique"
+            ]
+          }
+        },
+        {
+          "id": "non",
+          "libelle": "non",
+          "feuille": {
+            "action": "modele",
+            "fiches": [
+              "03_chronomodel_creer_modele"
+            ]
+          }
+        }
+      ]
+    },
+    "resultats": {
+      "titre": "résultats",
+      "question": "Quels résultats de ChronoModel ?",
+      "choix": [
+        {
+          "id": "journal",
+          "libelle": "le journal du calcul (convergence, statistiques, phases)",
+          "feuille": {
+            "action": "journal",
+            "fiches": [
+              "11_chronomodel_logs",
+              "12_chronomodel_logs_remedes",
+              "04_chronomodel_interpreter",
+              "19_chronomodel_phases_events"
+            ]
+          }
+        },
+        {
+          "id": "traces",
+          "libelle": "les traces MCMC (Chain_all_Events.csv, Chain_all_Phases.csv)",
+          "feuille": {
+            "outils": [
+              "analyser_traces"
+            ],
+            "fiches": [
+              "20_combinaison_traces_inverse"
+            ]
+          }
+        },
+        {
+          "id": "courbe",
+          "libelle": "une courbe estimée (Curve_X_Splines.csv, Curve_X_Map.csv)",
+          "feuille": {
+            "outils": [
+              "courbe_chronomodel"
+            ],
+            "fiches": [
+              "23_courbes_chronomodel"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

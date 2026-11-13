@@ -102,6 +102,8 @@ private:
     QWidget*        remoteModelRow_;
     QWidget*        remoteToolsRow_ = nullptr;
     bool            ready_ = false;     // constructeur terminé (tous les widgets existent)
+    int             visibleRowsKey_ = -1;   // lignes affichées lors du dernier ajustement de hauteur (voir fitHeight)
+    void fitHeight();
     QNetworkAccessManager* nam_;
     QHash<QString, remote::ModelLimits> remoteLimits_;   // relevées par « Lister les modèles »
     bool            optimizeAfterList_ = false;

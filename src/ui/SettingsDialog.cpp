@@ -358,8 +358,8 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     connect(localRadio_, &QRadioButton::toggled, this, &SettingsDialog::updateBackendRows);
     connect(remoteRadio_, &QRadioButton::toggled, this, &SettingsDialog::updateBackendRows);
     ready_ = true;
-    updateBackendRows();
-    resize(std::max(880, sizeHint().width()), sizeHint().height());
+    resize(std::max(880, sizeHint().width()), height());
+    updateBackendRows();          // ajuste aussi la hauteur à la largeur retenue (fitHeight)
 }
 
 void SettingsDialog::updateBackendRows()
@@ -375,6 +375,33 @@ void SettingsDialog::updateBackendRows()
     form_->setRowVisible(probeStatus_, remote && !probeStatus_->text().isEmpty());
     form_->setRowVisible(optimizeStatus_, !optimizeStatus_->text().isEmpty());
     thinking_->setEnabled(!remote);
+
+    // Hauteur recalculée seulement quand l'ensemble des lignes affichées change (passage local ↔ distant,
+    // apparition d'un message) : une hauteur choisie à la main par l'utilisateur est gardée sinon.
+    const int key = (remote ? 1 : 0)
+                  | (form_->isRowVisible(httpWarning_) ? 2 : 0)
+                  | (form_->isRowVisible(remoteStatus_) ? 4 : 0)
+                  | (form_->isRowVisible(probeStatus_) ? 8 : 0)
+                  | (form_->isRowVisible(optimizeStatus_) ? 16 : 0);
+    if (ready_ && key != visibleRowsKey_) {
+        visibleRowsKey_ = key;
+        fitHeight();
+    }
+}
+
+// Une fenêtre Qt grandit quand son contenu l'exige, mais ne rapetisse jamais d'elle-même : sans ce
+// réajustement, masquer les lignes du modèle distant laissait un grand vide sous le formulaire.
+// Les textes à retour à la ligne (avertissements) ont une hauteur qui dépend de la largeur : on la
+// calcule pour la largeur actuelle, que l'on ne modifie pas.
+void SettingsDialog::fitHeight()
+{
+    QLayout* lay = layout();
+    if (!lay) return;
+    lay->invalidate();
+    lay->activate();
+    const int w = width();
+    const int h = lay->hasHeightForWidth() ? lay->totalHeightForWidth(w) : lay->totalSizeHint().height();
+    resize(w, std::max(h, lay->totalMinimumSize().height()));
 }
 
 void SettingsDialog::updateHttpWarning()

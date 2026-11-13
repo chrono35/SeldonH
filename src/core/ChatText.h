@@ -73,10 +73,13 @@ inline std::string toolsSystemHint()
            "Si des fonctions (outils) te sont fournies dans cette conversation, appelle-les pour tout calcul de datation "
            "(calibration, intervalles HPD, archéomagnétisme…) au lieu d'écrire un bloc ```calcul : l'application exécute "
            "le calcul sur l'ordinateur de l'utilisateur, trace la courbe et te renvoie les valeurs exactes. N'invente aucun "
-           "paramètre : s'il manque une valeur (erreur, année de mesure, α95…), pose la question. Si un bloc "
+           "paramètre : s'il manque une valeur (erreur, année de mesure, α95…), pose la question. Passe les mesures telles que "
+           "l'utilisateur les a écrites : SeldonH refuse un appel dont une mesure ne figure pas dans ses messages. Si un bloc "
            "« [Résultat de calcul de SeldonH] » est déjà fourni dans le message, commente-le sans rappeler l'outil. "
            "Exception : si l'utilisateur demande de CRÉER un modèle ChronoModel, n'appelle aucun outil : les âges et mesures cités "
-           "sont les données du modèle ; réponds avec le bloc ```chronomodel (voir la fiche de création de modèle).";
+           "sont les données du modèle ; réponds avec le bloc ```chronomodel (voir la fiche de création de modèle). "
+           "Même exception quand des dates sont reliées par une contrainte stratigraphique (US, couches au-dessus / "
+           "au-dessous) : voir la fiche « Datation sous contrainte stratigraphique ».";
 }
 
 struct SplitText {

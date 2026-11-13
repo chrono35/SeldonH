@@ -82,6 +82,9 @@ struct SamplingParams {
     uint32_t seed            = 0xFFFFFFFFu;   // aléatoire
     int      maxTokens       = 1024;
     bool     enableThinking  = false;         // modèles "thinking" (Qwen3.5...)
+    // Grammaire GBNF (règle « root ») : la réponse est forcée dans ce langage, par exemple un identifiant parmi une liste
+    // fermée (arbre de décision, 12/11/2026). Vide : aucune contrainte. Modèle local seulement (le distant l'ignore).
+    std::string grammar;
 };
 
 struct GenStats {

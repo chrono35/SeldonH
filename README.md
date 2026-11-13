@@ -15,7 +15,8 @@ src/core/SecretStore.*          clé API rangée dans le trousseau du système (
 src/core/AutoTune.*             « Optimiser pour ce modèle » : contexte, longueur de réponse et budget des compétences calculés
                                 d'après le modèle, la mémoire et la vitesse mesurée
 src/skills/SkillManager.*       base de compétences (fiches Markdown) + sélection par mots-clés
-src/core/ChrBuilder.*           spécification JSON courte  ->  fichier .chr complet et valide
+src/core/ChrBuilder.*           spécification JSON courte  ->  fichier .chr complet et valide (+ crossCheck avec le texte de l'utilisateur)
+src/core/Provenance.*           provenance des nombres : mesures des calculs demandés par l'IA, nombres de ses réponses
 src/core/ConversationStore.*    historique : une conversation = un fichier JSON (tours pour la reprise + journal d'affichage), écriture atomique
 src/ui/HistoryPanel.*           volet « Historique » à gauche, repliable (liste, filtre, ouvrir / supprimer / tout effacer)
 src/methods/                    méthodes de datation portées de ChronoModel : UN DOSSIER PAR MÉTHODE
@@ -42,6 +43,34 @@ tests/                          tests unitaires (tst_core) et outil en ligne de 
      « Modèle ChronoModel prêt » + lien « Enregistrer le modèle (.chr) » si `ChrBuilder::build` réussit, sinon liste de ce
      qui manque (événement sans date, nom ou relation inconnus) ; le JSON n'est montré que sur demande explicite ;
    - ```` ```plot ```` : courbe -> onglet du panneau de droite.
+4. Avant d'exécuter un calcul demandé par le modèle et après chaque réponse, SeldonH vérifie la **provenance des nombres**
+   (voir « L'IA est un intermédiaire » ci-dessous).
+
+### L'IA est un intermédiaire : elle ne produit aucun résultat
+Principe : le modèle de langage comprend la question, choisit l'outil, prépare la spécification du modèle ChronoModel et
+explique ; **les valeurs viennent de l'utilisateur (mesures) ou des outils de SeldonH (résultats)**. Les consignes le
+disent (fiche `00_identite` : aucun calcul de tête ; `toolsSystemHint`), et le code le vérifie (`src/core/Provenance.*`,
+test `provenance`) :
+
+| contrôle | où | si le contrôle échoue |
+|---|---|---|
+| mesures d'une demande de calcul (âge, erreur, F14C, inc, dec, α95, intensité, `ref_year`, ΔR, année visée…) présentes dans le texte de l'utilisateur (questions, pièces jointes, tableau courant) | `MainWindow::sourcedCalcBlocks`, appelé par `runRequestedCalculations` (bloc `calcul`) et `onToolCalls` (outils) | calcul **non lancé** ; « ⚠ Calcul non lancé » à l'écran ; modèle distant : l'outil lui répond de demander la valeur (`provenance::blockedMessage`) |
+| bornes et paramètres (min / max, période d'étude, paramètres de loi, wiggle) présents dans ce texte | idem | calcul lancé, avertissement dans la fiche et dans le résultat envoyé au modèle |
+| nombres de la réponse (années et âges ≥ 100, décimaux, pourcentages ; hors blocs de code et références) présents dans ce que le modèle a reçu (message système, questions, fiches, résultats de SeldonH) | `finishAssistantMessage` → `provenance::unsourcedNumbers` | « ⚠ Nombre(s) de cette réponse… » sous la réponse |
+| valeurs, références et données d'un bloc `chronomodel` | `ChrBuilder::crossCheck` | « ⚠ Vérification du modèle par rapport à votre texte » |
+
+Formes dérivées acceptées : ka / Ma (× 10³, × 10⁶), N av. J.-C. → 1 − N, cal BP ↔ année (1950 − N), b2k, signe. Un bloc
+`calcul` écrit dans une réponse qui commente un calcul déjà fait n'est pas exécuté (un seul calcul par question) : l'écran
+le dit (« Calcul proposé par l'assistant, non lancé ») au lieu d'annoncer « Calcul confié à SeldonH ». Ce que les
+contrôles ne voient pas : le **choix de méthode** (un calcul inadapté fait avec les bonnes valeurs) ; le bandeau de la
+fiche, qui nomme le calcul réellement fait, sert à le repérer.
+
+### Datation sous contrainte stratigraphique
+« Au-dessus (US 1) 14C …, au fond (US 3) 14C …, je veux dater l'US 2 » : `MethodRunner::asksStratigraphicDating`
+(vocabulaire stratigraphique + au moins deux datations, sans pièce jointe ni traces). Les dates sont calibrées une à une
+avec un avertissement, les fiches 24, 03 et 21 sont imposées, et le modèle doit proposer le bloc `chronomodel` (un
+événement par US datée, contraintes du plus ancien au plus récent) au lieu d'un calcul direct, qui ignorerait l'ordre des
+couches. La couche intercalée se date ensuite sur les traces de ChronoModel (`relation`, op `between`).
 
 ### Réponses coupées
 Une réponse qui s'arrête avant sa fin naturelle est détectée (`GenStats::truncation`) : limite « Longueur max. d'une
@@ -70,7 +99,7 @@ Deux façons de déclencher un calcul :
    -500 et -400 »...) : l'application calcule seule, affiche une fiche (HPD 95 % et 68 %, médiane, mode), trace la
    densité dans le panneau de droite et transmet les valeurs exactes au modèle, qui les commente.
 2. **Le modèle demande un calcul** : l'application l'exécute puis relance le modèle avec le résultat. Les calculs sont
-   définis une seule fois (`src/methods/common/Tools.*` : 6 outils de calcul + `courbes_disponibles`) et exécutés dans
+   définis une seule fois (`src/methods/common/Tools.*` : 16 outils, dont `tableau` et `courbes_disponibles`) et exécutés dans
    tous les cas sur l'ordinateur de l'utilisateur, par les mêmes méthodes (`MethodRegistry`) :
    - **modèle distant** : appel d'outils natif de l'API Chat Completions (`tools` / `tool_calls`), jusqu'à
      `RemoteEngine::kMaxToolRounds` (4) allers-retours par question ; si le serveur refuse les outils, repli automatique
@@ -201,18 +230,20 @@ c++ ... tests/llm_cli.cpp src/llm/LlmCore.cpp ... -o llm_cli            # voir l
 
 ## Limites connues
 
-- Dates gérées à l'export `.chr` : `gauss`, `unif`, `tl` (plugin `tl/osl`) et `am` (processus I et F vérifiés sur des
-  projets réels ; D, ID, IF, IDF suivent l'ordre supposé 2, 4, 5, 6 et déclenchent un avertissement). Les dates 14C et
-  `density` ne sont pas générées (la densité référence un fichier CSV de ChronoModel).
+- Dates gérées à l'export `.chr` : `gauss` (avec ou sans courbe), `unif`, `c14`, `f14c`, `tl` (plugin `tl/osl`), `am`
+  (processus I et F vérifiés sur des projets réels, D confirmé ; ID, IF, IDF suivent l'ordre supposé 4, 5, 6 et
+  déclenchent un avertissement) et `density` (référence au fichier CSV, à placer dans `Calib/Density` de ChronoModel).
 - Les valeurs par défaut du `.chr` (échantillonneurs 1 pour les événements et 4 pour les dates, MCMC, courbe) et le
   sens des contraintes (`bwd_id` = événement le plus ancien) ont été relevés dans trois projets ChronoModel 4.0 réels
   (`tests/tst_core.cpp`, test `chrMatchesRealProjects`).
 - Un `.chr` généré (exemple de l'aide : deux phases, deux dates gaussiennes, une contrainte) a été importé dans ChronoModel sans
   problème (test de l'utilisateur, 21/10/2026). Les autres types de dates (tl/osl, am) n'ont pas encore été ouverts dans ChronoModel.
-- Les calculs intégrés traitent des **dates isolées** (a priori uniforme) ; ils ne remplacent pas ChronoModel pour un
-  modèle bayésien complet (phases, contraintes, wiggle matching, combinaison de dates). Non portés : plugin Density
-  (courbe tabulée par l'utilisateur), Gauss avec courbe de référence personnelle, courbes AM Mioara, bombe 2004,
-  combinaison de dates, étalement (wiggle).
+- Les calculs intégrés traitent des dates isolées, des événements (MCMC), des combinaisons, des relations entre dates
+  indépendantes et des traces de ChronoModel ; ils ne remplacent pas ChronoModel pour un modèle bayésien complet
+  (phases, contraintes stratigraphiques). Non portés : courbes AM Mioara, bombe 2004.
+- Provenance des nombres : comparaison de valeurs écrites. Une mesure donnée sous une forme inhabituelle peut être
+  signalée à tort ; une conversion faite par le modèle (2σ → 1σ, arrondi) l'est toujours. Le serveur MCP n'applique pas
+  le contrôle des mesures (il ne voit pas la conversation de l'autre assistant).
 - Âges 14C conventionnels toujours lus en BP. Pour l'archéomagnétisme, la reconnaissance en français est limitée :
   le bloc `calcul` (JSON) est la voie fiable.
 - Les HPD sont calculés à 95 % et 68 % (seuils donnés par ChronoModel), sur la grille de la courbe de référence.

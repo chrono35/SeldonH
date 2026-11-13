@@ -68,6 +68,13 @@ struct After {
 };
 QStringList afterResult(const After& a, int max = 4);
 
+// Marche à suivre sous un modèle ChronoModel prêt (12/11/2026) : ce que l'utilisateur doit faire hors de SeldonH
+// (enregistrer, calculer dans ChronoModel, vérifier la convergence, exporter et joindre les traces) puis la question à
+// poser, avec les vrais noms. Écrite par SeldonH, pas par le modèle de langage (qui inventait des étapes de ChronoModel).
+// `toDate` : unités à dater entre deux Events (« date entre US 3 et US 1 ») ; `brief` : rappel court (déjà montrée).
+struct ToDate { QString name, older, younger; };
+QString modelSteps(const QJsonObject& spec, const QVector<ToDate>& toDate, bool brief = false);
+
 // Bloc HTML « titre + liste de liens seldon://insert?q=… » (vide si `questions` est vide).
 QString html(const QString& title, const QStringList& questions, const QString& footer = QString());
 

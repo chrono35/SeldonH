@@ -45,12 +45,18 @@ struct Sheet {
     QVector<QStringList> rows;          // lignes non vides, cellules vides replacées (colonnes alignées)
     QVector<int>         lineNumbers;   // numéro de chaque ligne dans la feuille (1 = première)
     QStringList          notes;         // cellules au format date, formules sans valeur, feuille tronquée…
+    QStringList          merged;        // cellules fusionnées (« A6:A14 ») : non lues, l'utilisateur doit défusionner
 };
 
 bool isSpreadsheet(const QString& path);                         // .xlsx, .xlsm, .ods
 QStringList sheetNames(const QString& path, QString* error = nullptr);
 // Lit la feuille `sheet` (vide = la première). Faux et `error` si le fichier est illisible.
 bool read(const QString& path, const QString& sheet, Sheet& out, QString* error = nullptr);
+// Défusionne les cellules fusionnées lues (`Sheet::merged`) : la valeur de la première case est recopiée dans toutes les cases
+// de la plage. Opération exacte (les plages sont dans le fichier), proposée à l'utilisateur, jamais faite sans son accord.
+// L'avertissement « ⚠ Cellules fusionnées » est remplacé par la liste des plages défusionnées (« A2:A3 → KAT23 »), à vérifier.
+// Renvoie le nombre de plages défusionnées.
+int unmerge(Sheet& sheet);
 
 // Index de colonne d'une référence Excel : « B12 » → 1, « AA3 » → 26 ; numéro de ligne : 12, 3.
 int columnIndex(const QString& cellRef);

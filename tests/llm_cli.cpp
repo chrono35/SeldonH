@@ -31,6 +31,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //   llm_cli modele.gguf                 conversation interactive (/reset, /quit)
 //   llm_cli modele.gguf --selftest      vérifications automatiques (gabarit, cache KV, arrêt, troncature)
 //   options : --ctx N  --max N  --think  --cpu  --threads N (0 = automatique)  --cpuinfo
+//             --grammar 'root ::= "oui" | "non"'   réponse forcée par une grammaire GBNF (arbre de décision)
 //
 // Compilation (après scripts/build_llama.sh) :
 //   macOS : c++ -std=c++17 -O2 -I third_party/llama-install/include tests/llm_cli.cpp src/llm/LlmCore.cpp src/llm/CpuTopology.cpp
@@ -150,6 +151,18 @@ static int selftest(const std::string& model, int ctx)
     CHECK(last.droppedMessages > 0 && last.promptTokens <= 512, "anciens messages abandonnés, prompt ≤ contexte");
     std::printf("  dernier tour : prompt=%d tokens, messages abandonnés=%d\n", last.promptTokens, last.droppedMessages);
 
+    // 6. Grammaire (arbre de décision) : la réponse est forcée parmi des identifiants
+    {
+        std::vector<ChatMessage> gchat = { { "system", "Assistant." },
+            { "user", "Message : « Mets ces dates dans un modèle ChronoModel ». Le modèle décrit-il une courbe ? "
+                      "Réponds par un seul identifiant : oui, non." } };
+        SamplingParams gs; gs.temperature = 0.0f; gs.maxTokens = 12; gs.grammar = "root ::= \"oui\" | \"non\"\n";
+        std::string out; GenStats gst;
+        small.generate(gchat, gs, [&](const std::string& piece) { out += piece; return true; }, err, &gst);
+        CHECK(out == "oui" || out == "non", "grammaire : réponse « oui » ou « non »");
+        std::printf("  réponse contrainte : « %s »\n", out.c_str());
+    }
+
     std::printf("== %s ==\n", g_fail ? "ECHEC" : "TOUT EST OK");
     return g_fail ? 1 : 0;
 }
@@ -160,6 +173,7 @@ int main(int argc, char** argv)
     std::string model = argv[1];
     int ctx = 4096, maxTok = 512, threads = 0;
     bool self = false, think = false, cpu = false, cpuinfo = !std::strcmp(argv[1], "--cpuinfo");
+    std::string grammar;
     for (int i = 2; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--selftest")) self = true;
         else if (!std::strcmp(argv[i], "--think")) think = true;
@@ -168,6 +182,7 @@ int main(int argc, char** argv)
         else if (!std::strcmp(argv[i], "--max") && i + 1 < argc) maxTok = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--threads") && i + 1 < argc) threads = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--cpuinfo")) cpuinfo = true;
+        else if (!std::strcmp(argv[i], "--grammar") && i + 1 < argc) grammar = argv[++i];
     }
     {
         const CpuTopology& t = cpuTopology();
@@ -186,7 +201,7 @@ int main(int argc, char** argv)
                 core.description().c_str(), core.contextSize(), core.threads(), core.threadsBatch());
 
     std::vector<ChatMessage> chat = { { "system", "Tu es un assistant d'aide à la datation en archéologie. Réponds en français." } };
-    SamplingParams sp; sp.maxTokens = maxTok; sp.enableThinking = think;
+    SamplingParams sp; sp.maxTokens = maxTok; sp.enableThinking = think; sp.grammar = grammar;
     for (std::string line; std::printf("\n> "), std::fflush(stdout), std::getline(std::cin, line);) {
         if (line == "/quit") break;
         if (line == "/reset") { chat.resize(1); core.resetCache(); continue; }

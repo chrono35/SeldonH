@@ -46,6 +46,15 @@ namespace {
 
 constexpr int kMaxRows = 20000;
 constexpr int kMaxCols = 200;
+const QString kMergedNote = QStringLiteral("⚠ Cellules fusionnées");
+
+// Nom de colonne d'un tableur (0 → A, 25 → Z, 26 → AA).
+QString columnName(int c)
+{
+    QString n;
+    for (++c; c > 0; c = (c - 1) / 26) n.prepend(QChar(u'A' + (c - 1) % 26));
+    return n;
+}
 
 // Nombre tel qu'Excel l'a enregistré (« 2500 », « 0.85 », « 1.5E-2 ») : entier sans « .0 », sinon 15 chiffres significatifs.
 QString numberText(const QString& v)
@@ -172,6 +181,7 @@ bool readXlsx(QZipReader& z, const QString& sheet, Sheet& out, QString* error)
             nextRow = rn > 0 ? rn : nextRow;
             continue;
         }
+        if (r.name() == QLatin1String("mergeCell")) { out.merged << attr(r, "ref"); continue; }
         if (r.name() != QLatin1String("c")) continue;
         const QString ref = attr(r, "r");
         const QString type = attr(r, "t");
@@ -238,6 +248,12 @@ bool readOds(QZipReader& z, const QString& sheet, Sheet& out, QString* error, QS
                 r.readNext();
                 if (!r.isStartElement() || (r.name() != QLatin1String("table-cell") && r.name() != QLatin1String("covered-table-cell"))) continue;
                 const int crep = std::max(1, attr(r, "number-columns-repeated").toInt());
+                const int rspan = attr(r, "number-rows-spanned").toInt(), cspan = attr(r, "number-columns-spanned").toInt();
+                if (r.name() == QLatin1String("table-cell") && (rspan > 1 || cspan > 1)) {
+                    const int c0 = int(cur.size());
+                    out.merged << QStringLiteral("%1%2:%3%4").arg(columnName(c0)).arg(row + 1)
+                                      .arg(columnName(c0 + std::max(1, cspan) - 1)).arg(row + std::max(1, rspan));
+                }
                 const QString vtype = attr(r, "value-type");
                 QString value;
                 if (vtype == QLatin1String("float") || vtype == QLatin1String("percentage") || vtype == QLatin1String("currency"))
@@ -323,7 +339,53 @@ bool read(const QString& path, const QString& sheet, Sheet& out, QString* error)
     const bool ok = QFileInfo(path).suffix().toLower() == QLatin1String("ods") ? readOds(z, sheet, out, error, nullptr)
                                                                                  : readXlsx(z, sheet, out, error);
     if (ok && out.rows.size() >= kMaxRows) out.notes << QStringLiteral("feuille tronquée à %1 lignes").arg(kMaxRows);
+    // Cellules fusionnées (décision de Philippe, 13/11/2026) : SeldonH ne les lit pas, il demande de refaire le tableau sans
+    // fusion. Seule la première case d'une fusion garde sa valeur : « carotte KAT22 » sur une seule ligne au lieu de neuf.
+    if (ok && !out.merged.isEmpty()) {
+        const QStringList shown = out.merged.mid(0, 4);
+        out.notes.prepend(QStringLiteral("%1 : %2 (%3%4). SeldonH ne lit pas les fusions : seule la première case garde sa valeur, "
+                                         "les autres sont lues vides. Refaites le tableau sans fusion (une valeur dans chaque case : "
+                                         "défusionnez puis recopiez la valeur sur chaque ligne) et joignez-le de nouveau")
+                              .arg(kMergedNote,
+                                   out.merged.size() > 1 ? QStringLiteral("%1 fusions").arg(out.merged.size()) : QStringLiteral("1 fusion"),
+                                   shown.join(QStringLiteral(", ")), out.merged.size() > shown.size() ? QStringLiteral(", …") : QString()));
+    }
     return ok;
+}
+
+int unmerge(Sheet& sh)
+{
+    static const QRegularExpression rangeRe(QStringLiteral(R"(^([A-Za-z]+)(\d+)(?::([A-Za-z]+)(\d+))?$)"));
+    QStringList done;
+    int count = 0;
+    for (const QString& ref : std::as_const(sh.merged)) {
+        const auto m = rangeRe.match(ref.trimmed());
+        if (!m.hasMatch()) continue;
+        const int c1 = columnIndex(m.captured(1)), r1 = m.captured(2).toInt();
+        const int c2 = m.captured(3).isEmpty() ? c1 : columnIndex(m.captured(3)), r2 = m.captured(4).isEmpty() ? r1 : m.captured(4).toInt();
+        const int top = int(sh.lineNumbers.indexOf(r1));
+        if (top < 0 || c1 < 0) continue;
+        const QString value = c1 < sh.rows[top].size() ? sh.rows[top][c1] : QString();
+        if (value.trimmed().isEmpty()) continue;
+        for (int i = 0; i < sh.rows.size(); ++i) {
+            const int line = sh.lineNumbers.value(i);
+            if (line < r1 || line > r2) continue;
+            QStringList& row = sh.rows[i];
+            for (int c = c1; c <= c2 && c < kMaxCols; ++c) {
+                while (row.size() <= c) row << QString();
+                if (row[c].trimmed().isEmpty()) row[c] = value;
+            }
+        }
+        ++count;
+        if (done.size() < 6) done << QStringLiteral("%1 → %2").arg(ref, value.simplified().left(30));
+    }
+    if (count == 0) return 0;
+    for (int i = int(sh.notes.size()) - 1; i >= 0; --i)
+        if (sh.notes[i].startsWith(kMergedNote)) sh.notes.removeAt(i);
+    sh.notes.prepend(QStringLiteral("%1 plage(s) de cellules fusionnées défusionnée(s) par SeldonH, à votre demande : la valeur de la "
+                                    "première case est recopiée dans toute la plage (%2%3) ; vérifiez le tableau")
+                         .arg(count).arg(done.join(QStringLiteral(" ; ")), count > done.size() ? QStringLiteral(" ; …") : QString()));
+    return count;
 }
 
 } // namespace spreadsheet

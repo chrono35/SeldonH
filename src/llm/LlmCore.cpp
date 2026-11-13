@@ -422,6 +422,11 @@ std::string LlmCore::formatPrompt(const std::vector<ChatMessage>& chat, bool ena
 llama_sampler* LlmCore::makeSampler(const SamplingParams& sp) const
 {
     llama_sampler* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // Grammaire en tête de chaîne : les jetons hors du langage sont masqués avant tout autre tirage.
+    if (!sp.grammar.empty()) {
+        if (llama_sampler* g = llama_sampler_init_grammar(vocab_, sp.grammar.c_str(), "root"))
+            llama_sampler_chain_add(chain, g);
+    }
     if (sp.temperature <= 0.0f) {
         llama_sampler_chain_add(chain, llama_sampler_init_greedy());
         return chain;

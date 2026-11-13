@@ -436,8 +436,9 @@ QString ChatView::bubble(const Item& it, bool forExport, bool last, bool firstAi
         if (it.kind == Item::Figure) title = tr("Graphique");
         if (calc || it.kind == Item::Figure) {
             // Fiche de calcul (ou graphique) de SeldonH : cadre noir, bandeau bleu de ChronoModel avec l'opération calculée,
-            // puis les valeurs et les vignettes des graphiques, dans la même boîte.
-            const QString head = QStringLiteral("<img src=\":/icons/mini_seldonh_32.png\" width=\"14\" height=\"14\"> "
+            // puis les valeurs et les vignettes des graphiques, dans la même boîte. Icône sur pastille gris clair :
+            // la mini icône transparente (spirale bleue) ne se verrait pas sur le bandeau bleu.
+            const QString head = QStringLiteral("<img src=\":/icons/mini_seldonh_pastille_32.png\" width=\"16\" height=\"16\"> "
                                                 "<b>%1</b>%2")
                                      .arg(it.kind == Item::Figure ? tr("SeldonH") : tr("Calcul SeldonH"),
                                           title.isEmpty() ? QString() : QStringLiteral(" &nbsp;·&nbsp; ") + title);

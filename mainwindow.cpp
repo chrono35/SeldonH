@@ -40,6 +40,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QSaveFile>
+#include <QTextDocument>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -72,6 +74,11 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "src/core/ChatText.h"
 #include "src/core/ChrBuilder.h"
+#include "src/core/Provenance.h"
+#include "src/core/Stratigraphy.h"
+#include "src/core/DecisionTree.h"
+#include "src/core/Report.h"
+#include "src/core/DocxWriter.h"
 #include "src/core/ChronoResults.h"
 #include "src/methods/common/CurveStore.h"
 #include "src/methods/common/DensityFile.h"
@@ -404,6 +411,7 @@ void MainWindow::buildMenus()
     file->addAction(tr("Ouvrir le dossier des modèles"), this, &MainWindow::openModelsFolder);
     file->addAction(tr("Joindre des fichiers…"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O), this, &MainWindow::attachFile);
     file->addAction(tr("Exporter la conversation (HTML ou Word)…"), QKeySequence::Save, this, &MainWindow::saveTranscript);
+    file->addAction(tr("Rapport de synthèse (texte ou Word)…"), this, &MainWindow::saveReport);
     file->addSeparator();
     file->addAction(tr("Quitter"), QKeySequence::Quit, qApp, &QApplication::quit);
 
@@ -1083,13 +1091,42 @@ void MainWindow::sendMessage()
         { "gauss", "08_dates_autres_methodes" }, { "density", "18_date_densite" } };
     const bool modelRequest = MethodRunner::isModelRequest(qk);
     QStringList cited = MethodRunner::datingMethodsIn(qk);
-    if (modelRequest && cited.isEmpty()) cited = QStringList{ "c14", "tl", "am", "gauss" };     // méthodes non nommées : les courantes
+    // Questions précédentes de la conversation (« mets ces dates dans un modèle » après une question qui les donne).
+    QString earlier;
+    QStringList earlierQs;
+    for (const Turn& p : std::as_const(turns_))
+        if (!p.synthetic) { earlier += lexicon_.translate(p.question) + QLatin1Char('\n'); earlierQs << p.question; }
+    // Arbre de décision : une demande de NOUVEAU modèle passe d'abord par des questions fermées (courbe ? type ?
+    // stratigraphie ?) ; la réponse du modèle de langage est différée, sendMessage reprend à la fin de l'aiguillage.
+    const bool treeUsed = treeDone_;
+    treeDone_ = false;
+    if (!treeUsed && modelRequest && attachName_.isEmpty()) {
+        bool modelBefore = false;
+        for (const Turn& p : std::as_const(turns_)) { QJsonObject sp0; modelBefore = modelBefore || ChrBuilder::extractSpec(p.answer, sp0); }
+        if (!modelBefore && startTree(q, qk, earlierQs)) return;
+    }
+    // Méthodes non nommées : celles des questions précédentes, sinon les courantes (pas de fiche TL ou AM pour du 14C seul).
+    if (modelRequest && cited.isEmpty()) cited = MethodRunner::datingMethodsIn(earlier);
+    if (modelRequest && cited.isEmpty()) cited = QStringList{ "c14", "tl", "am", "gauss" };
     QStringList pinned;
     if (modelRequest) pinned << QStringLiteral("03_chronomodel_creer_modele");
+    // Demande de modèle et ordre des couches donné dans la question ou plus tôt (« au-dessus », « au fond », « sous »…) :
+    // la fiche de la contrainte stratigraphique reste jointe (une US sans date n'est pas un Event, sens des contraintes).
+    if (modelRequest && attachName_.isEmpty()
+        && (MethodRunner::asksStratigraphicDating(earlier + qk)
+            || !seldon::strat::relationsFromTexts(earlierQs + QStringList{ q }).isEmpty()))
+        pinned << QStringLiteral("24_contrainte_stratigraphique");
+    // Dates reliées par la stratigraphie (« dater l'US 2 entre l'US 1 et l'US 3 ») : contrainte temporelle, la réponse
+    // passe par ChronoModel (modèle .chr proposé, puis traces) ; le calcul direct sur des dates indépendantes n'en tient pas
+    // compte (fiche 24). Traces déjà jointes : le modèle a été calculé, on lit les traces (flux habituel).
+    const bool stratDating = !modelRequest && attachName_.isEmpty() && seldon::traces::loaded().isEmpty()
+                             && MethodRunner::asksStratigraphicDating(qk);
+    if (stratDating) pinned << QStringLiteral("24_contrainte_stratigraphique") << QStringLiteral("03_chronomodel_creer_modele")
+                            << QStringLiteral("21_ordre_des_dates");
     if (MethodRunner::isAgeDepthRequest(qk)) pinned << QStringLiteral("13_chronomodel_courbe_age_profondeur");
     // « Laquelle est la plus ancienne ? », « combien de temps entre A et B ? », « C est-elle entre A et B ? » : la fiche
     // des relations entre dates (probabilité d'antériorité, durée, mélange datations / traces).
-    if (!modelRequest && (MethodRunner::asksOrder(qk)
+    if (!modelRequest && !stratDating && (MethodRunner::asksOrder(qk)
                           || (MethodRunner::asksRelation(qk) && (!cited.isEmpty() || !seldon::traces::loaded().isEmpty()))))
         pinned << QStringLiteral("21_ordre_des_dates");
     // Courbe de ChronoModel jointe (trace des splines, carte de densité) : la fiche du calcul « curve ».
@@ -1127,15 +1164,33 @@ void MainWindow::sendMessage()
         && !aboutChronoModel.match(seldon::text::fold(qk)).hasMatch())
         exclude << QStringLiteral("19_chronomodel_phases_events") << QStringLiteral("04_chronomodel_interpreter")
                 << QStringLiteral("chronomodel_resultats_convergence");
-    if (!modelRequest && !modelFollowUp)
+    if (!modelRequest && !modelFollowUp && !stratDating)
         exclude << QStringLiteral("03_chronomodel_creer_modele") << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    // Durée, ordre ou « date entre » de niveaux du modèle de la conversation (« combien de temps sépare le niveau -21 du
+    // niveau -29 ? », prompt réel du 12/11/2026) : SeldonH calcule lui-même, sur les traces jointes si elles portent ces
+    // Events, sinon sur les dates calibrées indépendamment (estimation sans la stratigraphie). Pas de nouveau modèle.
+    QStringList levelNames;
+    bool levelPosterior = false;
+    const QVector<QJsonObject> levelRel = (!modelRequest && !tableOnly && attachName_.isEmpty() && !lastChr_.isEmpty())
+        ? MethodRunner::relationWithModelLevels(q, lastChr_, &levelNames, &levelPosterior) : QVector<QJsonObject>();
+    if (!levelRel.isEmpty()) {
+        exclude << QStringLiteral("03_chronomodel_creer_modele") << QStringLiteral("13_chronomodel_courbe_age_profondeur")
+                << QStringLiteral("24_contrainte_stratigraphique");
+        pinned.removeAll(QStringLiteral("03_chronomodel_creer_modele"));
+        pinned.removeAll(QStringLiteral("13_chronomodel_courbe_age_profondeur"));
+        pinned.removeAll(QStringLiteral("24_contrainte_stratigraphique"));
+        pinned << QStringLiteral("21_ordre_des_dates");
+    }
     // Question sur l'utilisation de SeldonH, sans calcul (« comment faire une datation ? ») : seulement la fiche d'aide ; la
     // réponse donne des phrases à taper, pas de code (les fiches de calcul pousseraient le modèle à écrire un bloc).
-    const bool helpQuestion = !modelRequest && !tableOnly && attachName_.isEmpty() && !resultsFocus && MethodRunner::asksHowTo(qk)
+    const bool helpQuestion = !modelRequest && !stratDating && !tableOnly && attachName_.isEmpty() && !resultsFocus && MethodRunner::asksHowTo(qk)
                               && MethodRunner::requestsFromQuestion(q).isEmpty();
     if (helpQuestion) pinned = QStringList{ QStringLiteral("10_aide_utilisation") };
-    // Création de modèle : budget 0 → seulement les fiches imposées ci-dessus.
-    const QList<SkillMatch> matches = skills_.select(qk, modelRequest ? 0 : settings_.skillChars, exclude, pinned);
+    // Création de modèle, datation sous contrainte stratigraphique : budget 0 → seulement les fiches imposées ci-dessus
+    // (la réponse suit la fiche 24 ; d'autres fiches noyaient un petit modèle, prompt réel du 12/11/2026 : 22 800 caractères).
+    if (treeUsed) pinned << treeSkills_;                // fiches de la feuille de l'arbre atteinte
+    pinned.removeDuplicates();
+    const QList<SkillMatch> matches = skills_.select(qk, (modelRequest || stratDating) ? 0 : settings_.skillChars, exclude, pinned);
     const QString knowledge = SkillManager::format(matches);
 
     if (!turns_.isEmpty() && turns_.last().truncation) {     // nouvelle question : plus de « Continuer » sur la précédente
@@ -1145,9 +1200,13 @@ void MainWindow::sendMessage()
 
     if (!turns_.isEmpty() && turns_.last().view >= 0) chat_->setSuggestions(turns_.last().view, QString());   // suites : seulement sous la dernière réponse
     turnRuns_.clear();
+    calcRounds_ = 0;                              // boucle d'agent : plafond d'étapes d'après les opérations de la question
+    maxCalcRounds_ = std::max(MethodRunner::maxCalcRounds(q), MethodRunner::maxCalcRounds(lexicon_.translate(q)));
+    calcDone_.clear();
     Turn t;
     t.question = qShown;
     t.drewModel = drawRequested;
+    t.levelEstimate = !levelRel.isEmpty();
     t.help = helpQuestion;
     for (const SkillMatch& m : matches) t.skillIds << m.skill->id;
 
@@ -1166,6 +1225,34 @@ void MainWindow::sendMessage()
             dating.promptBlock.prepend(QStringLiteral("[La question renvoie aux datations précédentes de la conversation : SeldonH a "
                                                       "fait le calcul avec elles (mêmes mesures, mêmes courbes). Commente ce résultat ; "
                                                       "ne réécris pas de bloc calcul.]\n"));
+        }
+    }
+    if (!dating.found && !levelRel.isEmpty()) {
+        dating = MethodRunner::run(levelRel, dateformat::detect(q, displayFormat()));
+        QStringList quoted;
+        for (const QString& n : std::as_const(levelNames)) quoted << QStringLiteral("« %1 »").arg(n.toHtmlEscaped());
+        const QString title = lastChrTitle_.isEmpty() ? QString() : tr(" du modèle « %1 »").arg(lastChrTitle_.toHtmlEscaped());
+        if (levelPosterior) {
+            dating.noticeHtml.prepend(tr("<p><i>↻ %1%2, d'après les traces de ChronoModel jointes : stratigraphie comprise.</i></p>")
+                                          .arg(quoted.join(tr(" et ")), title));
+            dating.promptBlock.prepend(QStringLiteral(
+                "[La question porte sur des Events du modèle de la conversation (%1). SeldonH a fait le calcul sur les traces de "
+                "ChronoModel jointes : résultat a posteriori, contrainte stratigraphique comprise. Commente ce résultat ; ne "
+                "propose pas de modèle ; n'écris ni bloc chronomodel ni bloc calcul.]\n").arg(levelNames.join(QStringLiteral(", "))));
+        } else {
+            dating.noticeHtml.prepend(tr("<p><i>↻ %1%2. ⚠ <b>Estimation sans tenir compte de la stratigraphie</b> : les dates de "
+                                         "ces niveaux sont calibrées indépendamment, sans l'ordre des niveaux. Elle est d'autant plus "
+                                         "proche du résultat sous contrainte que les dates sont bien séparées. Le résultat avec la "
+                                         "stratigraphie se lit dans les traces du modèle calculé par ChronoModel (joindre "
+                                         "<code>Chain_all_Events.csv</code>, puis poser la même question).</i></p>")
+                                          .arg(quoted.join(tr(" et ")), title));
+            dating.promptBlock.prepend(QStringLiteral(
+                "[La question porte sur des niveaux du modèle de la conversation (%1), reliés par la stratigraphie. SeldonH a fait "
+                "le calcul ci-dessous sur leurs dates calibrées INDÉPENDAMMENT : c'est une ESTIMATION qui ne tient pas compte de "
+                "la stratigraphie. Dis-le en une phrase et présente le résultat comme une estimation, sans dire que le calcul est "
+                "faux, incorrect ou impossible : il est d'autant plus proche du résultat sous contrainte que les dates sont bien "
+                "séparées. Le résultat avec la stratigraphie viendra des traces du modèle déjà proposé, calculé par ChronoModel. "
+                "Ne propose pas de nouveau modèle ; n'écris ni bloc chronomodel ni bloc calcul.]\n").arg(levelNames.join(QStringLiteral(", "))));
         }
     }
     if (!dating.found && !tableOnly) dating = MethodRunner::analyzeQuestion(qCalc, dateformat::fromId(settings_.dateFormat));
@@ -1197,11 +1284,45 @@ void MainWindow::sendMessage()
                                               "question précise sur ces courbes.\n");
         dating.found = true;
     }
+    if (stratDating) {
+        // Consigne générique « présente ces résultats » retirée : ces calibrations ne datent pas l'US cherchée, et un petit
+        // modèle mélangeait les HPD des US datées pour en faire celles de l'US à dater (prompt réel du 12/11/2026).
+        static const QRegularExpression present(QStringLiteral("\nConsigne : présente ces résultats \\(intervalles.*?N'invente aucune autre valeur\\.\n"),
+                                                QRegularExpression::DotMatchesEverythingOption);
+        dating.promptBlock.replace(present, QStringLiteral("\n"));
+        dating.noticeHtml.append(tr("<p><i>⚠ Contrainte stratigraphique : ces dates sont calibrées ici une à une, sans l'ordre "
+                                    "des couches. La datation d'une couche par rapport aux autres passe par un modèle ChronoModel "
+                                    "(proposé ci-dessous), puis par ses traces.</i></p>"));
+        dating.promptBlock.append(QStringLiteral(
+            "[Contrainte stratigraphique : les datations de la question sont reliées par l'ordre des couches. Les résultats "
+            "ci-dessus (s'il y en a) sont des calibrations ou des calculs sur des dates INDÉPENDANTES : ils ignorent cette "
+            "contrainte. Suis la fiche « Datation sous contrainte stratigraphique » : dis en une phrase que le calcul direct sur des dates "
+            "indépendantes n'est qu'une estimation qui ne tient pas compte de la stratigraphie, propose le modèle ChronoModel (bloc ```chronomodel : un événement par US datée, "
+            "contraintes du plus ancien au plus récent), puis dis en une phrase que la date viendra des traces (SeldonH affiche "
+            "lui-même la marche à suivre sous le modèle : ne la récris pas). Ces calibrations "
+            "concernent chaque US datée SEULE : ne les présente pas et n'en tire AUCUNE date, aucun intervalle ni aucune HPD "
+            "pour l'US à dater (elle viendra des traces). N'ajoute aucun réglage MCMC que l'utilisateur n'a pas donné. "
+            "N'appelle aucun outil et n'écris aucun bloc calcul.]\n"));
+        dating.found = !dating.promptBlock.isEmpty();
+    }
     t.followUp = dating.found;       // déjà calculé par l'application : pas de nouveau calcul à relancer
 
     QString mu;
     if (dating.found)          mu += dating.promptBlock + "\n";
     if (!knowledge.isEmpty())  mu += "[Connaissances de référence]\n" + knowledge + "\n\n";
+    if (treeUsed && treeParams_.contains(QStringLiteral("courbe"))) {
+        const QString ct = treeParams_.value(QStringLiteral("courbe")).toString();
+        // Courbes archéomagnétiques : la mesure va sur l'Event (forme de test_curveIDF.chr, 12/11/2026).
+        static const QStringList magnetic = { "vector", "spherical", "unknown_dec", "inclination", "declination", "intensity", "trivariate" };
+        mu += QStringLiteral("[Aiguillage de SeldonH : modèle en mode courbe, type « %1 » : écris \"curve\":\"%1\" à la racine du bloc "
+                             "chronomodel%2.]\n\n").arg(ct, magnetic.contains(ct)
+                             ? QStringLiteral(" ; la mesure de chaque Event (inc, dec, alpha95, field, error_f) va sur l'événement, "
+                                              "ses dates restent ses datations") : QString());
+    }
+    else if (treeUsed && std::any_of(treeTrace_.begin(), treeTrace_.end(), [](const QJsonValue& v) {
+                 return v.toObject().value("noeud").toString() == QLatin1String("modele_courbe")
+                        && v.toObject().value("choix").toString() == QLatin1String("non"); }))
+        mu += QStringLiteral("[Aiguillage de SeldonH : modèle d'Events, sans courbe : pas de clé \"curve\".]\n\n");
     // Tableau courant : son résumé à chaque question (retiré de l'historique avec les connaissances, voir historyUser).
     if (seldon::datatable::hasCurrent()) {
         const int budget = remoteActive() ? 12000 : std::clamp(settings_.nCtx / 3, 2000, 8000);
@@ -1232,6 +1353,10 @@ void MainWindow::sendMessage()
     QString shown = qShown;
     if (!attachName_.isEmpty()) shown += "\n\n📎 " + attachName_;
     logUser(shown);
+    if (treeUsed && !treeShown_.isEmpty()) {
+        logNotice(tr("<p><i>🧭 Aiguillage : %1</i></p>").arg(treeShown_.join(QStringLiteral(" › ")).toHtmlEscaped()));
+        treeTraceForPrompt_ = treeTrace_;
+    }
     if (!tableNotice.isEmpty()) logNotice(tableNotice);
     if (attachTable_ && !attachTableHtml_.isEmpty()) logNotice(attachTableHtml_);
     if (!resultsTable.isEmpty()) logNotice(resultsTable);
@@ -1246,7 +1371,7 @@ void MainWindow::sendMessage()
     // (la fiche donne les valeurs exactes) ; « Demander un commentaire » reste possible.
     // Traces ou tableau joints : lus par SeldonH, le calcul se suffit à lui-même (pas de commentaire automatique).
     const bool calcAlone = (dating.found || tableOnly || !modelReady_) && attachOnlyData() && !resultsFocus
-                           && !modelRequest && !drawRequested && (!modelReady_ || !wantsCalcComment(q));
+                           && !modelRequest && !stratDating && !drawRequested && (!modelReady_ || !wantsCalcComment(q));
     t.view = newAssistantBubble();
     turns_.append(t);
 
@@ -1302,6 +1427,7 @@ void MainWindow::requestComment(int turn)
         statusBar()->showMessage(tr("Aucun modèle prêt : chargez un modèle (ou configurez le modèle distant) pour obtenir un commentaire."), 6000);
         return;
     }
+    calcRounds_ = maxCalcRounds_;                // commentaire : plus aucun calcul (boucle d'agent close)
     static const QString ask = QStringLiteral(
         "[L'utilisateur demande un commentaire du résultat de calcul de SeldonH, déjà affiché dans une fiche avec le graphique : "
         "explique ce qu'il signifie et ce qu'il faut en retenir (forme de la densité, plateau ou multimodalité, précision, mises en "
@@ -1346,6 +1472,10 @@ void MainWindow::startGeneration()
     QJsonArray refs;
     const QVector<ChatMessage> chat = buildChat(&refs);
     if (!turns_.isEmpty()) turns_.last().prompt = promptSnapshot(refs, sp);
+    if (!turns_.isEmpty() && !treeTraceForPrompt_.isEmpty()) {         // chemin de l'arbre de décision (export du prompt)
+        turns_.last().prompt[QStringLiteral("aiguillage")] = treeTraceForPrompt_;
+        treeTraceForPrompt_ = QJsonArray();
+    }
     if (remote_) remote_->setToolsSuspended(helpTurn());           // question d'aide : pas d'appel d'outil
     if (remoteActive()) emit requestRemoteGenerate(chat, sp);
     else emit requestGenerate(chat, sp);
@@ -1444,7 +1574,10 @@ bool MainWindow::modelExpected() const
     while (last >= 0 && turns_[last].synthetic) --last;
     if (last < 0) return true;
     const QString& q = turns_[last].question;
+    if (turns_[last].levelEstimate) return false;          // relation entre niveaux calculée par SeldonH : pas de modèle
     if (MethodRunner::isModelRequest(q) || ChrBuilder::asksForJson(q)) return true;
+    // Dates reliées par la stratigraphie : le modèle ChronoModel est la réponse attendue (fiche 24).
+    if (MethodRunner::asksStratigraphicDating(lexicon_.translate(q))) return true;
     QJsonObject spec;
     for (int i = 0; i < last; ++i)
         if (ChrBuilder::extractSpec(turns_[i].answer, spec)) return true;
@@ -1454,12 +1587,27 @@ bool MainWindow::modelExpected() const
 QString MainWindow::shownAnswer(const QString& answer) const
 {
     if (!modelExpected())
-        return ChrBuilder::displayMarkdown(MethodRunner::hideCalcBlocks(ChrBuilder::stripModelBlocks(answer), false), false);
+        return ChrBuilder::humanizeNames(ChrBuilder::displayMarkdown(MethodRunner::hideCalcBlocks(ChrBuilder::stripModelBlocks(answer), false, notRunNote()), false));
     bool showJson = false;
     for (int i = turns_.size() - 1; i >= 0; --i)
         if (!turns_[i].synthetic) { showJson = ChrBuilder::asksForJson(turns_[i].question); break; }
     // Blocs de calcul et JSON de calcul : jamais montrés tels quels (l'utilisateur n'a pas à écrire de requête).
-    return ChrBuilder::displayMarkdown(MethodRunner::hideCalcBlocks(answer, showJson), showJson);
+    // Noms techniques en mots courants, sauf si l'utilisateur a demandé le JSON.
+    const QString shown = ChrBuilder::displayMarkdown(MethodRunner::hideCalcBlocks(answer, showJson, notRunNote()), showJson);
+    return showJson ? shown : ChrBuilder::humanizeNames(shown);
+}
+
+// Réponse qui commente un calcul déjà fait (un seul calcul par question) : un bloc « calcul » qu'elle contient ne sera
+// pas exécuté. Avant le 10/11/2026 l'écran annonçait « Calcul confié à SeldonH » et aucun calcul ne suivait (prompt réel
+// du 10/11/2026, US 2 entre deux 14C).
+QString MainWindow::notRunNote() const
+{
+    if (turns_.isEmpty() || calcBlockAllowed()) return QString();
+    if (maxCalcRounds_ > 1 && calcRounds_ >= maxCalcRounds_)
+        return tr("*Calcul proposé par l'assistant, non lancé par SeldonH (nombre maximal d'étapes de calcul atteint pour cette "
+                  "question) : reposez la question si vous le voulez.*");
+    return tr("*Calcul proposé par l'assistant, non lancé par SeldonH (un seul calcul par question) : reposez la question "
+              "si vous le voulez.*");
 }
 
 QString MainWindow::truncationNotice(const Turn& t) const
@@ -1546,33 +1694,253 @@ DateFormat MainWindow::displayFormat() const
     return fmt;
 }
 
+// ---------- Arbre de décision (12/11/2026) ----------
+// Branche « construire un modèle » : courbe ? type de courbe ? stratigraphie ? SeldonH répond lui-même quand un détecteur
+// est sûr (courbe âge-profondeur, ordre des couches lu dans le texte) ; sinon il pose la question fermée au modèle de langage
+// (grammaire en local : réponse forcée parmi les identifiants ; distant : lue dans le texte). La feuille atteinte donne les
+// fiches et le type de courbe ; le chemin est montré à l'utilisateur et gardé dans l'export du prompt.
+bool MainWindow::startTree(const QString& q, const QString& qk, const QStringList& earlierQs)
+{
+    if (!modelReady_) return false;
+    const seldon::decision::Tree& tree = seldon::decision::Tree::builtin();
+    if (!tree.node(QStringLiteral("modele_courbe"))) return false;
+    treeInput_ = input_->toPlainText();
+    treeQuestion_ = q;
+    treeQk_ = qk;
+    treeEarlier_ = earlierQs;
+    treeShown_ = QStringList{ tr("construire un modèle") };
+    treeTrace_ = QJsonArray{ QJsonObject{ { "noeud", tree.root() }, { "choix", "modele" }, { "par", "SeldonH" } } };
+    treeSkills_.clear();
+    treeParams_ = QJsonObject();
+    treePath_ = { { tree.root(), QStringLiteral("modele") } };
+    treeNode_ = QStringLiteral("modele_courbe");
+    generating_ = true;
+    updateControls();
+    treeStep();
+    return true;
+}
+
+QString MainWindow::treeDetector(const QString& node) const
+{
+    if (node == QLatin1String("modele_courbe") && MethodRunner::isAgeDepthRequest(treeQk_)) return QStringLiteral("oui");
+    // Ordre entre des couches lu dans le texte, et aucun mot de courbe : modèle d'Events. Avec un mot de courbe
+    // (« courbe archéomagnétique », « inclinaison »…), le modèle de langage tranche (courbe et stratigraphie possibles).
+    if (node == QLatin1String("modele_courbe")) {
+        const QString all = treeEarlier_.join(QLatin1Char('\n')) + QLatin1Char('\n') + treeQuestion_;
+        if (!seldon::decision::mentionsCurve(all) && !seldon::strat::relationsFromTexts(treeEarlier_ + QStringList{ treeQuestion_ }).isEmpty())
+            return QStringLiteral("non");
+    }
+    if (node == QLatin1String("modele_type_courbe") && MethodRunner::isAgeDepthRequest(treeQk_)) return QStringLiteral("profondeur");
+    if (node == QLatin1String("modele_strati")) {
+        const QStringList texts = treeEarlier_ + QStringList{ treeQuestion_ };
+        if (!seldon::strat::relationsFromTexts(texts).isEmpty()) return QStringLiteral("oui");
+        // Courbe âge-profondeur : par nature une stratigraphie (Philippe, 12/11/2026 ; prompt réel « Teilleul 2 » : « chacun
+        // plus ancien que celui du dessus » lu « non » par le modèle de langage). Ordre écrit : « oui » ; sinon, dans le
+        // doute, SeldonH le demande à l'utilisateur (treeAskOrder), pas au modèle de langage.
+        const bool ageDepth = MethodRunner::isAgeDepthRequest(treeQk_)
+                              || std::any_of(treePath_.cbegin(), treePath_.cend(), [](const QPair<QString, QString>& p) {
+                                     return p.first == QLatin1String("modele_type_courbe") && p.second == QLatin1String("profondeur"); });
+        if (ageDepth) {
+            for (const QString& t : texts) if (seldon::strat::superpositionStated(t)) return QStringLiteral("oui");
+            return QStringLiteral("?");
+        }
+    }
+    return QString();
+}
+
+// Courbe âge-profondeur sans ordre des niveaux écrit : SeldonH pose lui-même la question, sans modèle de langage. Les
+// réponses cliquables recopient la question de l'utilisateur complétée dans la zone de saisie ; rien n'est envoyé.
+void MainWindow::treeAskOrder()
+{
+    classifying_ = false;
+    generating_ = false;
+    const QString q = treeInput_.trimmed();
+    logUser(q);
+    // Tableau CSV de ChronoModel : profondeurs gardées avec leur signe, dans n'importe quel ordre ; la convention de
+    // ChronoModel (la plus petite est la plus ancienne) remplace « au-dessus / au-dessous ».
+    const bool csv = seldon::datatable::isChronoModelImport(q);
+    const QString yes = q + QStringLiteral("\n") + (csv ? tr("Les niveaux sont en ordre stratigraphique : la profondeur la plus petite est la plus ancienne.")
+                                                        : tr("Les niveaux sont en ordre stratigraphique : chacun est plus ancien que celui du dessus."));
+    const QString other = q + QStringLiteral("\n") + tr("Ordre des niveaux, du plus ancien au plus récent : ");
+    auto link = [](const QString& text, const QString& label) {
+        return QStringLiteral("<a href=\"seldon://insert?q=%1\">%2</a>").arg(QString::fromLatin1(QUrl::toPercentEncoding(text)), label.toHtmlEscaped());
+    };
+    if (csv)
+        logNotice(tr("<p><b>Ordre des niveaux ?</b> Une courbe âge-profondeur suppose une stratigraphie. Convention de "
+                     "ChronoModel : la profondeur la plus petite est l'Event le plus ancien (valeurs du tableau gardées avec leur "
+                     "signe, lignes dans n'importe quel ordre). Votre message ne dit pas si les niveaux suivent cet ordre.</p>"
+                     "<p>Les niveaux sont-ils en ordre stratigraphique, la profondeur la plus petite étant la plus ancienne ?</p>"
+                     "<p>→ %1 &nbsp;·&nbsp; %2</p>"
+                     "<p><i>Un clic recopie votre message complété dans la zone de question : relisez-le, puis envoyez-le.</i></p>")
+                      .arg(link(yes, tr("Oui, la profondeur la plus petite est la plus ancienne")),
+                           link(other, tr("Non, je précise l'ordre"))));
+    else
+        logNotice(tr("<p><b>Ordre des niveaux ?</b> Une courbe âge-profondeur suppose une stratigraphie : le niveau le plus "
+                     "profond est le plus ancien. Votre message ne dit pas l'ordre des niveaux.</p>"
+                     "<p>Les niveaux sont-ils en ordre stratigraphique, chacun plus ancien que celui du dessus ?</p>"
+                     "<p>→ %1 &nbsp;·&nbsp; %2</p>"
+                     "<p><i>Un clic recopie votre message complété dans la zone de question : relisez-le, puis envoyez-le.</i></p>")
+                      .arg(link(yes, tr("Oui, chacun est plus ancien que celui du dessus")),
+                           link(other, tr("Non, je précise l'ordre"))));
+    input_->clear();
+    updateControls();
+    statsLabel_->setText(tr("Aiguillage : ordre des niveaux demandé."));
+    saveCurrent();
+}
+
+void MainWindow::treeStep()
+{
+    const seldon::decision::Tree& tree = seldon::decision::Tree::builtin();
+    for (int guard = 0; guard < 16; ++guard) {
+        const seldon::decision::Node* n = tree.node(treeNode_);
+        if (!n) { treeFinish(); return; }
+        const QString d = treeDetector(n->id);
+        if (d == QLatin1String("?")) { treeAskOrder(); return; }
+        if (!d.isEmpty()) {
+            if (!treeApply(d, true)) return;                 // feuille : treeFinish déjà appelé
+            continue;
+        }
+        // Question fermée au modèle de langage : même message système que la conversation (cache), message court.
+        QString text = treeQuestion_;
+        if (!treeEarlier_.isEmpty())
+            text = QStringLiteral("Messages précédents :\n%1\n\nDernier message :\n%2")
+                       .arg(treeEarlier_.mid(std::max<qsizetype>(0, treeEarlier_.size() - 2)).join(QStringLiteral("\n---\n")), treeQuestion_);
+        QVector<ChatMessage> chat;
+        const QVector<ChatMessage> base = buildChat(nullptr);
+        if (!base.isEmpty() && base.first().role == "system") chat.append(base.first());
+        chat.append(ChatMessage{ "user", seldon::decision::promptFor(*n, text).toStdString() });
+        SamplingParams sp;
+        sp.temperature = 0.0f;                                // décodage glouton : réponse reproductible
+        sp.maxTokens = remoteActive() ? 64 : 12;              // distant : marge pour un modèle qui raisonne
+        sp.enableThinking = false;
+        sp.grammar = seldon::decision::grammarFor(*n).toStdString();
+        classifying_ = true;
+        classRaw_.clear();
+        statsLabel_->setText(tr("Aiguillage : %1").arg(n->title));
+        if (remote_) remote_->setToolsSuspended(true);
+        if (remoteActive()) emit requestRemoteGenerate(chat, sp);
+        else emit requestGenerate(chat, sp);
+        return;
+    }
+    treeFinish();
+}
+
+bool MainWindow::treeApply(const QString& cid, bool bySeldon)
+{
+    const seldon::decision::Node* n = seldon::decision::Tree::builtin().node(treeNode_);
+    const seldon::decision::Choice* c = n ? n->choice(cid) : nullptr;
+    if (!c) { treeFinish(); return false; }
+    treeShown_ << QStringLiteral("%1 : %2%3").arg(n->title, c->id, bySeldon ? tr(" (lu par SeldonH)") : QString());
+    treeTrace_.append(QJsonObject{ { "noeud", n->id }, { "choix", c->id }, { "par", bySeldon ? "SeldonH" : "modele" } });
+    treePath_.append({ n->id, c->id });
+    if (!c->isLeaf()) { treeNode_ = c->next; return true; }
+    treeFinish();                                             // feuille : treeFinish cumule tout le chemin
+    return false;
+}
+
+void MainWindow::onClassified(const GenStats& st, bool failed)
+{
+    classifying_ = false;
+    if (st.stoppedByUser) { treeFinish(true); return; }      // « Arrêter » pendant l'aiguillage : rien n'est envoyé
+    const seldon::decision::Node* n = seldon::decision::Tree::builtin().node(treeNode_);
+    const QString cid = (failed || !n) ? QString() : seldon::decision::parseAnswer(*n, classRaw_);
+    if (n) treeTrace_.append(QJsonObject{ { "noeud", n->id }, { "reponse_brute", classRaw_.left(200) } });
+    if (cid.isEmpty()) {                                      // réponse illisible : la question suit le chemin habituel
+        treeShown_ << tr("%1 : ?").arg(n ? n->title : treeNode_);
+        treeFinish();
+        return;
+    }
+    if (treeApply(cid, false)) treeStep();
+}
+
+void MainWindow::treeFinish(bool abort)
+{
+    classifying_ = false;
+    generating_ = false;
+    if (abort) {
+        updateControls();
+        statsLabel_->setText(tr("Aiguillage arrêté : rien n'a été envoyé."));
+        return;
+    }
+    // Ce qu'apporte le chemin parcouru (type de courbe choisi avant « stratigraphie ? », fiches de la feuille), même si
+    // l'aiguillage s'est arrêté avant une feuille (réponse illisible) : ce qui a été choisi reste acquis.
+    const seldon::decision::Leaf acc = seldon::decision::accumulate(seldon::decision::Tree::builtin(), treePath_);
+    treeSkills_ = acc.skills;
+    treeParams_ = acc.params;
+    treeDone_ = true;
+    if (input_->toPlainText() != treeInput_) input_->setPlainText(treeInput_);
+    sendMessage();
+}
+
+// Boucle d'agent (12/11/2026) : la réponse en cours peut demander un calcul si c'est la réponse à la question, ou la
+// réponse à un résultat de calcul tant que le plafond d'étapes de la question n'est pas atteint. Jamais pour une aide,
+// un calcul déjà fait par SeldonH à partir de la question, ni un commentaire demandé après coup.
+bool MainWindow::calcBlockAllowed() const
+{
+    if (turns_.isEmpty() || helpTurn()) return false;
+    const Turn& t = turns_.last();
+    if (!t.followUp) return true;
+    return t.synthetic && !t.calcOnly && t.question == tr("(résultat du calcul demandé par l'assistant)")
+           && calcRounds_ < maxCalcRounds_;
+}
+
 // L'assistant peut demander un calcul avec un bloc « calcul » (JSON). L'application l'exécute (méthodes de
 // ChronoModel), affiche la fiche et la courbe, puis relance l'assistant avec les valeurs exactes pour qu'il les
-// commente. Un seul tour de suite par question : pas de boucle.
+// commente. Boucle d'agent : si la question cite plusieurs opérations, l'assistant reçoit chaque résultat et peut
+// demander l'opération suivante, jusqu'à MethodRunner::maxCalcRounds étapes ; arrêt dès qu'il ne demande plus rien,
+// répond « [FIN] », ou redemande un calcul déjà fait.
 bool MainWindow::runRequestedCalculations()
 {
-    if (turns_.isEmpty() || turns_.last().followUp) return false;
-    if (helpTurn()) return false;                // réponse d'aide : un bloc n'y serait qu'un exemple, jamais exécuté
+    if (!calcBlockAllowed()) return false;       // aide, calcul déjà fait, ou plafond d'étapes atteint
     QVector<QJsonObject> blocks = MethodRunner::extractCalcBlocks(turns_.last().answer);
+    if (blocks.isEmpty()) return false;
+    {   // Demande déjà exécutée pour cette question : le modèle tourne en rond, la boucle s'arrête.
+        QVector<QJsonObject> fresh;
+        for (const QJsonObject& b : std::as_const(blocks)) {
+            const QString key = QString::fromUtf8(QJsonDocument(b).toJson(QJsonDocument::Compact));
+            if (!calcDone_.contains(key)) { fresh << b; calcDone_ << key; }
+        }
+        if (fresh.isEmpty()) {
+            calcRounds_ = maxCalcRounds_;
+            return false;
+        }
+        blocks = fresh;
+    }
+    // Provenance : une mesure que l'utilisateur n'a pas donnée (âge, erreur, α95…) ne part pas au calcul.
+    QStringList blocked, warnings;
+    blocks = sourcedCalcBlocks(blocks, &blocked, &warnings);
+    if (!blocked.isEmpty())
+        logNotice(tr("<p><b>⚠ Calcul non lancé</b> : l'assistant a demandé un calcul avec des valeurs qui ne figurent pas "
+                     "dans vos messages (%1). SeldonH ne calcule qu'avec vos données : reposez la question avec les "
+                     "mesures exactes.</p>").arg(blocked.join(QStringLiteral(" ; ")).toHtmlEscaped()));
     if (blocks.isEmpty()) return false;
     for (QJsonObject& b : blocks) b = MethodRunner::fillDateNames(b, chrDates_);
 
-    const RunOutcome out = MethodRunner::run(blocks, displayFormat());
+    RunOutcome out = MethodRunner::run(blocks, displayFormat());
     if (!out.found) return false;
+    if (!warnings.isEmpty()) {
+        out.noticeHtml.prepend(tr("<p><i>⚠ Valeur(s) choisie(s) par l'assistant, absente(s) de vos messages : %1. "
+                                  "Vérifiez-les avant d'utiliser ce résultat.</i></p>").arg(warnings.join(QStringLiteral(" ; ")).toHtmlEscaped()));
+        out.promptBlock.prepend(QStringLiteral("[%1]\n").arg(seldon::provenance::boundsMessage(warnings)));
+    }
     logNotice(out.noticeHtml);
     if (!out.plot.isEmpty()) logDatingPlot(out.plot, currentQuestionTurn());
     for (const QJsonObject& p : out.extraPlots) logPlot(p);
     applyRunExtras(out);
 
     const bool comment = wantsCalcComment(turns_[currentQuestionTurn()].question);
+    ++calcRounds_;
+    const bool chain = maxCalcRounds_ > 1;       // plusieurs opérations dans la question : boucle d'agent
+    const bool more = chain && calcRounds_ < maxCalcRounds_;
     Turn t;
     t.question = tr("(résultat du calcul demandé par l'assistant)");
     t.modelUser = out.promptBlock;
+    if (chain) t.modelUser += MethodRunner::chainHint(calcRounds_, maxCalcRounds_, comment);
     t.followUp = true;
     t.synthetic = true;
     t.view = newAssistantBubble();
     turns_.append(t);
-    if (comment) startGeneration();
+    if (comment || more) startGeneration();
     else finishCalcOnly();                       // mode calculatrice : la fiche suffit
     return true;
 }
@@ -1585,13 +1953,15 @@ void MainWindow::stopGeneration()
 
 void MainWindow::onToken(const QString& piece)
 {
+    if (classifying_) { classRaw_ += piece; return; }        // réponse à une question de l'arbre : pas affichée
+    if (reporting_) { reportRaw_ += piece; return; }         // synthèse du rapport : pas affichée
     if (turns_.isEmpty()) return;
     raw_ += piece;
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
     // Demande de calcul terminée (bloc ```calcul) et le modèle continue à écrire : la suite serait un résultat inventé
     // (il ne connaît pas encore les valeurs). SeldonH arrête la génération, fait le calcul et affiche la fiche ; le modèle
     // commente ensuite les vraies valeurs si la question le demande. Plusieurs blocs à la suite restent possibles.
-    if (!calcCut_ && !continuing_ && !turns_.last().followUp && !helpTurn()) {
+    if (!calcCut_ && !continuing_ && calcBlockAllowed()) {
         const QString a = QString::fromStdString(s.answer);
         qsizetype b0 = -1, b1 = -1;
         if (MethodRunner::lastCalcBlock(a, &b0, &b1)) {
@@ -1612,10 +1982,39 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     Turn& t = turns_.last();
     const SplitText s = splitThinking(raw_.toStdString(), startsInThink_);
     t.answer = QString::fromStdString(s.answer);       // texte complet (avec le bloc de modèle) : historique, enregistrement
+    if (t.synthetic) t.answer.remove(MethodRunner::calcDoneMarker());   // boucle d'agent : marque de fin, jamais affichée
     if (!modelExpected()) t.answer = ChrBuilder::stripModelBlocks(t.answer);     // bloc de modèle non demandé
     if (helpTurn()) t.answer = MethodRunner::stripCodeBlocks(t.answer);          // aide : phrases à taper, pas de code
+    // Ordre des couches écrit par l'utilisateur : SeldonH le lit lui-même et corrige le modèle d'IA (sens des contraintes
+    // inversé, contrainte oubliée, US sans date mise en Event), avant tout affichage ou enregistrement du modèle.
+    QStringList stratNotes;
+    QVector<seldon::suggest::ToDate> toDate;      // US à dater entre deux Events : question de la marche à suivre
+    if (!interrupted && modelExpected()) {
+        QJsonObject spec0;
+        QStringList mergeNotes;                   // clé « events » écrite deux fois, Event écrit deux fois (prompt du 13/11/2026)
+        if (ChrBuilder::extractSpec(t.answer, spec0, nullptr, &mergeNotes)) {
+            QStringList qs, joined;
+            static const QRegularExpression attachedRe(QStringLiteral(R"(\[Fichier joint : [^\]\n]*\]\n(.*?)(?=\n\n\[|\z))"),
+                                                       QRegularExpression::DotMatchesEverythingOption);
+            for (const Turn& u : std::as_const(turns_)) {
+                if (u.synthetic) continue;
+                qs << u.question;
+                // Fichiers joints (tableau CSV de ChronoModel joint avec 📎) : profondeurs du tableau, avec leur signe.
+                for (auto it = attachedRe.globalMatch(u.modelUser); it.hasNext();) joined << it.next().captured(1);
+            }
+            const seldon::strat::SpecCheck c = seldon::strat::checkSpec(spec0, qs, joined);
+            if (c.changed || !mergeNotes.isEmpty()) {
+                // Export du prompt : la réponse telle que le modèle l'a écrite, avant la correction de SeldonH.
+                t.prompt[QStringLiteral("reponse_avant_correction")] = t.answer;
+                stratNotes = mergeNotes + c.notes;
+                t.prompt[QStringLiteral("corrections_seldonh")] = QJsonArray::fromStringList(stratNotes);
+                t.answer = seldon::strat::replaceModelBlock(t.answer, c.changed ? c.spec : spec0);
+            }
+            for (const seldon::strat::Undated& u : c.undated) toDate.append({ u.name, u.older, u.younger });
+        }
+    }
     qsizetype b0 = -1, b1 = -1;
-    const bool endsWithCalc = !t.followUp && !helpTurn() && MethodRunner::lastCalcBlock(t.answer, &b0, &b1)
+    const bool endsWithCalc = calcBlockAllowed() && MethodRunner::lastCalcBlock(t.answer, &b0, &b1)
                               && (calcCut_ || t.answer.mid(b1).trimmed().isEmpty());
     if (endsWithCalc) t.answer.truncate(b1);           // texte écrit après la demande de calcul : inventé, retiré
     QString answer = shownAnswer(t.answer);
@@ -1626,7 +2025,12 @@ void MainWindow::finishAssistantMessage(bool interrupted)
         rest.remove(QStringLiteral("*Calcul confié à SeldonH.*"));
         static const QRegularExpression headings(QStringLiteral("^\\s*#+[^\\n]*$"), QRegularExpression::MultilineOption);
         rest.remove(headings);
-        if (rest.trimmed().size() < 300) { answer = calcRequestText(); calcRequestNote = true; }
+        if (rest.trimmed().size() < 300) {
+            QStringList blocked, warnings;
+            const bool runs = !sourcedCalcBlocks(MethodRunner::extractCalcBlocks(t.answer), &blocked, &warnings).isEmpty();
+            answer = runs ? calcRequestText() : tr("*Calcul demandé par le modèle d'IA, non lancé : voir l'avertissement ci-dessous.*");
+            calcRequestNote = true;
+        }
     }
     if (t.drewModel) {                                 // dessin fait par SeldonH : un bloc plot du modèle serait faux
         answer = ChrSceneWidget::stripPlotBlocks(answer);
@@ -1643,9 +2047,26 @@ void MainWindow::finishAssistantMessage(bool interrupted)
 
     if (!t.drewModel) applyPlotBlocks(t.answer);
 
+    // Nombres de la réponse qui ne viennent de rien de ce que le modèle a reçu (ni vos messages, ni un calcul de SeldonH,
+    // ni une fiche) : calculés de tête ou inventés. Signalés sous la réponse (principe : l'IA ne produit aucun résultat).
+    if (!interrupted && !calcRequestNote && !helpTurn()) {
+        const QStringList odd = seldon::provenance::unsourcedNumbers(t.answer, seldon::provenance::NumberPool(receivedText()));
+        if (!odd.isEmpty()) {
+            logNotice(tr("<p><i>⚠ Nombre(s) de cette réponse qui ne viennent ni de vos messages ni d'un calcul de SeldonH : "
+                         "%1. L'assistant les a calculés ou supposés lui-même : ne les utilisez pas sans vérification ; "
+                         "demandez plutôt le calcul à SeldonH (par exemple « calcule … »).</i></p>")
+                          .arg(odd.join(QStringLiteral(", ")).toHtmlEscaped()));
+        }
+    }
+
     // Modèle ChronoModel complet : il est dessiné tout de suite (scène des Events, et des phases s'il y en a).
     QJsonObject spec;
     if (!interrupted && ChrBuilder::extractSpec(t.answer, spec)) {
+        if (!stratNotes.isEmpty()) {
+            QString h = tr("<p><b>↕ Modèle vérifié par SeldonH d'après votre texte</b></p><ul>");
+            for (const QString& n : std::as_const(stratNotes)) h += QStringLiteral("<li>%1</li>").arg(n.toHtmlEscaped());
+            logNotice(h + QStringLiteral("</ul>"));
+        }
         const ChrResult r = ChrBuilder::build(spec);
         // Vérification croisée avec ce qu'a écrit l'utilisateur : valeurs ou références inventées, données oubliées.
         const QStringList gaps = ChrBuilder::crossCheck(spec, userSourceText());
@@ -1659,6 +2080,9 @@ void MainWindow::finishAssistantMessage(bool interrupted)
             lastChr_ = r.chr;
             lastChrTitle_ = r.suggestedName;
             showChrScenes(r.chr, r.suggestedName, true);
+            // Ce que l'utilisateur doit faire ensuite (ChronoModel, traces, question), écrit par SeldonH.
+            logNotice(seldon::suggest::modelSteps(spec, toDate, stepsShown_));
+            stepsShown_ = true;
         }
     }
 }
@@ -1696,6 +2120,37 @@ QString MainWindow::userSourceText() const
     return s;
 }
 
+QString MainWindow::calcSourceText() const
+{
+    QString s = userSourceText();
+    s += QLatin1Char('\n') + lexicon_.translate(s);              // nombres écrits en toutes lettres, autres langues
+    if (seldon::datatable::hasCurrent())
+        s += QLatin1Char('\n') + seldon::datatable::digest(seldon::datatable::current(), 1 << 20);
+    return s;
+}
+
+QString MainWindow::receivedText() const
+{
+    QString s;
+    for (const ChatMessage& m : buildChat(nullptr))
+        if (m.role != "assistant") s += QString::fromStdString(m.content) + QLatin1Char('\n');
+    return s + calcSourceText();
+}
+
+QVector<QJsonObject> MainWindow::sourcedCalcBlocks(const QVector<QJsonObject>& blocks, QStringList* blocked,
+                                                   QStringList* warnings) const
+{
+    const seldon::provenance::NumberPool pool(calcSourceText());
+    QVector<QJsonObject> ok;
+    for (const QJsonObject& b : blocks) {
+        const seldon::provenance::RequestCheck c = seldon::provenance::checkRequest(b, pool);
+        if (!c.ok()) { if (blocked) *blocked << c.measures; continue; }
+        if (warnings) *warnings << c.bounds;
+        ok << b;
+    }
+    return ok;
+}
+
 void MainWindow::showChrScenes(const QJsonObject& chr, const QString& name, bool inChat)
 {
     const QString base = QFileInfo(name).completeBaseName();
@@ -1729,6 +2184,8 @@ void MainWindow::showChrScenes(const QJsonObject& chr, const QString& name, bool
 
 void MainWindow::onFinished(const GenStats& st)
 {
+    if (classifying_) { onClassified(st, false); return; }
+    if (reporting_) { finishReport(st.stoppedByUser ? tr("rédaction arrêtée") : QString()); return; }
     generating_ = false;
     if (!turns_.isEmpty()) {
         Turn& t = turns_.last();
@@ -1738,6 +2195,14 @@ void MainWindow::onFinished(const GenStats& st)
         t.truncationDetail = QString::fromStdString(st.truncationDetail);
     }
     const bool stopped = st.stoppedByUser && !calcCut_;      // arrêt par SeldonH après un bloc de calcul : pas une interruption
+    // Boucle d'agent : « [FIN] » après un résultat = plus rien à calculer, pas de commentaire demandé (mode calculatrice).
+    if (!stopped && !turns_.isEmpty() && turns_.last().synthetic && !continuing_
+        && MethodRunner::isCalcDone(QString::fromStdString(splitThinking(raw_.toStdString(), startsInThink_).answer))) {
+        calcCut_ = false;
+        updateQuota(st);
+        finishCalcOnly();
+        return;
+    }
     finishAssistantMessage(stopped);
     calcCut_ = false;
     continuing_ = false;
@@ -1829,8 +2294,10 @@ void MainWindow::fetchRemoteContext()
 // Modèle distant : appel d'outils natif. Mêmes calculs que le bloc ```calcul (MethodRegistry), exécutés ici, sur cet
 // ordinateur ; seul le texte du résultat repart vers le serveur. Le tour est ensuite réécrit en bloc ```calcul dans
 // l'historique, de sorte que la conversation reste lisible par n'importe quel moteur.
-void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*text*/, const GenStats& /*st*/)
+void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*text*/, const GenStats& st)
 {
+    if (classifying_) { onClassified(st, true); return; }    // outils suspendus pendant l'aiguillage : réponse inutilisable
+    if (reporting_) { finishReport(tr("le modèle a demandé un calcul au lieu de rédiger")); return; }
     if (turns_.isEmpty()) { generating_ = false; updateControls(); return; }
     finishAssistantMessage(false);                      // texte écrit avant les appels (souvent vide)
     continuing_ = false;
@@ -1853,7 +2320,30 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
         QString args = c.arguments;
         if (const QJsonDocument a = QJsonDocument::fromJson(args.toUtf8()); a.isObject() && !chrDates_.isEmpty())
             args = QString::fromUtf8(QJsonDocument(MethodRunner::fillDateNames(a.object(), chrDates_)).toJson(QJsonDocument::Compact));
-        const tools::ToolOutcome o = tools::execute(c.name, args, fmt);
+        // Provenance : mesures inventées -> calcul refusé, le modèle doit les demander ; bornes choisies -> avertissement.
+        QStringList blocked, warnings;
+        if (const QJsonDocument a = QJsonDocument::fromJson(c.arguments.toUtf8()); a.isObject()) {
+            QJsonObject rq = a.object();
+            if (!rq.contains("method")) rq["method"] = c.name;
+            sourcedCalcBlocks({ rq }, &blocked, &warnings);
+        }
+        if (!blocked.isEmpty()) {
+            const QString msg = seldon::provenance::blockedMessage(blocked);
+            results.append({ c.id, c.name, msg });
+            allExecuted = false;
+            forModel << tr("[Retour de l'outil « %1 » (SeldonH)]\n%2").arg(c.name, msg);
+            logNotice(tr("<p><b>⚠ Calcul non lancé</b> : l'assistant a appelé <code>%1</code> avec des valeurs qui ne figurent "
+                         "pas dans vos messages (%2). Il doit vous les demander.</p>")
+                          .arg(c.name.toHtmlEscaped(), blocked.join(QStringLiteral(" ; ")).toHtmlEscaped()));
+            continue;
+        }
+        tools::ToolOutcome o = tools::execute(c.name, args, fmt);
+        if (o.executed && !warnings.isEmpty()) {
+            o.content.prepend(QStringLiteral("[%1]\n").arg(seldon::provenance::boundsMessage(warnings)));
+            o.run.noticeHtml.prepend(tr("<p><i>⚠ Valeur(s) choisie(s) par l'assistant, absente(s) de vos messages : %1. "
+                                        "Vérifiez-les avant d'utiliser ce résultat.</i></p>")
+                                         .arg(warnings.join(QStringLiteral(" ; ")).toHtmlEscaped()));
+        }
         results.append({ c.id, c.name, o.content });
         if (o.executed) {
             logNotice(o.run.noticeHtml);
@@ -1883,7 +2373,13 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
     t.view = newAssistantBubble();
     const bool comment = !allExecuted || wantsCalcComment(turns_[currentQuestionTurn()].question);
     turns_.append(t);
-    if (!comment) { finishCalcOnly(); return; }   // mode calculatrice : rien n'est renvoyé au serveur
+    // Boucle d'agent : plusieurs opérations dans la question -> les résultats repartent au serveur, qui peut appeler
+    // l'outil suivant (au plus maxCalcRounds_ étapes, et RemoteEngine::kMaxToolRounds allers-retours).
+    ++calcRounds_;
+    const bool chain = maxCalcRounds_ > 1;
+    const bool more = chain && calcRounds_ < maxCalcRounds_;
+    if (!comment && !more) { finishCalcOnly(); return; }   // mode calculatrice : rien n'est renvoyé au serveur
+    if (chain && !results.isEmpty()) results.last().content += QStringLiteral("\n\n") + MethodRunner::chainHint(calcRounds_, maxCalcRounds_, comment);
 
     raw_.clear();
     startsInThink_ = false;
@@ -1893,6 +2389,12 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
 
 void MainWindow::onFailed(const QString& error)
 {
+    if (classifying_) {                                       // aiguillage impossible : la question suit le chemin habituel
+        treeTrace_.append(QJsonObject{ { "erreur", error } });
+        onClassified(GenStats(), true);
+        return;
+    }
+    if (reporting_) { finishReport(tr("erreur du modèle (%1)").arg(error)); return; }
     generating_ = false;
     finishAssistantMessage(false);
     continuing_ = false;
@@ -1913,6 +2415,9 @@ void MainWindow::newConversation()
 void MainWindow::resetConversation(bool clearFigures)
 {
     turns_.clear();
+    calcRounds_ = maxCalcRounds_ = 1;             // boucle d'agent : rien en cours
+    stepsShown_ = false;
+    calcDone_.clear();
     display_.clear();
     datingPlotTurn_ = datingPlotItem_ = datingPlotFig_ = -1;
     datingPlotPage_ = nullptr;
@@ -2035,6 +2540,26 @@ void MainWindow::attachOne(const QString& f)
         }
         seldon::spreadsheet::Sheet sh;
         if (!seldon::spreadsheet::read(f, chosen, sh, &err)) { QMessageBox::warning(this, tr("Classeur"), err); return; }
+        // Cellules fusionnées (Philippe, 13/11/2026) : SeldonH propose de les défusionner lui-même (recopie exacte de la valeur
+        // de la première case dans toute la plage, `spreadsheet::unmerge`) ; sinon le classeur n'est pas joint et l'utilisateur
+        // le refait sans fusion. Jamais confié au modèle d'IA (il recopierait des valeurs).
+        if (!sh.merged.isEmpty()) {
+            QMessageBox box(QMessageBox::Warning, tr("Classeur"),
+                            tr("La feuille « %1 » contient des cellules fusionnées (%2).").arg(sh.name, sh.merged.mid(0, 6).join(QStringLiteral(", "))
+                                                                                                         + (sh.merged.size() > 6 ? QStringLiteral(", …") : QString())),
+                            QMessageBox::NoButton, this);
+            box.setInformativeText(tr("Une cellule fusionnée n'a de valeur que dans sa première case : le nom d'une carotte, par exemple, "
+                                      "ne serait lu que sur une ligne.\n\n"
+                                      "SeldonH peut défusionner : il recopie la valeur de la première case dans toutes les cases de la plage "
+                                      "(rien n'est deviné), puis lit le tableau ; la liste des plages défusionnées s'affiche avec le tableau, "
+                                      "pour vérification. Sinon, refaites le tableau sans fusion et joignez-le de nouveau."));
+            QPushButton* fix = box.addButton(tr("Défusionner et lire le tableau"), QMessageBox::AcceptRole);
+            box.addButton(tr("Annuler"), QMessageBox::RejectRole);
+            box.setDefaultButton(fix);
+            box.exec();
+            if (box.clickedButton() != fix) return;
+            seldon::spreadsheet::unmerge(sh);
+        }
         QStringList csvLines;                          // feuille en texte (« ; ») : format d'import de ChronoModel, ou repli
         for (const QStringList& r : sh.rows) csvLines << r.join(QLatin1Char(';'));
         const QString asText = csvLines.join(QLatin1Char('\n'));
@@ -2305,7 +2830,7 @@ void MainWindow::saveTableCsv(const QUrl& url)
 
 void MainWindow::applyPlotBlocks(const QString& answer)
 {
-    static const QRegularExpression re("^```plot[ \\t]*\\n(.*?)^```",
+    static const QRegularExpression re("^[ \\t]*```plot[ \\t]*\\n(.*?)^[ \\t]*```",
                                        QRegularExpression::DotMatchesEverythingOption | QRegularExpression::MultilineOption);
     auto it = re.globalMatch(answer);
     while (it.hasNext()) {
@@ -2714,6 +3239,123 @@ void MainWindow::saveTranscript()
     }
     if (ok) statusBar()->showMessage(tr("Conversation exportée : %1").arg(QDir::toNativeSeparators(path)), 6000);
     else QMessageBox::warning(this, tr("Exporter la conversation"), tr("Export impossible : %1").arg(err));
+}
+
+// Rapport de synthèse (13/11/2026) : le déroulé (questions, fiches de SeldonH, modèles, figures, avertissements) est
+// assemblé sans modèle de langage ; la synthèse est demandée au modèle chargé, à part (rien n'est affiché ni ajouté à la
+// conversation), ses nombres sont contrôlés (provenance). Sans modèle prêt, le rapport est écrit sans synthèse.
+void MainWindow::saveReport()
+{
+    if (generating_) {
+        statusBar()->showMessage(tr("Une réponse est en cours : attendez la fin ou arrêtez-la avant de faire le rapport."), 6000);
+        return;
+    }
+    QStringList answers;
+    for (const Turn& t : std::as_const(turns_)) answers << t.answer;
+    seldon::report::Report r = seldon::report::collect(display_, answers);
+    const bool any = std::any_of(r.steps.cbegin(), r.steps.cend(), [](const seldon::report::Step& s) { return !s.question.isEmpty(); });
+    if (!any) {
+        statusBar()->showMessage(tr("Rien à rapporter : posez d'abord une question."), 6000);
+        return;
+    }
+    const QString txtFilter = tr("Texte (*.txt)"), docxFilter = tr("Document Word (*.docx)");
+    QString filter = docxFilter;
+    QString path = QFileDialog::getSaveFileName(this, tr("Rapport de synthèse"), QDir::homePath() + "/rapport_seldonh.docx",
+                                                docxFilter + ";;" + txtFilter, &filter);
+    if (path.isEmpty()) return;
+    const QString suffix = QFileInfo(path).suffix().toLower();
+    const bool docx = suffix == QLatin1String("docx") || (suffix != QLatin1String("txt") && filter == docxFilter);
+    if (docx && suffix != QLatin1String("docx")) path += QStringLiteral(".docx");
+    if (!docx && suffix != QLatin1String("txt")) path += QStringLiteral(".txt");
+
+    r.title = tr("Rapport de synthèse — %1").arg(convTitle_ && convTitle_->isEnabled() ? convTitle_->text() : tr("conversation SeldonH"));
+    r.created = convCreated_;
+    r.backend = modelLabel();
+    report_ = r;
+    reportPath_ = path;
+
+    if (!modelReady_) {
+        finishReport(tr("aucun modèle de langage chargé"));
+        return;
+    }
+    const int budget = remoteActive() ? 24000 : std::clamp(settings_.nCtx * 2, 3000, 12000);   // ~ la moitié du contexte
+    reportPrompt_ = seldon::report::promptFor(report_, budget);
+    QVector<ChatMessage> chat;
+    const QVector<ChatMessage> base = buildChat(nullptr);
+    if (!base.isEmpty() && base.first().role == "system") chat.append(base.first());
+    chat.append(ChatMessage{ "user", reportPrompt_.toStdString() });
+    SamplingParams sp;
+    sp.temperature = 0.3f;
+    sp.maxTokens = remoteActive() ? 1500 : 700;
+    sp.enableThinking = false;
+    reporting_ = true;
+    reportRaw_.clear();
+    generating_ = true;
+    updateControls();
+    statsLabel_->setText(tr("Rapport : le modèle rédige la synthèse…"));
+    if (remote_) remote_->setToolsSuspended(true);
+    if (remoteActive()) emit requestRemoteGenerate(chat, sp);
+    else emit requestGenerate(chat, sp);
+}
+
+void MainWindow::finishReport(const QString& note)
+{
+    const bool generated = reporting_;
+    reporting_ = false;
+    generating_ = false;
+    updateControls();
+    if (generated) {
+        const QString summary = seldon::report::cleanSummary(QString::fromStdString(splitThinking(reportRaw_.toStdString(), startsInThink_).answer));
+        if (summary.isEmpty()) {
+            report_.summaryNote = note.isEmpty() ? tr("réponse vide du modèle") : note;
+        } else {
+            report_.summary = summary;
+            report_.summaryModel = modelLabel();
+            report_.unsourced = seldon::provenance::unsourcedNumbers(summary, seldon::provenance::NumberPool(reportPrompt_));
+            if (!note.isEmpty()) report_.summary += tr("\n\n*(%1 : synthèse incomplète)*").arg(note);
+        }
+    } else {
+        report_.summaryNote = note;
+    }
+    QString err;
+    const QString path = QDir::toNativeSeparators(reportPath_);
+    if (writeReport(&err)) {
+        statsLabel_->setText(tr("Rapport enregistré."));
+        statusBar()->showMessage(report_.unsourced.isEmpty() ? tr("Rapport de synthèse enregistré : %1").arg(path)
+                                                             : tr("Rapport enregistré : %1 — ⚠ nombre(s) de la synthèse à vérifier (voir le rapport).").arg(path),
+                                 10000);
+    } else {
+        QMessageBox::warning(this, tr("Rapport de synthèse"), tr("Écriture impossible : %1").arg(err));
+    }
+}
+
+bool MainWindow::writeReport(QString* error)
+{
+    if (reportPath_.endsWith(QLatin1String(".txt"), Qt::CaseInsensitive)) {
+        QSaveFile f(reportPath_);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) { if (error) *error = f.errorString(); return false; }
+        f.write(seldon::report::toPlainText(report_).toUtf8());
+        if (!f.commit()) { if (error) *error = f.errorString(); return false; }
+        return true;
+    }
+    // Word : courbes rendues en images (ressources du document) ; scènes d'un .chr citées par leur titre.
+    QTextDocument doc;
+    auto url = [this](int step, int k) -> QString {
+        const QJsonObject& p = report_.steps.at(step).plots.at(k);
+        if (p.contains(QLatin1String("chr_scene"))) return QString();
+        return QStringLiteral("report_fig_%1_%2.png").arg(step).arg(k);
+    };
+    for (int i = 0; i < report_.steps.size(); ++i)
+        for (int k = 0; k < report_.steps[i].plots.size(); ++k) {
+            const QString u = url(i, k);
+            if (u.isEmpty()) continue;
+            const QImage img = FigurePanel::thumbnailJson(report_.steps[i].plots[k], 900, 1.0);
+            if (!img.isNull()) doc.addResource(QTextDocument::ImageResource, QUrl(u), QVariant::fromValue(img));
+        }
+    doc.setHtml(seldon::report::toHtml(report_, url));
+    seldon::docx::Options o;
+    o.title = report_.title;
+    return seldon::docx::write(doc, reportPath_, o, error);
 }
 
 void MainWindow::openModelsFolder()

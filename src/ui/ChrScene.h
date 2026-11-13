@@ -27,11 +27,15 @@ SPDX-License-Identifier: GPL-3.0-or-later
 --------------------------------------------------------------------- */
 
 // ChrSceneWidget : dessin d'un projet ChronoModel (.chr), à la manière de ses deux scènes.
-//   - « scène des Events » : une boîte par événement à sa position (item_x, item_y = centre de la boîte), bandeau de titre
-//     à la couleur de l'événement, cadre des paramètres de courbe (modèle avec courbe), puis le nom de chacune de ses
-//     dates avec un court résumé ; une borne
-//     affiche sa valeur fixe ; flèches des contraintes stratigraphiques, du plus ancien (bwd_id) vers le plus récent (fwd_id).
-//   - « scène des phases » : une boîte par phase avec les noms des événements qu'elle contient ; flèches de succession.
+//   - Dessin repris de ChronoModel (EventItem, BoundItem, DateItem, PhaseItem, ArrowItem), la mesure de chaque date
+//     remplaçant la miniature de sa calibration.
+//   - « scène des Events » : une boîte par événement à sa position (item_x, item_y = centre de la boîte), remplie à la
+//     couleur de l'événement, une case blanche par date (nom, mesure), cadre violet des paramètres de courbe, barre des
+//     phases en bas ; nœud de courbe : double contour ; puis le nom de chacune de ses
+//     dates avec un court résumé ; une borne (Event de type Bound) est dessinée dans un ovale, affiche sa valeur
+//     fixe et, avec une courbe, ses mesures comme les autres Events ; flèches des contraintes stratigraphiques, du plus ancien (bwd_id) vers le plus récent (fwd_id).
+//   - « scène des phases » : une boîte par phase avec les noms des événements qu'elle contient (borne : forme arrondie)
+//     et sa durée (« Durée ≤ 20 », « Span uniforme ») ; flèches de succession avec le hiatus dans une bulle.
 // Le dessin s'ajuste au panneau ; molette : zoom, glisser : déplacer, double-clic : vue d'ensemble. Export PNG et SVG.
 #pragma once
 
@@ -52,15 +56,20 @@ class ChrSceneWidget : public QWidget {
 public:
     enum Kind { Events, Phases };
 
-    struct Line { QString text; QString detail; QColor color; };
+    struct Line { QString text; QString detail; QColor color; bool bound = false; };   // bound : Event borne (scène des phases)
     struct Box {
         int          id = -1;
         QString      title;
         QColor       color;
-        QStringList  params;               // paramètres de courbe de l'événement (cadre sous le titre)
-        QVector<Line> lines;
-        QRectF       rect;                 // coordonnées de la scène (celles du .chr)
-        bool         bound = false;
+        QStringList  params;               // paramètres de courbe de l'événement (cadre violet, texte de ChronoModel)
+        QVector<Line> lines;               // Events : une case par date (nom, mesure) ; phases : ses Events
+        QVector<Line> chips;               // Events : ses phases (barre du bas, à leur couleur)
+        QString      footer;               // phases : durée (« Durée ≤ 20 », « Span uniforme »), vide si inconnue
+        QRectF       rect;                 // coordonnées de la scène (celles du .chr) : cadre extérieur (peau d'un nœud comprise)
+        QRectF       shape;                // rectangle de l'Event ou de la phase, ou rectangle circonscrit à l'ellipse d'une borne
+        QRectF       content;              // zone du contenu : le rectangle, ou le rectangle inscrit dans l'ellipse
+        bool         bound = false;        // Event de type Bound : ellipse couchée (BoundItem)
+        bool         node = false;         // nœud de courbe (point_type 1) : double contour
     };
     struct Link { int from = -1, to = -1; QString label; };   // indices dans boxes() ; from = plus ancien ; label : hiatus γ
 

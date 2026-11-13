@@ -203,6 +203,28 @@ inline double yearFromText(QString s)
     return std::nan("");
 }
 
+// Date écrite comme un âge avec son unité, dans une demande de calcul (prompt réel du 10/11/2026 : « quelle niveau en t=6000
+// Age cal BP ») : « 6000 cal BP », « 6000 BP », « 6000 Age cal BP », « 6000 b2k », « 6,5 ka BP », « 6,5 ka cal BP », « 1,2 Ma BP ».
+// Renvoie l'année calendaire signée (1950 − âge, 2000 − âge en b2k), NaN si le texte n'est pas un tel âge ; `written` reçoit
+// le nombre tel qu'il est écrit (contrôle de provenance). Réservé aux champs de DATE : « age » d'une datation 14C
+// (« 2500 BP ») n'est pas une date calendaire.
+inline double yearFromAgeText(QString s, double* written = nullptr)
+{
+    s = s.trimmed();
+    s.remove(QChar(0x00A0)).remove(QChar(0x202F));
+    static const QRegularExpression re(QStringLiteral(
+        R"(^([-−]?\d+(?:[.,]\d+)?)\s*(ka|ma|kyr|myr)?\s*(?:[aâ]ge\s+)?(?:cal\.?\s*)?(bp|b2k)(?:\s*cal\.?)?$)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto m = re.match(s);
+    if (!m.hasMatch()) return std::nan("");
+    const double v = toNumber(m.captured(1));
+    if (written) *written = v;
+    const QString u = m.captured(2).toLower();
+    const double scale = u == QLatin1String("ka") || u == QLatin1String("kyr") ? 1e3 : u.isEmpty() ? 1.0 : 1e6;
+    const double origin = m.captured(3).toLower() == QLatin1String("b2k") ? 2000.0 : 1950.0;
+    return origin - v * scale;
+}
+
 // Texte où chaque année écrite avec son ère devient l'année astronomique signée, avant la lecture des dates :
 //   « entre 500 av. J.-C. et 400 av. J.-C. » -> « entre -499 et -399 » ; « entre 800 et 900 av. J.-C. » -> « entre -799 et -899 » ;
 //   « 500 ± 20 av. J.-C. » -> « -499 ± 20 » ; « AD 1200 », « 1200 apr. J.-C. » -> « 1200 ». Les âges BP ne sont pas touchés.

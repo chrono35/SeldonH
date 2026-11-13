@@ -43,6 +43,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "src/core/Calculator.h"
 #include "src/core/ChronoResults.h"
 #include "src/core/ConversationStore.h"
+#include "src/core/Report.h"
 #include "src/llm/LlmEngine.h"
 #include "src/llm/RemoteApi.h"
 #include "src/llm/ToolsProbe.h"
@@ -95,6 +96,7 @@ private slots:
     void attachFile();
     void clearAttachment();
     void saveTranscript();
+    void saveReport();                                   // rapport de synthèse de la conversation (.txt ou .docx)
     void openSkillsFolder();
     void openModelsFolder();
     void reloadSkills();
@@ -143,6 +145,7 @@ private:
         bool        calcOnly = false;   // résultat de SeldonH affiché seul, sans réponse du modèle (lien « Demander un commentaire »)
         bool        help = false;       // question sur l'utilisation de SeldonH : réponse en phrases, sans code ni calcul
         QStringList suites;             // suites proposées sous la réponse (affichage seulement ; montrées sous la dernière réponse)
+        bool        levelEstimate = false;  // relation entre niveaux du modèle calculée par SeldonH : pas de nouveau modèle
     };
     QVector<QJsonObject> turnRuns_;
     bool turnHasResults_ = false;       // journaux de ChronoModel joints à la question en cours     // demandes calculées par SeldonH pendant le tour en cours (pour les suites)
@@ -152,6 +155,14 @@ private:
     bool wantsCalcComment(const QString& question) const;   // réglage « Commentaire après un calcul » appliqué à la question
     bool helpTurn() const;
     QString curvesListHtml(QString* plain = nullptr) const;  // liste complète des courbes de référence (menu, question)                                  // la question en cours porte sur l'utilisation de SeldonH
+    bool calcBlockAllowed() const;
+    bool startTree(const QString& q, const QString& qk, const QStringList& earlierQs);  // vrai : aiguillage lancé (réponse différée)
+    void treeAskOrder();                                     // courbe âge-profondeur sans ordre écrit : question à l'utilisateur
+    void treeStep();                                         // nœud courant : détecteur de SeldonH, sinon question au modèle
+    bool treeApply(const QString& choice, bool bySeldon);    // vrai : nœud suivant ; faux : feuille atteinte (treeFinish appelé)
+    void treeFinish(bool abort = false);                     // fin de l'aiguillage : sendMessage reprend (ou arrêt demandé)
+    void onClassified(const seldon::GenStats& st, bool failed);
+    QString treeDetector(const QString& node) const;         // réponse sûre de SeldonH à un nœud, sans le modèle (vide sinon)                          // un bloc calcul de la réponse en cours sera exécuté (boucle d'agent)
     void finishCalcOnly(const QString& shown = QString());  // termine le dernier tour sans génération (mode calculatrice)
     void applyRunExtras(const seldon::RunOutcome& out);           // modèle ChronoModel préparé par SeldonH (tableau) : dessiné, gardé
     bool saveChrSpec(const QJsonObject& spec);              // enregistre un modèle (spécification du bloc chronomodel) en .chr
@@ -176,7 +187,8 @@ private:
     void rememberChrDates(const QJsonObject& chr);
     static QString historyUser(const Turn& t);          // message d'un tour passé, sans ses fiches de connaissances
     static QString calcOnlyContext(const Turn& t);      // tour « calcul seul » mis en contexte du message suivant
-    QString shownAnswer(const QString& answer) const;   // bloc de modèle remplacé par un résumé (JSON seulement sur demande)
+    QString shownAnswer(const QString& answer) const;
+    QString notRunNote() const;           // mention d'un bloc « calcul » qui ne sera pas exécuté (réponse de suite)   // bloc de modèle remplacé par un résumé (JSON seulement sur demande)
     bool modelExpected() const;                           // la conversation demande un modèle ChronoModel (bloc chronomodel admis)
     // Messages envoyés au modèle. `refs` (facultatif) : les mêmes messages sous forme compacte, pour l'instantané du prompt.
     QVector<seldon::ChatMessage> buildChat(QJsonArray* refs = nullptr) const;
@@ -189,6 +201,14 @@ private:
     // Ce qu'a donné l'utilisateur dans la conversation : ses questions et le texte de ses fichiers joints (vérification
     // croisée d'un modèle écrit par le modèle de langage).
     QString userSourceText() const;
+    // Provenance des nombres (src/core/Provenance.*) : l'IA sert d'intermédiaire, elle ne fournit aucune valeur elle-même.
+    //  - calcSourceText : ce que l'utilisateur a donné (userSourceText, traduit par le lexique, + tableau courant) ;
+    //  - receivedText   : tout ce que le modèle a reçu (message système, questions, fiches, résultats de SeldonH) ;
+    //  - sourcedCalcBlocks : demandes de calcul de l'assistant dont les mesures viennent de l'utilisateur ; les autres
+    //    sont écartées, avec leurs raisons dans `blocked` (et les bornes choisies par le modèle dans `warnings`).
+    QString calcSourceText() const;
+    QString receivedText() const;
+    QVector<QJsonObject> sourcedCalcBlocks(const QVector<QJsonObject>& blocks, QStringList* blocked, QStringList* warnings) const;
     void saveChrFromTurn(int turn);
     // Dessine un .chr dans le panneau : scène des Events et, s'il a des phases, scène des phases. `inChat` : avis et
     // vignettes cliquables ajoutés à la discussion (et à l'historique).
@@ -310,6 +330,30 @@ private:
     double               lastLocalTps_ = 0;     // vitesse de génération mesurée sur la dernière réponse locale
     bool                 continuing_ = false;   // génération en cours = suite d'une réponse coupée
     bool                 calcCut_ = false;      // génération arrêtée par SeldonH juste après un bloc de calcul (pas par l'utilisateur)
+    // Boucle d'agent du modèle local (12/11/2026) : étapes « bloc calcul → résultat » faites pour la question en cours et
+    // plafond déduit de la question (MethodRunner::maxCalcRounds). Hors d'une question (conversation rouverte) : 1 / 1.
+    int                  calcRounds_ = 1;
+    int                  maxCalcRounds_ = 1;
+    QStringList          calcDone_;
+    bool                 stepsShown_ = false;
+    // Arbre de décision (12/11/2026) : questions fermées posées au modèle avant la réponse (branche « construire un modèle »).
+    // Rapport de synthèse (13/11/2026) : déroulé assemblé par SeldonH, synthèse rédigée par le modèle de langage pendant une
+    // génération à part (ni affichée, ni ajoutée à la conversation), puis fichier écrit.
+    bool                 reporting_ = false;
+    QString              reportRaw_, reportPath_, reportPrompt_;
+    seldon::report::Report report_;
+    void finishReport(const QString& note);              // note vide : synthèse reçue ; sinon raison de son absence
+    bool writeReport(QString* error);
+    bool                 classifying_ = false;   // génération en cours = réponse à une question de l'arbre
+    bool                 treeDone_ = false;      // aiguillage terminé : sendMessage reprend avec ses réponses
+    QString              treeInput_, treeQuestion_, treeQk_, treeNode_, classRaw_;
+    QStringList          treeEarlier_;           // questions précédentes de la conversation
+    QStringList          treeShown_;             // chemin pour l'utilisateur (« courbe : non › stratigraphie : oui »)
+    QJsonArray           treeTrace_;             // chemin détaillé, gardé dans l'export du prompt
+    QJsonArray           treeTraceForPrompt_;
+    QVector<QPair<QString, QString>> treePath_;  // (nœud, choix) de la racine à la feuille
+    QStringList          treeSkills_;            // fiches du chemin (« ajoute » et feuille)
+    QJsonObject          treeParams_;            // paramètres de la feuille (« courbe », « strati »)   // marche à suivre d'un modèle déjà montrée dans la conversation (ensuite : rappel court)             // demandes déjà exécutées pour la question en cours (JSON compact) : pas de doublon
 };
 
 #endif // MAINWINDOW_H

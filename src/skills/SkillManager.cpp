@@ -113,6 +113,16 @@ int SkillManager::reload(const QString& userDir)
     return skills_.size();
 }
 
+namespace {
+// `k` figure dans `q` à partir d'un début de mot (« courbes » trouve « courbe », pas « graph » dans « stratigraphique »).
+bool startsWord(const QString& q, const QString& k)
+{
+    for (qsizetype i = q.indexOf(k); i >= 0; i = q.indexOf(k, i + 1))
+        if (i == 0 || !q.at(i - 1).isLetterOrNumber()) return true;
+    return false;
+}
+} // namespace
+
 QList<SkillMatch> SkillManager::select(const QString& question, int maxChars, const QStringList& exclude,
                                        const QStringList& pinned) const
 {
@@ -128,17 +138,20 @@ QList<SkillMatch> SkillManager::select(const QString& question, int maxChars, co
     for (const Skill& s : skills_) {
         if (s.always || pinned.contains(s.id) || exclude.contains(s.id)) continue;
 
+        // Correspondances en début de mot seulement : « graph » ne doit pas venir de « stratigraphiques », ni « fond » de
+        // « profondeur » (prompt réel du 12/11/2026 : fiches « Tracer des courbes » et « âge-profondeur » sans raison).
         int score = 0;
         for (const QString& k : s.keywords) {
-            if (k.contains(' ')) { if (q.contains(k)) score += 4; }
+            if (k.contains(' ')) { if (startsWord(q, k)) score += 4; }
             else if (qWords.contains(k)) score += 3;
-            else if (k.size() > 4 && q.contains(k)) score += 2;     // préfixe / pluriel
+            else if (k.size() > 4 && startsWord(q, k)) score += 2;     // préfixe / pluriel
         }
-        // Un peu de recouvrement avec le titre et la description.
-        const QString nd = normalize(s.name + ' ' + s.description);
+        if (score == 0) continue;                                   // aucun mot-clé : la description seule ne suffit pas
+        // Un peu de recouvrement avec le titre et la description (mots entiers).
+        const QStringList nd = normalize(s.name + ' ' + s.description).split(QRegularExpression("[^a-z0-9]+"), Qt::SkipEmptyParts);
         for (const QString& w : qWords)
             if (nd.contains(w)) score += 1;
-        if (score > 0) scored.append({ &s, score * 10 + s.priority });
+        scored.append({ &s, score * 10 + s.priority });
     }
     std::sort(scored.begin(), scored.end(), [](const SkillMatch& a, const SkillMatch& b) { return a.score > b.score; });
 

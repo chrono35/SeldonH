@@ -111,6 +111,9 @@ public:
     // {"type":"range","min":a,"max":b} ou {"type":"gaussian","mean":m,"error":e}.
     // Vrai si la question demande de combiner ses datations en un événement (« calcule l'événement… », « combine »).
     static bool asksEvent(const QString& question);
+    // Demande explicite d'un Event ou d'une combinaison (« combine », « calcule l'événement », « même événement », « regroupe »),
+    // et pas le simple mot « événement(s) » d'un texte descriptif (« succession des événements »).
+    static bool asksEventExplicitly(const QString& question);
     // Combinaison de datations d'une même date (« Combine » de ChronoModel, produit des vraisemblances), éventuellement
     // de méthodes différentes et avec décalages (wiggle) :
     //   {"method":"combine", "name":"Four 3", "dates":[{"method":"c14",…}, {"method":"am",…, "wiggle":{…}}],
@@ -131,6 +134,10 @@ public:
     static bool asksOrder(const QString& question);
     // La question relie des dates : ordre, durée ou écart, date entre deux termes, appartenance à un intervalle.
     static bool asksRelation(const QString& question);
+    // Datations reliées par la stratigraphie (« US 1 au-dessus », « US 3 au fond », « dater l'US 2 du milieu », couches,
+    // niveaux, recoupe, scelle…) avec au moins deux datations dans la question : contrainte temporelle, la réponse passe
+    // par un modèle ChronoModel (fiche 24) et non par un calcul direct sur les dates indépendantes.
+    static bool asksStratigraphicDating(const QString& question);
     // Traces MCMC chargées (traces::loaded) et colonnes citées dans la question, éventuellement avec des datations
     // écrites dans la question (relation mixte) : demande « relation ». Vide si aucune trace chargée ou rien de reconnu.
     //   « durée entre N(500) et N(200) » -> {"method":"relation","op":"duration","from":"N(500)","to":"N(200)"}
@@ -151,13 +158,23 @@ public:
     // (durée, ordre, date entre) ; vide sinon.
     // `previous` : datations des questions précédentes ; un objet {"_column": "<nom>"} désigne une colonne des traces jointes.
     static QVector<QJsonObject> relationWithPrevious(const QString& question, const QVector<QJsonObject>& previous);
+    // Relation (durée, ordre, date entre…) entre des niveaux ou Events du dernier modèle de la conversation (`chr`, format
+    // .chr) : « combien de temps sépare le niveau -21 du niveau -29 ? », « durée entre 21 cm et 29 cm » (prompt réel du
+    // 12/11/2026). Un Event est reconnu par son nom ou par sa profondeur (X_Inc_Depth, au signe près : « 21 cm » ↔ -21).
+    // Termes : colonnes des traces jointes si elles portent ces Events (`posterior` vrai : stratigraphie comprise), sinon
+    // les dates de chaque Event, calibrées INDÉPENDAMMENT (estimation sans la stratigraphie). `levels` : noms des Events
+    // retenus, dans l'ordre de la question. Vide s'il n'y a pas au moins deux Events reconnus ou pas de relation.
+    static QVector<QJsonObject> relationWithModelLevels(const QString& question, const QJsonObject& chr,
+                                                        QStringList* levels = nullptr, bool* posterior = nullptr);
     // Calibration inverse demandée dans la question : « quel âge 14C attendre pour un échantillon de 6300 av. J.-C. ? »,
     // « quelle inclinaison pour l'an 1200 ± 20 ? », « calibration inverse entre 800 et 900 ». Année en BC/AD lue comme
     // l'affichage (N av. J.-C. = 1 − N) ; t_error seulement s'il est écrit. Objet vide si ce n'en est pas une.
     static QJsonObject inverseFromQuestion(const QString& question);
     // Réponse du modèle à l'écran : blocs « calcul », blocs json de calcul et JSON de calcul écrit dans le texte
     // remplacés par une mention (« Calcul confié à SeldonH ») ; tout est montré si l'utilisateur a demandé le JSON.
-    static QString hideCalcBlocks(const QString& markdown, bool showJson);
+    // `note` remplace la mention : blocs qui ne seront PAS exécutés (réponse qui commente un calcul déjà fait), pour ne
+    // pas annoncer à l'utilisateur un calcul qui n'aura pas lieu.
+    static QString hideCalcBlocks(const QString& markdown, bool showJson, const QString& note = QString());
     // Dernier bloc de calcul COMPLET d'une réponse (```calcul, ou ```json qui contient une demande de calcul) : position de
     // début et de fin (après la clôture). Faux s'il n'y en a pas. Sert à arrêter la génération après la demande de calcul :
     // ce que le modèle écrit ensuite (résultat supposé) serait inventé.
@@ -191,6 +208,19 @@ public:
     // Marque placée en tête d'une fiche de calcul (commentaire HTML lu par ChatView, qui en fait le bandeau de la fiche).
     static QString cardMarker(const QString& title);
     static QString externalResultHeader();
+    // Boucle d'agent du modèle local : opérations de calcul distinctes citées dans la question (calibration, combinaison,
+    // événement, ordre/comparaison, durée, date entre, appartenance, corrélation, calibration inverse, fichier de densité),
+    // ou nombre d'étapes écrites en séquence (« puis », « ensuite », « then ») si c'est plus. 0 : aucune opération reconnue.
+    static int countOperations(const QString& question);
+    // Plafond des étapes « bloc calcul → résultat » pour une question : 1 (comportement d'avant) pour une seule opération,
+    // sinon opérations + 1, au plus kMaxCalcRounds. La boucle s'arrête plus tôt si le modèle ne demande plus rien.
+    static constexpr int kMaxCalcRounds = 4;
+    static int maxCalcRounds(const QString& question);
+    // Réponse du modèle qui signale qu'il n'a plus de calcul à demander (sans commentaire demandé) : « [FIN] ».
+    static QString calcDoneMarker();
+    static bool isCalcDone(const QString& answer);
+    // Consigne ajoutée au résultat d'une étape : demander l'opération suivante, ou répondre / écrire [FIN].
+    static QString chainHint(int done, int max, bool comment);
     // La question demande explicitement les traces des chaînes MCMC (« avec les traces », « trace de θ », « trace plot »…).
     static bool asksTraces(const QString& question);
     // Couleur d'une date ou d'un événement : « color » ("#rrggbb" ou nom), ou red/green/blue (format .chr). Vide sinon.

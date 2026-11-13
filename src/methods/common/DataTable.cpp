@@ -407,13 +407,51 @@ Table fromGrid(const QVector<QStringList>& grid, const QString& source, QString*
     t.headers = grid[header];
     for (QString& h : t.headers) h = clean(h);
     t.roles = roles;
+    // En-tête sur deux lignes (cas réel du 13/11/2026 : « Depth » au-dessus de « (cm) ») : une case vide ou qui ne donne
+    // qu'une unité entre parenthèses reçoit le texte de la ligne du dessus, si cette ligne a au moins deux cases remplies
+    // (ce n'est pas un titre) et qu'elle est juste au-dessus dans la feuille.
+    bool twoLines = false;
+    if (header > 0) {
+        const QStringList& up = grid[header - 1];
+        int filled = 0;
+        for (const QString& u : up) if (!clean(u).isEmpty()) ++filled;
+        const bool adjacent = lineNumbers.size() <= header || lineNumbers[header] == lineNumbers[header - 1] + 1;
+        if (filled >= 2 && adjacent) {
+            QSet<int> used;
+            for (const Role ro : std::as_const(t.roles)) if (ro != Role::Other) used.insert(int(ro));
+            for (int c = 0; c < t.headers.size() && c < up.size(); ++c) {
+                const QString u = clean(up[c]), h = t.headers[c];
+                if (u.isEmpty() || !(h.isEmpty() || h.startsWith(QLatin1Char('(')))) continue;
+                t.headers[c] = h.isEmpty() ? u : u + QLatin1Char(' ') + h;
+                twoLines = true;
+                if (t.roles[c] == Role::Other) {
+                    const Role ro = roleOf(t.headers[c]);
+                    if (ro != Role::Other && !used.contains(int(ro))) { t.roles[c] = ro; used.insert(int(ro)); }
+                }
+            }
+        }
+    }
+    // Noms de colonnes en double : « (2) », « (3) »… pour pouvoir les désigner.
+    {
+        const QStringList orig = t.headers;
+        for (int c = 0; c < t.headers.size(); ++c) {
+            if (orig[c].isEmpty()) continue;
+            int n = 1;
+            for (int d = 0; d < c; ++d) if (orig[d] == orig[c]) ++n;
+            if (n > 1) t.headers[c] = orig[c] + QStringLiteral(" (%1)").arg(n);
+        }
+    }
     // Colonne « Type » ou « Méthode » dont aucune valeur n'est une méthode de datation (type de matériau…) : colonne ordinaire.
     if (const int mc = t.roles.indexOf(Role::Method); mc >= 0) {
         bool any = false;
         for (int r = header + 1; r < grid.size() && !any; ++r) any = mc < grid[r].size() && !methodFromText(grid[r][mc]).isEmpty();
         if (!any) t.roles[mc] = Role::Other;
     }
-    if (header > 0) t.notes << QStringLiteral("%1 ligne(s) au-dessus de l'en-tête ignorée(s) (titre, notes)").arg(header);
+    if (twoLines) t.notes << QStringLiteral("en-tête sur deux lignes (lignes %1 et %2) : noms de colonnes réunis (« %3 »…)")
+                             .arg(t.headerLine - 1).arg(t.headerLine)
+                             .arg([&] { for (const QString& h : std::as_const(t.headers)) if (h.contains(QLatin1Char(' '))) return h; return t.headers.value(0); }());
+    if (header > (twoLines ? 1 : 0))
+        t.notes << QStringLiteral("%1 ligne(s) au-dessus de l'en-tête ignorée(s) (titre, notes)").arg(header - (twoLines ? 1 : 0));
     for (int r = header + 1; r < grid.size(); ++r) {
         QStringList row = grid[r];
         bool empty = true;
@@ -503,6 +541,18 @@ bool looksLikeTable(const QString& text, int* start, int* length)
             }
         }
         if (bestFirst >= 0 && bestLast - bestFirst + 1 >= 2) {
+            // Description en phrases, pas un tableau (prompt réel du 13/11/2026, courbe I, D, F des Açores) : lignes à puce
+            // (« - PI02 : éruption historique de 1563 ; I = 39,0°, D = -1,7° ; F = 43,9 ± 6,1 µT. ») ou cellules
+            // « clé = valeur ». Une copie de tableur ou un CSV n'a ni l'un ni l'autre.
+            static const QRegularExpression bullet(QStringLiteral(R"(^\s*[-*•–—]\s+\S)"));
+            static const QRegularExpression assign(QStringLiteral(R"(\w\s*=\s*-?\d)"));
+            int bullets = 0, assigns = 0;
+            const int n = bestLast - bestFirst + 1;
+            for (int i = bestFirst; i <= bestLast; ++i) {
+                if (bullet.match(lines[i]).hasMatch()) ++bullets;
+                if (assign.match(lines[i]).hasMatch()) ++assigns;
+            }
+            if (2 * bullets >= n || 2 * assigns >= n) continue;
             if (start || length) {
                 int a = 0;
                 for (int i = 0; i < bestFirst; ++i) a += lines[i].size() + 1;
@@ -685,7 +735,8 @@ QString summaryHtml(const Table& t)
         h += QStringLiteral("<p><i>⚠ %1 ligne(s) non datable(s) : %2%3</i></p>")
                  .arg(bad.size()).arg(esc(bad.mid(0, 8).join(QStringLiteral(" ; "))), bad.size() > 8 ? QStringLiteral(" …") : QString());
     }
-    for (const QString& n : t.notes) h += QStringLiteral("<p><i>ℹ %1.</i></p>").arg(esc(n));
+    for (const QString& n : t.notes)                         // « ⚠ … » (cellules fusionnées) : avertissement, en gras
+        h += n.startsWith(QChar(0x26A0)) ? QStringLiteral("<p><b>%1.</b></p>").arg(esc(n)) : QStringLiteral("<p><i>ℹ %1.</i></p>").arg(esc(n));
     QVector<int> all;
     for (int r = 0; r < t.cells.size(); ++r) all << r;
     h += rowsHtml(t, all, 30);
@@ -715,6 +766,11 @@ QString digest(const Table& t, int budget)
     QStringList bad;
     for (int r = 0; r < t.cells.size(); ++r) if (t.requests[r].isEmpty()) bad << QStringLiteral("#%1 (%2)").arg(r + 1).arg(t.problems[r]);
     if (!bad.isEmpty()) s += QStringLiteral("Lignes non datables : %1.\n").arg(bad.mid(0, 10).join(QStringLiteral(", ")));
+    // Avertissements de lecture (« ⚠ Cellules fusionnées… ») : le modèle d'IA doit les relayer et ne rien calculer.
+    for (const QString& n : t.notes)
+        if (n.startsWith(QChar(0x26A0)))
+            s += QStringLiteral("%1. CONSIGNE : dis-le à l'utilisateur et demande-lui de refaire le tableau sans fusion ; ne lance "
+                                "aucun calcul ni modèle avec ce tableau et ne devine pas les valeurs des cases vides.\n").arg(n);
     // Lignes (dans le budget) : pour choisir par nom ou par valeur. Le modèle ne les recopie jamais.
     QString rows;
     for (int r = 0; r < t.cells.size(); ++r) {

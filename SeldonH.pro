@@ -21,6 +21,10 @@ SOURCES += \
     main.cpp \
     mainwindow.cpp \
     src/core/ChrBuilder.cpp \
+    src/core/Provenance.cpp \
+    src/core/Stratigraphy.cpp \
+    src/core/DecisionTree.cpp \
+    src/core/Report.cpp \
     src/core/Calculator.cpp \
     src/core/AutoTune.cpp \
     src/core/Spreadsheet.cpp \
@@ -54,6 +58,10 @@ HEADERS += \
     src/core/Suggestions.h \
     src/core/ChatText.h \
     src/core/ChrBuilder.h \
+    src/core/Provenance.h \
+    src/core/Stratigraphy.h \
+    src/core/DecisionTree.h \
+    src/core/Report.h \
     src/core/Calculator.h \
     src/core/ChronoResults.h \
     src/core/ConversationStore.h \

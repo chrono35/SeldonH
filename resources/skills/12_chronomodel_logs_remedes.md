@@ -1,7 +1,7 @@
 ---
 name: Que faire quand un critère de convergence ne passe pas
 description: Causes et remèdes selon le symptôme (R̂ élevé, ESS faible, date aberrante, contrainte inversée)
-keywords: converge, converger, remede, remedes, corriger, correction, relancer, ne passe pas, pas converge, ne converge pas, pas convergé, non converge, que faire, comment faire, ameliorer, ess faible, rhat eleve, contrainte inversee, contradiction, aberrante, outlier, iterations, burn-in, multimodal, multimodale, remedy, remedies, solution, correct, fix, rerun, run again, does not pass, does not converge, did not converge, not converged, what to do, how to fix, improve, low ess, high rhat, inverted constraint
+keywords: converge, converger, remede, remedes, corriger, correction, relancer, ne passe pas, pas converge, ne converge pas, pas convergé, non converge, que faire, ameliorer, ess faible, rhat eleve, contrainte inversee, contradiction, aberrante, outlier, iterations, burn-in, multimodal, multimodale, remedy, remedies, solution, correct, fix, rerun, run again, does not pass, does not converge, did not converge, not converged, what to do, how to fix, improve, low ess, high rhat, inverted constraint
 priority: 11
 ---
 **Règle** : contrôle d'abord le **modèle** (gratuit, décisif), règle le MCMC ensuite. Le modèle n'est pas la cause du manque de convergence. Les paramètres MCMC par défaut peuvent être inadaptés à la complexité d'un modèle. La complexité d 'un modèle ne se juge pas forcément par le nombre de date ou le nombre de relation stratigraphique. Les **outlayer** ne sont pas un problème de modélisation, ils sont très courants et sont gérés par le réglage du MCMC qui aide à la convergence.

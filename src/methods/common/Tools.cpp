@@ -280,10 +280,13 @@ QVector<ToolDef> build()
                                   "« plot » : trace les courbes de la valeur, de la vitesse et de l'accélération (médiane et intervalle de crédibilité à 95 %, quantiles 2,5 – 97,5 %, "
                                   "liste « quantities ») ; « extremum » : date où la grandeur est extrême dans chaque courbe tirée "
                                   "(« où / quand la variation est la plus forte », « vitesse maximale », « maximum de la courbe » ; "
-                                  "quantity derivative par défaut, sense abs, max, min ou absmin ; aucune date à donner). « quantity » choisit la courbe sur laquelle portent crossing, calibrate et derivative : "
+                                  "quantity derivative par défaut, sense abs, max, min ou absmin ; aucune date à donner ; entre deux NIVEAUX de la courbe, "
+                                  "« variation minimum entre le niveau -100 et le niveau 0 », donner y1 et y2 : la recherche se fait, dans chaque courbe, "
+                                  "entre ses passages par ces deux valeurs). Un « niveau », une profondeur, une cote est une VALEUR de la courbe (y, y1, y2), jamais une date t. « quantity » choisit la courbe sur laquelle portent crossing, calibrate et derivative : "
                                   "value (défaut), derivative (vitesse ; taux d'accumulation d'une courbe âge-profondeur) ou acceleration "
                                   "(ex. date d'une vitesse mesurée, date où la vitesse s'annule). Une date peut être une année, une colonne des "
-                                  "traces jointes (date d'un Event, ex. « US 12 ») ou une datation. Vitesses en unités de la composante par an, "
+                                  "traces jointes (date d'un Event, ex. « US 12 »), une datation, ou un âge écrit comme l'utilisateur, "
+                                  "avec son unité (« 6000 cal BP », « 6,5 ka BP ») : SeldonH le convertit, ne le convertis pas toi-même. Vitesses en unités de la composante par an, "
                                   "accélérations par an² (per : 100 pour par siècle, par siècle²). Une carte de densité (Curve_X_Map.csv) suffit "
                                   "pour « value » à une année fixe."),
                    schema({ { "op", str(QStringLiteral("Opération : value, derivative, acceleration, rate, crossing, calibrate, rate_values, extremum ou plot. "
@@ -305,8 +308,8 @@ QVector<ToolDef> build()
                             { "ymin", num(QStringLiteral("Borne basse d'un intervalle de valeurs (value). Facultatif.")) },
                             { "ymax", num(QStringLiteral("Borne haute d'un intervalle de valeurs (value). Facultatif.")) },
                             { "error", num(QStringLiteral("calibrate : erreur (1σ) de la valeur mesurée y. Seulement si l'utilisateur la donne : sans elle, la valeur est prise exacte.")) },
-                            { "y1", num(QStringLiteral("Valeur de départ (rate_values).")) },
-                            { "y2", num(QStringLiteral("Valeur d'arrivée (rate_values).")) },
+                            { "y1", num(QStringLiteral("Valeur (niveau) de départ : rate_values, ou extremum entre deux niveaux.")) },
+                            { "y2", num(QStringLiteral("Valeur (niveau) d'arrivée : rate_values, ou extremum entre deux niveaux.")) },
                             { "sense", str(QStringLiteral("extremum : abs (la plus forte en valeur absolue, défaut pour une vitesse), max "
                                                           "(défaut pour la courbe elle-même), min, absmin (la plus faible, courbe la plus plate)."),
                                            { "abs", "max", "min", "absmin" }) },
@@ -316,7 +319,7 @@ QVector<ToolDef> build()
                             { "speed", num(QStringLiteral("derivative, rate : seuil de vitesse (même unité que la vitesse, donc par siècle si per = 100) ; "
                                                           "donne P(vitesse > seuil) et P(|vitesse| > |seuil|). Facultatif.")) },
                             { "tmin", num(QStringLiteral("crossing, calibrate, rate_values, extremum, plot : début de la fenêtre (défaut : période d'étude). Facultatif.")) },
-                            { "tmax", num(QStringLiteral("crossing, calibrate, rate_values, plot : fin de la fenêtre. Facultatif.")) },
+                            { "tmax", num(QStringLiteral("crossing, calibrate, rate_values, extremum, plot : fin de la fenêtre. Facultatif.")) },
                             { "name", str(QStringLiteral("Nom du résultat, repris dans le titre du graphique. Facultatif.")) } },
                           { "op" }),
                    "curve" });
@@ -469,6 +472,11 @@ QString coerce(const ToolDef& def, QJsonObject& args)
                 double d = s.toDouble(&ok);
                 if (!ok) {                                   // année écrite avec son ère : « 500 av. J.-C. » -> -499
                     d = text::yearFromText(v.toString());
+                    ok = std::isfinite(d);
+                }
+                static const QSet<QString> dateKeys = { "t", "tmin", "tmax", "t_min", "t_max" };
+                if (!ok && dateKeys.contains(it.key())) {    // date écrite comme un âge : « 6000 cal BP » -> -4050
+                    d = text::yearFromAgeText(v.toString());
                     ok = std::isfinite(d);
                 }
                 if (!ok) return QStringLiteral("la valeur de « %1 » n'est pas un nombre : « %2 »").arg(it.key(), v.toString());

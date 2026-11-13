@@ -274,6 +274,57 @@ QStringList afterResult(const After& a, int max)
     return out;
 }
 
+QString modelSteps(const QJsonObject& spec, const QVector<ToDate>& toDate, bool brief)
+{
+    auto link = [](const QString& q) {
+        return QStringLiteral("<a href=\"seldon://insert?q=%1\">%2</a>").arg(QString::fromLatin1(QUrl::toPercentEncoding(q)), q.toHtmlEscaped());
+    };
+    // Questions à poser une fois les traces jointes : l'US à dater, sinon un exemple avec les vrais noms des Events.
+    QStringList ask;
+    for (const ToDate& d : toDate) {
+        if (!d.older.isEmpty() && !d.younger.isEmpty())
+            ask << QStringLiteral("Date entre %1 et %2").arg(d.older, d.younger);
+        else if (!d.older.isEmpty())
+            ask << QStringLiteral("Date après %1").arg(d.older);
+        else if (!d.younger.isEmpty())
+            ask << QStringLiteral("Date avant %1").arg(d.younger);
+    }
+    QStringList names;
+    for (const QJsonValue& v : spec.value("events").toArray()) {
+        const QJsonObject e = v.toObject();
+        if (!e.contains("known_fixed")) names << e.value("name").toString();
+    }
+    if (ask.isEmpty() && names.size() >= 2) ask << QStringLiteral("Durée entre %1 et %2").arg(names.first(), names.last());
+    else if (ask.isEmpty() && names.size() == 1) ask << QStringLiteral("Quelle est la date de %1 ?").arg(names.first());
+    QStringList asks;
+    for (const QString& q : std::as_const(ask)) asks << link(q);
+
+    const bool phases = !spec.value("phases").toArray().isEmpty();
+    const bool ageDepth = spec.value("curve").toString().contains(QLatin1String("depth"), Qt::CaseInsensitive)
+                          || spec.value("curve").toString().contains(QLatin1String("profondeur"), Qt::CaseInsensitive);
+    QString files = QStringLiteral("<code>Chain_all_Events.csv</code>");
+    if (phases) files += QStringLiteral(" et <code>Chain_all_Phases.csv</code>");
+    if (ageDepth) files = QStringLiteral("<code>Curve_X_Splines.csv</code> et <code>Chain_all_Events.csv</code>");
+
+    if (brief)
+        return QStringLiteral("<p><b>🧭 Marche à suivre</b> : comme plus haut — enregistrer le modèle, le calculer dans ChronoModel, "
+                              "exporter les résultats (Results &gt; Distrib. Options &gt; CSV), joindre le journal et %1, et demander %2.</p>")
+            .arg(files, asks.isEmpty() ? QStringLiteral("le résultat") : asks.join(QStringLiteral(" ou ")));
+    QString h = QStringLiteral("<p><b>🧭 Marche à suivre</b> (à faire par vous, dans ChronoModel puis dans SeldonH)</p><ol>");
+    h += QStringLiteral("<li>Enregistrez le modèle : « 💾 Enregistrer le modèle (.chr) » sous la réponse.</li>");
+    h += QStringLiteral("<li>Ouvrez le fichier <code>.chr</code> dans ChronoModel et lancez le calcul (MCMC).</li>");
+    // Un seul export de ChronoModel enregistre ensemble le journal et les traces (Philippe, 12/11/2026).
+    h += QStringLiteral("<li>Exportez les résultats : onglet <i>Results</i> &gt; onglet <i>Distrib. Options</i> &gt; <i>CSV</i> ; "
+                        "une boîte de dialogue demande le dossier, où ChronoModel enregistre en même temps le journal "
+                        "<code>Log_Posterior_Distrib_Stats.html</code> et les traces.</li>");
+    h += QStringLiteral("<li>Joignez ici avec 📎 le journal (SeldonH vérifie la convergence) et %1.</li>").arg(files);
+    if (!asks.isEmpty())
+        h += QStringLiteral("<li>Demandez alors : %1%2</li>").arg(asks.join(QStringLiteral(" ; ")),
+                 toDate.isEmpty() ? QString()
+                                  : QStringLiteral(" (SeldonH tire la date tirage par tirage entre les deux Events, contrainte comprise)."));
+    return h + QStringLiteral("</ol>");
+}
+
 QString html(const QString& title, const QStringList& questions, const QString& footer)
 {
     if (questions.isEmpty()) return {};

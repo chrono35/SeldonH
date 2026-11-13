@@ -46,7 +46,7 @@
 
 \title{\textbf{SeldonH} --- Mémo technique\\[2pt]\large Fonctionnement général de l'application}
 \author{Philippe Dufresne}
-\date{4 novembre 2026}
+\date{13 novembre 2026}
 
 \begin{document}
 \maketitle
@@ -58,8 +58,12 @@ de ChronoModel, produit des fichiers de modèle \code{.chr} et aide à interpré
 de \emph{séparer le langage du calcul} : le modèle de langage comprend la question, choisit et commente ; tous les
 calculs (calibrations, MCMC, fichiers) sont faits par du code C++ déterministe, porté de ChronoModel, sur l'ordinateur de
 l'utilisateur. Ce mémo décrit l'architecture (graphe fonctionnel), l'algorithme général de traitement d'une question et
-les principaux modules. Mise à jour du 4 novembre 2026 : mode calculatrice, calcul unique \code{relation} (termes de
-provenances mélangées, corrélation, formules), tableaux de datations, serveur MCP, test automatique de l'appel d'outils, réglages CPU.
+les principaux modules. Mise à jour du 13 novembre 2026 : provenance des nombres (l'IA comme intermédiaire contrôlé),
+arbre de décision pour la création d'un modèle, lecture de l'ordre stratigraphique et contrôle des contraintes, courbes
+âge-profondeur (profondeurs signées, surface), marche à suivre écrite par SeldonH, boucle d'agent du modèle local,
+scènes \code{.chr} dessinées comme dans ChronoModel, défusion des cellules d'un tableur, rapport de synthèse
+(texte ou Word). Mise à jour du 4 novembre : mode
+calculatrice, calcul \code{relation}, tableaux de datations, serveur MCP, test de l'appel d'outils, réglages CPU.
 \end{abstract}
 
 \tableofcontents
@@ -71,6 +75,10 @@ provenances mélangées, corrélation, formules), tableaux de datations, serveur
 \item \textbf{Le modèle ne calcule jamais.} Un petit modèle ne sait pas calibrer et invente des règles. Les méthodes de
   datation sont donc reprises de ChronoModel en C++ (\code{src/methods/}) et exécutées localement. Le modèle reçoit le
   \emph{texte} des résultats exacts et les commente.
+\item \textbf{L'IA est un intermédiaire, et c'est vérifié.} Les mesures viennent de l'utilisateur, les résultats des
+  outils de SeldonH ; le modèle n'apporte aucun nombre. \code{src/core/Provenance.*} le contrôle sur le texte, sans
+  modèle de langage : un calcul demandé avec une mesure absente des messages de l'utilisateur n'est pas lancé, et un
+  nombre de la réponse absent de tout ce que le modèle a reçu est signalé (section~\ref{sec:provenance}).
 \item \textbf{Le modèle ne produit jamais le \code{.chr} complet.} Il écrit une spécification JSON courte (une dizaine
   de champs) ; \code{ChrBuilder} ajoute les quelque 200 champs obligatoires (identifiants, UUID, réglages MCMC, plage
   d'étude, positions\dots) et contrôle la cohérence.
@@ -83,6 +91,10 @@ provenances mélangées, corrélation, formules), tableaux de datations, serveur
 \item \textbf{La fiche de SeldonH est la seule source des chiffres.} Quand SeldonH a fait le calcul seul et que la
   question ne demande pas d'explication, le modèle n'est pas relancé (\emph{mode calculatrice}) ; sinon il reçoit les
   valeurs \og déjà affichées \fg{} avec la consigne de ne pas les recopier.
+\item \textbf{Questions fermées plutôt que choix libre.} Pour aiguiller une création de modèle, le modèle de langage
+  répond à des questions à choix fixe (arbre de décision, §\ref{sec:arbre}) ; SeldonH répond lui-même quand un
+  détecteur déterministe est sûr, et l'ordre des couches écrit par l'utilisateur est relu et imposé au modèle
+  (§\ref{sec:strati}).
 \item \textbf{Le modèle sélectionne, SeldonH manipule les valeurs.} Pour un tableau de datations, le modèle ne reçoit
   qu'un résumé et demande des sélections avec une action ; il ne recopie jamais une valeur.
 \item \textbf{Confidentialité.} Avec le modèle local, rien ne quitte la machine. Avec un modèle distant, seuls la
@@ -200,7 +212,8 @@ vert : calculs locaux déterministes ; rouge : création du modèle ChronoModel 
   demander un commentaire, déplier le raisonnement, rappeler une figure). \\
 \code{ChatView}, \code{MathText} & Rendu Markdown $\rightarrow$ HTML, formules LaTeX du modèle $\rightarrow$ HTML. \\
 \code{FigurePanel}, \code{ChrScene} & Courbes (densités, HPD remplie, superposition ou une densité par ligne), nuages de points (corrélation), export
-  PNG/SVG, scènes des Events et des phases d'un \code{.chr}. \\
+  PNG/SVG, scènes des Events et des phases d'un \code{.chr} dessinées comme dans ChronoModel (borne en ovale, nœud de
+  courbe à double contour, barre des phases, durée de phase, hiatus). \\
 \code{Calculator} & Calculatrice locale (\og 2+3 \fg, \code{ADtoBP(-550)}) sans appel au modèle. \\
 \code{Lexicon} & Ramène une question en espagnol, italien ou allemand aux mots-clés français. \\
 \code{SkillManager} & Lecture des fiches (en-tête : \code{keywords}, \code{priority}, \code{always}) et sélection. \\
@@ -213,7 +226,7 @@ vert : calculs locaux déterministes ; rouge : création du modèle ChronoModel 
 \code{AutoTune} & \og Optimiser pour ce modèle \fg{} : contexte, longueur de réponse, budget des fiches. \\
 \code{MethodRunner}, \code{Tools} & Détecteurs de datations et de relations, normalisation et validation des
   requêtes, exécution (dont \code{relation}, §\ref{sec:relation}), fiche de résultat, texte pour le modèle ; définition
-  des 14 outils. \\
+  des 16 outils ; plafond d'étapes de la boucle d'agent locale (\code{maxCalcRounds}). \\
 \code{MethodRegistry} & Une classe \code{Method} par technique (c14, f14c, gauss, unif, tl, am). \\
 \code{EventMcmc} & Estimation bayésienne d'un Event (modèle EDM2), diagnostics $\hat R$ et ESS. \\
 \code{CurveStore}, \code{RefCurve} & Courbes de référence : dossier utilisateur, \code{Calib} de ChronoModel, courbes
@@ -225,8 +238,18 @@ vert : calculs locaux déterministes ; rouge : création du modèle ChronoModel 
   gardées tirage par tirage ; noms de colonnes en clair (\og début de la phase A \fg{} $\rightarrow$
   \code{Phase A Begin}). \\
 \code{DataTable}, \code{Spreadsheet} & Tableaux de datations (\code{.xlsx}, \code{.ods}, CSV, collés) : rôles des
-  colonnes, méthode de chaque ligne, sélections, actions (§\ref{sec:tableaux}). \\
-\code{McpServer} & Serveur MCP \code{seldonh-mcp} (QtCore seul) : les 14 outils pour un autre assistant. \\
+  colonnes, méthode de chaque ligne, sélections, actions (§\ref{sec:tableaux}) ; défusion des cellules fusionnées,
+  avec l'accord de l'utilisateur. \\
+\code{McpServer} & Serveur MCP \code{seldonh-mcp} (QtCore seul) : les 16 outils pour un autre assistant. \\
+\code{Provenance} & Contrôle des nombres : mesures des demandes de calcul, nombres des réponses
+  (§\ref{sec:provenance}). \\
+\code{DecisionTree} & Arbre de décision intégré (\code{resources/decision/arbre.json}) : lecture, validation,
+  grammaire GBNF d'un nœud, lecture d'une réponse libre (§\ref{sec:arbre}). \\
+\code{Stratigraphy} & Ordre des couches lu dans le texte, contrôle et correction des contraintes d'un bloc
+  \code{chronomodel}, courbe âge-profondeur, réglages écrits par l'utilisateur (§\ref{sec:strati}). \\
+\code{Suggestions} & Questions de suite proposées et \og marche à suivre \fg{} sous un modèle prêt (\code{modelSteps}). \\
+\code{Report} & Rapport de synthèse de la conversation (.txt, .docx) : déroulé assemblé par SeldonH, synthèse du
+  modèle de langage contrôlée (§\ref{sec:rapport}). \\
 \code{ConversationStore} & Historique (écriture atomique \code{QSaveFile}). \\
 \bottomrule
 \end{tabularx}
@@ -259,6 +282,9 @@ Les étapes 1 à 4 sont des \emph{courts-circuits} : elles répondent sans le mo
 \Li0{\Kw{si} aucun modèle de langage n'est prêt \Kw{alors} message d'état ; \Kw{fin}}
 \Li0{$q_k \leftarrow$ \code{Lexicon.translate}$(q)$ \Com{mots-clés en français}}
 \Li0{$m \leftarrow$ \code{isModelRequest}$(q_k)$ ; \quad $M \leftarrow$ \code{datingMethodsIn}$(q_k)$}
+\Li0{\Kw{si} $m$, premier modèle de la conversation, sans pièce jointe \Kw{alors} arbre de décision
+  (§\ref{sec:arbre}) ;}
+\Li1{la suite reprend à la fin de l'aiguillage avec les fiches et paramètres de la feuille}
 \Li0{$P \leftarrow$ fiches imposées : 03 si $m$ ; 13 si âge-profondeur ; fiche de chaque méthode de $M$ ;}
 \Li1{19 (phases, Events) ou 11 (logs) si des résultats ChronoModel sont présents ; 21 si une relation est demandée ;}
 \Li1{22 et résumé du tableau courant s'il y en a un}
@@ -276,10 +302,14 @@ Les étapes 1 à 4 sont des \emph{courts-circuits} : elles répondent sans le mo
 \Li1{afficher la réponse : réflexion séparée, blocs \code{calcul}/\code{chronomodel} masqués, \code{plot} $\rightarrow$
   panneau}
 \Li1{\Kw{si} bloc \code{chronomodel} \Kw{alors}}
-\Li2{$S \leftarrow$ spécification ; \code{ChrBuilder.build}$(S)$ ; \code{crossCheck}$(S, q)$}
-\Li2{afficher le résumé, les avertissements et le lien \og Enregistrer le modèle (\code{.chr}) \fg}
+\Li2{$S \leftarrow$ spécification ; $S \leftarrow$ \code{strat::checkSpec}$(S, \text{questions})$
+  \Com{§\ref{sec:strati}}}
+\Li2{\code{ChrBuilder.build}$(S)$ ; \code{crossCheck}$(S, q)$}
+\Li2{afficher le résumé, les avertissements, le lien \og Enregistrer le modèle (\code{.chr}) \fg{} et la marche à
+  suivre}
 \Li1{\Kw{si} bloc \code{calcul} \Kw{et} le tour n'a pas déjà été calculé \Kw{alors}}
 \Li2{$R' \leftarrow$ \code{MethodRunner.run}(blocs) ; afficher fiche et figures}
+\Li2{\Kw{si} étapes $<$ \code{maxCalcRounds}$(q)$ \Kw{alors} demander l'opération suivante (ou \code{[FIN]})}
 \Li2{\Kw{si} la question ne demande pas d'explication \Kw{alors} sortir \Com{mode calculatrice}}
 \Li2{ajouter un tour synthétique $u \leftarrow R'.\text{texte}$ ; \Kw{continuer} \Com{le modèle commente}}
 \Li1{\Kw{sinon} sortir de la boucle}
@@ -293,8 +323,12 @@ Les étapes 1 à 4 sont des \emph{courts-circuits} : elles répondent sans le mo
 \begin{itemize}[leftmargin=*]
 \item Un calcul est fait \emph{au plus une fois} par question : un tour marqué \og déjà calculé \fg{} (\code{followUp})
   ne relance pas de calcul, ce qui évite les boucles avec le modèle local.
-\item Le modèle local n'a qu'un tour de suite après un bloc \code{calcul} ; le modèle distant peut enchaîner jusqu'à
-  4 appels d'outils, puis la requête est envoyée avec \code{tool\_choice: none}.
+\item \textbf{Boucle d'agent (12/11/2026).} \code{countOperations} compte les opérations distinctes citées dans la
+  question (calibration, combinaison, Event, ordre, durée, date entre, appartenance, corrélation, inverse, densité) ou
+  les étapes écrites en séquence (\og puis \fg, \og ensuite \fg) ; le plafond \code{maxCalcRounds} vaut 1 pour une
+  seule opération, sinon opérations $+1$, au plus 4. Après chaque résultat, \code{chainHint} demande au modèle
+  l'opération suivante ou \code{[FIN]} ; une demande déjà exécutée n'est pas refaite. Le modèle distant enchaîne de
+  même jusqu'à 4 appels d'outils, puis la requête est envoyée avec \code{tool\_choice: none}.
 \item Si le serveur distant refuse le champ \code{tools}, la requête est rejouée sans outils et le bloc \code{calcul}
   prend le relais. Un appel d'outil est réécrit en bloc \code{calcul} dans l'historique.
 \item Les fiches des tours passés ne sont pas renvoyées : seul le tour courant les reçoit, ce qui garde le prompt court.
@@ -302,6 +336,8 @@ Les étapes 1 à 4 sont des \emph{courts-circuits} : elles répondent sans le mo
   question / réponse, mais placé en contexte en tête du message suivant (\code{calcOnlyContext}), faute de quoi un petit
   modèle recopiait le texte de remplacement. L'export du prompt montre exactement ce qui est envoyé.
 \item Préférence \og Commentaire après un calcul \fg{} : si la question le demande (défaut), jamais, toujours.
+\item Les noms de champs et d'outils (\code{event\_constraints}, \code{known\_fixed}, \code{calibrer\_radiocarbone})
+  sont remplacés par des mots courants dans le texte affiché (\code{ChrBuilder::humanizeNames}).
 \end{itemize}
 
 % =====================================================================
@@ -330,7 +366,9 @@ utilisateur de même nom remplace la fiche intégrée.
 en flux et oublie les plus anciens échanges si le contexte est plein. Modèle recommandé : Qwen3.5-4B en
 Q4\_K\_M ($\approx 2{,}7$~Go, Apache~2.0), réflexion désactivée par défaut (préfixe \code{<think></think>} vide) ; le
 bouton \og Réfléchir \fg{} l'active, grisé si le gabarit n'a pas \code{enable\_thinking}. Le raisonnement peut être
-affiché (replié sous la réponse) mais n'est jamais renvoyé au modèle.
+affiché (replié sous la réponse) mais n'est jamais renvoyé au modèle. Une grammaire GBNF facultative
+(\code{SamplingParams::grammar}, placée en tête de la chaîne d'échantillonnage) force la réponse dans un langage fermé :
+elle sert aux questions de l'arbre de décision.
 
 \paragraph{Performances CPU.} llama.cpp b11794. Sur macOS, une compilation par architecture puis \code{lipo} : le
 build universel en un seul passage tombait en \code{GGML\_CPU\_GENERIC} (ni NEON optimisé, ni AVX2) ; gain mesuré
@@ -345,10 +383,11 @@ restaure le point le plus avancé contenu dans le préfixe commun, puis on racco
 
 \subsection{Modèle distant}
 \code{RemoteEngine} parle à toute API Chat Completions compatible OpenAI (Base URL + clé). Réponse en flux SSE ;
-troncature détectée par \code{finish\_reason: "length"} ou par l'absence de \code{[DONE]}. Les 14 outils
+troncature détectée par \code{finish\_reason: "length"} ou par l'absence de \code{[DONE]}. Les 16 outils
 (\code{calibrer\_radiocarbone}, \code{calibrer\_f14c}, \code{dater\_luminescence}, \code{densite\_gauss},
-\code{densite\_uniforme}, \code{dater\_archeomagnetisme}, \code{calculer\_evenement}, \code{combiner\_dates},
-\code{comparer\_dates}, \code{analyser\_traces}, \code{calibration\_inverse}, \code{creer\_densite},
+\code{densite\_uniforme}, \code{densite\_tabulee}, \code{dater\_archeomagnetisme}, \code{calculer\_evenement},
+\code{combiner\_dates}, \code{comparer\_dates}, \code{analyser\_traces}, \code{courbe\_chronomodel},
+\code{calibration\_inverse}, \code{creer\_densite},
 \code{courbes\_disponibles}, \code{tableau}) sont déclarés avec leur schéma ; leurs arguments sont validés et normalisés
 (virgule décimale, nombres écrits en texte) et une valeur manquante renvoie une consigne au modèle sans lancer de calcul.
 En mode calculatrice, les résultats ne sont pas renvoyés au serveur (sauf si un outil n'a pas pu s'exécuter).
@@ -384,9 +423,20 @@ suivent l'écart-type (deux chiffres significatifs) ou un réglage fixe.
 \Li1{\Kw{chauffe} : \code{num\_burn} itérations}
 \Li1{\Kw{adaptation} : par lots, jusqu'à ce que tous les taux d'acceptation soient dans leur fenêtre}
 \Li2{(42--46~\% ; 30--40~\% pour $t_i$, $\sigma_i$ d'un Event à plusieurs dates), Robbins--Monro}
+\Li2{\Com{taux de $t_i$, $\sigma_i$ comptés sur le seul noyau B.2 (marche aléatoire)}}
 \Li1{\Kw{acquisition} : \code{num\_iter} itérations, éclaircissement \code{thinning}}
-\Li2{\Kw{pour} chaque date $i$ : bloc $(t_i, \sigma_i, \delta_i)$ par Metropolis--Hastings
-  (calibration + shrinkage)}
+\Li2{\Kw{pour} chaque date $i$ : proposer le bloc $(t_i', \sigma_i', \delta_i')$, $\delta_i'$ tiré dans sa loi
+  a priori (wiggle), par un mélange de deux noyaux :}
+\Li3{\Kw{avec probabilité} 0,8 : \Kw{noyau B.2} (non centré + marche sur $\log_{10} V$)}
+\Li4{$\log_{10}\sigma_i'^2 \sim \mathcal N(\log_{10}\sigma_i^2, s_\sigma)$ ;
+  $z = (t_i+\delta_i-\bar y_{-i})/\sigma_i$, $z' \sim \mathcal N(z, s_t)$ ;
+  $t_i' = \bar y_{-i} + \sigma_i' z' - \delta_i'$}
+\Li4{\Com{$\bar y_{-i}$ : moyenne pondérée des autres dates ; date seule : $t_i' = t_i + \mathcal N(0, s_t)$}}
+\Li3{\Kw{sinon} (0,2) : \Kw{noyau A.1} (calibration + shrinkage exact)}
+\Li4{$\sigma_i'^2 \sim \text{shrinkage}(S_0^2)$ ; $t_i' \sim q = 0{,}99\,\text{calibration}_i + 0{,}01\,
+  \mathcal N(t_i, s)$, $s$ = demi-largeur max(période, calibration)}
+\Li3{accepter ou refuser le bloc par Metropolis--Hastings (vraisemblance, a priori de $\theta$ marginalisé, shrinkage,
+  rapport des propositions)}
 \Li2{décalage rigide $\theta + t_i$ ; Gibbs de $\theta$ : $\mathcal N(\mu, 1/P)$ tronquée à la période d'étude}
 \Li2{marche adaptative sur $\log_{10} S_0^2$ ; recuit périodique ($T = 2^e$, $e$ décroissant)}
 \Li0{densités a posteriori de $\theta$, $t_i$ : noyau gaussien, largeur de bande de Sheather--Jones}
@@ -486,7 +536,9 @@ chaque ligne. Le tableau devient le \og tableau courant \fg{} de la conversation
 et demande \code{\{"method":"table",…\}} avec une sélection (méthodes, lignes, noms, conditions \code{where}) et une
 action : \code{extract} (CSV), \code{date} (récapitulatif), \code{event}, \code{combine}, \code{model} (\code{.chr} par
 ligne ou par \code{group\_by}). Une erreur du modèle ne peut donc donner qu'une mauvaise sélection, visible dans la
-fiche, jamais une mauvaise valeur.
+fiche, jamais une mauvaise valeur. Les cellules fusionnées d'un classeur (\og A6:A14 \fg) ne sont pas lues ; SeldonH
+propose de les défusionner (\code{spreadsheet::unmerge} : la valeur de la première case recopiée dans toute la plage,
+opération exacte faite seulement avec l'accord de l'utilisateur) et liste les plages traitées, à vérifier.
 
 \subsection{Autres calculs}
 \begin{itemize}[leftmargin=*]
@@ -497,6 +549,124 @@ fiche, jamais une mauvaise valeur.
 \item \code{CurveStore} : courbes cherchées dans le dossier utilisateur, puis dans \code{Calib} de ChronoModel, puis
   dans les courbes intégrées (\code{.14c}, \code{.ref}).
 \end{itemize}
+
+% =====================================================================
+\section{Provenance des nombres}\label{sec:provenance}
+
+Le modèle de langage sert d'intermédiaire entre l'utilisateur et les outils : il ne doit ni inventer une mesure qu'il
+passe à un outil, ni écrire un résultat qu'aucun outil n'a produit. Les consignes le disent (fiche \code{00\_identite} :
+aucun calcul de tête ; consigne des outils du modèle distant) ; quatre contrôles déterministes le vérifient.
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{4.6cm}>{\raggedright\arraybackslash}p{4.4cm}X@{}}
+\toprule
+\textbf{Contrôle} & \textbf{Où} & \textbf{En cas d'échec}\\
+\midrule
+Mesures d'une demande de calcul (âge, erreur, F14C, inc, dec, $\alpha_{95}$, $F$, \code{ref\_year}, $\Delta R$, année
+visée) présentes dans le texte de l'utilisateur (questions, pièces jointes, tableau)
+  & \code{sourcedCalcBlocks}, depuis \code{runRequestedCalculations} (bloc \code{calcul}) et \code{onToolCalls} (outils)
+  & calcul non lancé ; \og Calcul non lancé \fg{} à l'écran ; l'outil répond au modèle distant de demander la valeur\\
+Bornes et paramètres (min, max, période d'étude, paramètres de loi, wiggle) & idem
+  & calcul lancé, avertissement dans la fiche et dans le résultat transmis\\
+Nombres de la réponse (années et âges $\geq 100$, décimaux, pourcentages ; hors code et références)
+  présents dans ce que le modèle a reçu & \code{finishAssistantMessage} $\to$ \code{unsourcedNumbers}
+  & avertissement sous la réponse\\
+Valeurs, références et données d'un bloc \code{chronomodel} & \code{ChrBuilder::crossCheck} & avertissement avant
+  l'enregistrement\\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Formes dérivées acceptées : ka et Ma ($\times10^3$, $\times10^6$), $N$ av. J.-C. $\to 1-N$, cal BP $\leftrightarrow$
+année ($1950-N$, seulement pour $|N|\geq100$), b2k, signe. Un bloc \code{calcul} écrit dans une réponse qui commente un
+calcul déjà fait n'est pas exécuté (un seul calcul par question) et l'écran le dit, au lieu d'annoncer \og Calcul
+confié à SeldonH \fg. Limite : les contrôles portent sur les valeurs, pas sur le \emph{choix} de la méthode ; le
+bandeau de la fiche, qui nomme le calcul fait, permet de le vérifier.
+
+% =====================================================================
+\section{Arbre de décision}\label{sec:arbre}
+
+Au lieu de laisser le modèle choisir librement outils et fiches, SeldonH lui pose des \emph{questions fermées}, une par
+nœud. L'arbre est un fichier de données intégré (\code{resources/decision/arbre.json}, racine \code{intention}) :
+chaque choix mène à un autre nœud (\code{suite}) ou à une feuille (outils, fiches, action, paramètres) ; un choix
+intermédiaire peut apporter des fiches et paramètres (\code{ajoute}), cumulés jusqu'à la feuille (\code{accumulate}).
+\code{Tree::validate} contrôle la structure (racine, suites, nœuds inaccessibles, cycles, identifiants), l'existence
+des outils et des fiches, et que chaque outil de calcul est atteint par au moins une feuille.
+
+\begin{center}\small
+\begin{tabularx}{\linewidth}{@{}l X@{}}
+\toprule
+\textbf{Nœud} & \textbf{Question et choix} \\ \midrule
+\code{intention} & Que demande l'utilisateur ? dater, relation, evenement, modele, resultats, tableau, inverse,
+  densite, courbes, aide, autre \\
+\code{methode} & Quelle méthode ? c14, f14c, luminescence, archeomagnetisme, gaussienne, uniforme, tabulee \\
+\code{relation\_source} & Datations indépendantes ou Events d'un calcul ChronoModel (traces) ? \\
+\code{evenement} & Événement (plusieurs datations) ou combinaison de mesures d'une même date ? \\
+\code{modele\_courbe} & Le modèle décrit-il une courbe (mode courbe de ChronoModel) ? oui, non \\
+\code{modele\_type\_courbe} & profondeur, univariée, bivariée, trivariée, inclinaison, déclinaison, intensité,
+  inc\_dec, inc\_int, inc\_dec\_int \\
+\code{modele\_strati} & Le texte donne-t-il un ordre entre couches, unités ou Events ? oui, non \\
+\code{resultats} & journal, traces, courbe \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\paragraph{Utilisation actuelle.} Seule la branche \og construire un modèle \fg{} est parcourue, pour le
+\emph{premier} modèle d'une conversation sans pièce jointe (\code{MainWindow::startTree}) : courbe ? type de courbe ?
+stratigraphie ? À chaque nœud, \code{treeDetector} répond d'abord sans modèle de langage quand c'est sûr : demande
+âge-profondeur $\to$ courbe \og oui \fg, type \og profondeur \fg ; ordre des couches lu dans le texte et aucun mot de
+courbe (\code{mentionsCurve}) $\to$ courbe \og non \fg, stratigraphie \og oui \fg. Pour une courbe âge-profondeur sans
+ordre écrit, SeldonH pose lui-même la question à l'utilisateur (\code{treeAskOrder}, réponses cliquables qui complètent
+la saisie). Sinon le modèle reçoit \code{promptFor} (la question de l'utilisateur, la question du nœud, les choix) ; en
+local, la grammaire \code{grammarFor} impose un identifiant de choix ; en distant, \code{parseAnswer} le lit dans le
+texte (guillemets, gras, point tolérés ; vide si aucun ou plusieurs). Le chemin est montré à l'utilisateur
+(\og courbe : non › stratigraphie : oui \fg) et gardé dans l'export du prompt ; \code{sendMessage} reprend ensuite avec
+les fiches et paramètres de la feuille.
+
+% =====================================================================
+\section{Ordre stratigraphique et contraintes}\label{sec:strati}
+
+Un petit modèle se trompe souvent de sens en traduisant \og au-dessus \fg, \og au fond \fg, \og sous \fg,
+\og recoupe \fg{} en contraintes. \code{src/core/Stratigraphy.*} lit l'ordre dans le texte de l'utilisateur, sans
+modèle de langage, et le compare au bloc \code{chronomodel}.
+\begin{itemize}[leftmargin=*]
+\item \textbf{Lecture} (\code{relationsFromText(s)}) : unités nommées (US~1, couche~3, niveau~2, layer~4, ou noms
+  d'Events du modèle cités tels quels), positions absolues (au-dessus, en haut, au milieu, au fond, à la base) et
+  relations entre deux unités (sous, sur, recoupe, scellée par, below, above, cuts) ; couples (plus ancien, plus
+  récent) avec les mots du texte en preuve ; un message plus récent remplace le couple inverse ; fermeture transitive.
+\item \textbf{Contrôle} (\code{checkSpec}) : un Event sans date dont le nom est une unité du texte est retiré avec ses
+  contraintes (il se date ensuite sur les traces) ; une borne d'unité dont l'année n'est pas écrite par l'utilisateur
+  ($N$, $1-N$, $-N$, $1950-N$) est retirée ; une contrainte contredite par le texte est remplacée, une contrainte
+  absente est ajoutée ; une note explique chaque changement. Les réglages écrits (période d'étude, pas, recuit,
+  itérations, chaînes ; \code{studySettingsFromTexts}) oubliés par le modèle sont repris, et l'appartenance aux phases
+  écrite (\og US~3 et US~5 sont dans la phase habitation \fg) est relue (\code{phaseMembersFromTexts}). Seul l'ordre
+  des Events est contrôlé : une inversion des \emph{datations} est traitée par ChronoModel.
+\item \textbf{Bloc corrigé} : \code{ChrBuilder::extractSpec} réunit une clé ou un Event écrit deux fois, puis
+  \code{replaceModelBlock} remet la spécification contrôlée dans la réponse.
+\item \textbf{Courbe âge-profondeur} (\code{checkAgeDepth}) : convention de ChronoModel, la profondeur la plus
+  \emph{petite} est l'Event le plus ancien. Profondeurs toutes positives (\og à 13~cm \fg) écrites en négatif ; dès qu'une
+  valeur est négative, ou pour un tableau CSV de ChronoModel joint (\code{chronoModelCsvRows}) ou une hauteur mesurée
+  depuis la base, elles sont gardées telles quelles (\code{depth\_sign: "as\_given"}). Si la superposition est écrite
+  (\code{superpositionStated} : \og chacun plus ancien que celui du dessus \fg), les contraintes deviennent la séquence
+  des profondeurs. Le niveau le plus haut nommé \og surface \fg, \og sommet \fg, \og actuel \fg{} est une borne à la fin de
+  la période d'étude.
+\item \textbf{Datation d'une US intercalée} : des dates reliées par l'ordre des couches (\og au-dessus (US~1) \dots, au
+  fond (US~3) \dots, dater l'US~2 \fg) sont détectées par \code{asksStratigraphicDating} : calibrations affichées avec un
+  avertissement, fiches 24, 03 et 21 imposées, et le modèle propose le bloc \code{chronomodel} (un Event par US datée)
+  au lieu d'un calcul direct sur des dates indépendantes. L'US sans date se date sur les traces (\code{relation}, op
+  \code{between}, entre ses voisines \code{Undated::older} et \code{younger}).
+\item \textbf{Relation entre niveaux d'un modèle} (\code{relationWithModelLevels}) : \og combien de temps sépare le
+  niveau $-21$ du niveau $-29$ ? \fg{} ; un Event est reconnu par son nom ou sa profondeur (au signe près). Avec des
+  traces jointes : calcul a posteriori, stratigraphie comprise ; sinon dates calibrées indépendamment, présentées comme
+  une estimation sans la stratigraphie, sans nouveau modèle.
+\end{itemize}
+
+\paragraph{Marche à suivre.} Sous un modèle prêt, SeldonH écrit lui-même les étapes hors de l'application
+(\code{suggest::modelSteps}) : enregistrer le \code{.chr}, le calculer dans ChronoModel, exporter (Results >
+Distrib.\ Options > CSV, qui enregistre ensemble le journal et les traces), joindre le journal et
+\code{Chain\_all\_Events.csv} (et \code{Chain\_all\_Phases.csv}, ou \code{Curve\_X\_Splines.csv} pour une courbe), puis la
+question à poser avec les vrais noms (\og Date entre US~3 et US~1 \fg). Le modèle de langage inventait des menus de
+ChronoModel ; il ne récrit plus ces étapes. Un rappel court remplace la liste aux modèles suivants.
 
 % =====================================================================
 \section{Création d'un modèle ChronoModel}
@@ -514,6 +684,10 @@ contraintes. \code{ChrBuilder} :
 \item compare la spécification au texte de l'utilisateur (\code{crossCheck}) : valeurs absentes du texte,
   références inventées, mesures du texte oubliées.
 \end{enumerate}
+Avant \code{build}, la spécification passe par le contrôle stratigraphique (§\ref{sec:strati}). Les scènes du
+\code{.chr} reprennent le dessin de ChronoModel (\code{EventItem}, \code{BoundItem}, \code{PhaseItem},
+\code{ArrowItem}) : durée d'une phase (\code{durationText} : \og Durée $\le$ 20 \fg, \og Span uniforme \fg) et hiatus
+d'une contrainte de phases (\code{hiatusText}) affichés.
 Le résultat s'affiche comme un résumé en clair et un lien d'enregistrement ; le JSON n'est montré que sur demande.
 
 % =====================================================================
@@ -529,7 +703,7 @@ l'application avec les valeurs exactes, le modèle les commente.
 
 % =====================================================================
 \section{Serveur MCP \code{seldonh-mcp}}
-Programme séparé (QtCore seul, \code{mcp/}) qui expose les 14 outils à un autre assistant (Claude Desktop, Jan,
+Programme séparé (QtCore seul, \code{mcp/}) qui expose les 16 outils à un autre assistant (Claude Desktop, Jan,
 Gemini CLI) par le transport stdio, une ligne JSON-RPC par message : \code{initialize} (versions 2024-11-05 à
 2025-11-25), \code{tools/list}, \code{tools/call} (texte $+$ \code{structuredContent} pour les graphiques), progression
 du MCMC par \code{notifications/progress} et annulation. Il relit les réglages de SeldonH (courbes, format des dates,
@@ -537,6 +711,32 @@ décimales). Différences avec l'application : \code{analyser\_traces} et \code{
 (CSV), \code{creer\_densite} écrit le fichier dans un dossier, et la consigne \og valeurs déjà affichées \fg{} est
 remplacée par \og à reprendre telles quelles \fg, car l'autre assistant ne voit pas la fiche. Il est compilé par les
 trois scripts d'installation et livré dans le composant \code{seldonh\_app}.
+
+% =====================================================================
+\section{Rapport de synthèse}\label{sec:rapport}
+
+Menu \emph{Fichier > Rapport de synthèse (texte ou Word)} (\code{MainWindow::saveReport}, \code{src/core/Report.*},
+13/11/2026). L'export complet de la conversation (HTML ou Word) reste disponible ; le rapport en est une version
+condensée, en deux parties.
+\begin{enumerate}[leftmargin=*]
+\item \textbf{Synthèse}, rédigée par le modèle de langage et étiquetée comme telle (modèle nommé). Elle est demandée par
+  une génération à part, ni affichée ni ajoutée à la conversation, comme les questions de l'arbre (outils suspendus,
+  réflexion désactivée, température 0,3). Le message (\code{report::promptFor}) contient les consignes (quatre
+  rubriques : objet, données, résultats, points de vigilance et suites ; nombres recopiés à l'identique, aucun calcul,
+  aucun bloc de code) puis le déroulé en texte, réponses de l'assistant comprises, dans un budget (24\,000 caractères en
+  distant, $2\,n_{\text{ctx}}$ borné à 3\,000--12\,000 en local) ; les éléments longs sont raccourcis, les questions
+  gardées. Les blocs de code de la réponse sont retirés (\code{cleanSummary}) et ses nombres contrôlés par
+  \code{provenance::unsourcedNumbers} contre ce message : les écarts sont listés sous la synthèse. Sans modèle prêt,
+  après \og Arrêter \fg{} ou en cas d'erreur, le rapport est écrit sans synthèse, avec la raison.
+\item \textbf{Déroulé}, assemblé par SeldonH sans modèle de langage à partir du journal d'affichage
+  (\code{report::collect}) : pour chaque question, les fiches de SeldonH (valeurs exactes, liens d'action
+  \code{seldon://} retirés), le résumé de chaque modèle ChronoModel préparé (\code{ChrBuilder::build} puis
+  \code{summarize}, sur la réponse enregistrée, donc après le contrôle stratigraphique) et les figures ; puis la liste
+  des avertissements (lignes d'avertissement, sans doublon). Les réponses de l'assistant n'y sont pas recopiées.
+\end{enumerate}
+Formats : texte UTF-8 (\code{toPlainText}, titres soulignés) ou Word (\code{toHtml} $\to$ \code{QTextDocument} $\to$
+\code{docx::write}) ; en Word, les courbes sont rendues en images (\code{FigurePanel::thumbnailJson}), les scènes d'un
+\code{.chr} citées par leur titre.
 
 % =====================================================================
 \section{Stockage, déploiement et tests}
@@ -548,9 +748,10 @@ trois scripts d'installation et livré dans le composant \code{seldonh\_app}.
 \item \textbf{Déploiement} : un installeur Qt Installer Framework par système (Windows, Debian/Ubuntu, macOS), avec ou
   sans modèle (\code{\_noModel}). Windows et Linux : llama.cpp en bibliothèques partagées, 14 variantes CPU + Vulkan
   chargées dynamiquement ; macOS : statique universel avec Metal.
-\item \textbf{Tests} : \code{tests/tst\_core} (133 tests au 04/11/2026, Linux, Qt~6.4 : compétences, \code{ChrBuilder}
+\item \textbf{Tests} : \code{tests/tst\_core} (159 fonctions de test au 13/11/2026 : compétences, \code{ChrBuilder}
   contre des projets réels, méthodes, Sheather--Jones, formats de date, relations (termes mélangés, corrélation), tableaux,
-  mode calculatrice, test d'appel d'outils, serveur MCP, topologie CPU) et \code{tests/llm\_cli} (gabarit, cache KV,
+  mode calculatrice, test d'appel d'outils, serveur MCP, topologie CPU, provenance des nombres, arbre de décision
+  (validité, grammaire, lecture des réponses), ordre stratigraphique et courbe âge-profondeur sur des prompts réels, rapport de synthèse) et \code{tests/llm\_cli} (gabarit, cache KV,
   points de reprise, troncature, \code{-{}-threads}, \code{-{}-cpuinfo}) ; script \code{bench\_cpu.sh} pour le débit CPU.
 \end{itemize}
 
@@ -571,6 +772,16 @@ trois scripts d'installation et livré dans le composant \code{seldonh\_app}.
   fondé sur une API privée de Qt (\code{QZipReader}) à vérifier avec Qt~6.11.
 \item Modifications récentes compilées et testées sous Linux (Qt~6.4) ; pas encore recompilées sur le Mac (Qt~6.11).
 \item Aucun banc d'essai des modèles de langage sur des tâches de datation réelles.
+\item Arbre de décision : seule la branche \og construire un modèle \fg{} est utilisée ; les autres nœuds sont décrits
+  et validés mais pas encore parcourus.
+\item Rapport de synthèse : la synthèse dépend du modèle chargé (un petit modèle local résume moins bien) ; le
+  contrôle porte sur ses nombres, pas sur la justesse de ses phrases ; les scènes d'un \code{.chr} ne sont pas
+  dessinées dans le rapport Word.
+\item Ordre stratigraphique : lecture par mots-clés (français, anglais) ; une phrase qui cite deux phases n'est pas lue
+  pour l'appartenance aux phases.
+\item Provenance des nombres : comparaison de valeurs écrites ; une mesure sous une forme inhabituelle peut être
+  signalée à tort, une conversion du modèle ($2\sigma\to1\sigma$, arrondi) l'est toujours ; pas de contrôle des
+  mesures dans \code{seldonh-mcp}.
 \end{itemize}
 
 \end{document}
