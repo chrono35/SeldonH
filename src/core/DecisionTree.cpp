@@ -212,8 +212,67 @@ bool mentionsCurve(const QString& text)
     static const QRegularExpression re(QStringLiteral(
         R"(\b(?:courbes?|curves?|inclinaisons?|inclination|declinaisons?|declination|intensites?|intensity|profondeurs?|depths?|)"
         R"(carottes?|carottages?|core|splines?|variation seculaire|secular variation|univariee?s?|bivariee?s?|trivariee?s?|)"
-        R"(univariate|bivariate|trivariate|age-profondeur|age-depth|archeomagneti\w*|archaeomagneti\w*|paleomagneti\w*)\b)"));
+        R"(univariate|bivariate|trivariate|age-profondeur|age-depth|archeomagneti\w*|archaeomagneti\w*|paleomagneti\w*|)"
+        R"(en fonction du temps|au cours du temps|over time|through time)\b)"));
     return re.match(f).hasMatch();
+}
+
+namespace {
+QString folded(const QString& text)
+{
+    QString f = text.toLower().normalized(QString::NormalizationForm_D);
+    f.remove(QRegularExpression(QStringLiteral("[\\x{0300}-\\x{036f}]")));
+    return f;
+}
+} // namespace
+
+QString curveTypeFromText(const QString& text)
+{
+    const QString f = folded(text);
+    // Lettres I, D, F : dans le texte tel qu'écrit (majuscules), « I = 39 », « (I, D, F) ».
+    static const QRegularExpression triple(QStringLiteral(R"(\(\s*I\s*,\s*D\s*,\s*F\s*\))"));
+    static const QRegularExpression pairID(QStringLiteral(R"(\(\s*I\s*,\s*D\s*\))"));
+    static const QRegularExpression pairIF(QStringLiteral(R"(\(\s*I\s*,\s*F\s*\))"));
+    static const QRegularExpression iVal(QStringLiteral(R"(\bI\s*=\s*-?\d)")), dVal(QStringLiteral(R"(\bD\s*=\s*-?\d)")),
+        fVal(QStringLiteral(R"(\bF\s*=\s*\d)"));
+    static const QRegularExpression iWord(QStringLiteral(R"(\binclinaisons?\b|\binclinations?\b)"));
+    static const QRegularExpression dWord(QStringLiteral(R"(\bdeclinaisons?\b|\bdeclinations?\b)"));
+    static const QRegularExpression fWord(QStringLiteral(R"(\bintensites?\b|\bintensity\b|\bpaleointensit\w*|\barcheointensit\w*|\bµt\b)"));
+    static const QRegularExpression archeo(QStringLiteral(R"(\barch[a]?eomagneti\w*|\bpaleomagneti\w*|\bvariation seculaire|\bsecular variation|\balpha\s*95|α95)"));
+    bool I = iWord.match(f).hasMatch() || iVal.match(text).hasMatch();
+    bool D = dWord.match(f).hasMatch() || dVal.match(text).hasMatch();
+    bool F = fWord.match(f).hasMatch() || fVal.match(text).hasMatch();
+    if (triple.match(text).hasMatch() || f.contains(QLatin1String("courbe vectorielle")) || f.contains(QLatin1String("vector curve"))) I = D = F = true;
+    else if (pairID.match(text).hasMatch()) I = D = true;
+    else if (pairIF.match(text).hasMatch()) I = F = true;
+    const int n = int(I) + int(D) + int(F);
+    // Archéomagnétisme sûr : un mot du domaine, ou au moins deux grandeurs (une « intensité » seule peut être autre chose).
+    if (n > 0 && (archeo.match(f).hasMatch() || n >= 2)) {
+        if (I && D && F) return QStringLiteral("inc_dec_int");
+        if (I && D) return QStringLiteral("inc_dec");
+        if (I && F) return QStringLiteral("inc_int");
+        if (n == 1) return I ? QStringLiteral("inclinaison") : D ? QStringLiteral("declinaison") : QStringLiteral("intensite");
+        return QString();                                       // D et F sans I : pas de choix, le modèle de langage tranche
+    }
+    if (n == 0) {
+        static const QRegularExpression uni(QStringLiteral(R"(\bunivari\w*)")), bi(QStringLiteral(R"(\bbivari\w*)")),
+            tri(QStringLiteral(R"(\btrivari\w*)"));
+        if (tri.match(f).hasMatch()) return QStringLiteral("trivariee");
+        if (bi.match(f).hasMatch()) return QStringLiteral("bivariee");
+        if (uni.match(f).hasMatch()) return QStringLiteral("univariee");
+    }
+    return QString();
+}
+
+bool deniesStratigraphy(const QString& text)
+{
+    // « Il n'y a ni phase ni ordre stratigraphique entre les coulées » (prompt réel « Açores », 13/11/2026), « sans
+    // stratigraphie », « aucune relation stratigraphique », « no stratigraphic order ».
+    static const QRegularExpression re(QStringLiteral(
+        R"(\b(?:ni|sans|pas d'|pas de|aucune?|no|without)\s+(?:phases?\s+ni\s+(?:d')?)?(?:ordres?|relations?|contraintes?|liens?)\s+)"
+        R"((?:stratigraphiques?|stratigraphic)|\bsans stratigraphie|\bpas de stratigraphie|\baucune stratigraphie|\bno stratigraphy\b|)"
+        R"(\bni phase ni ordre)"));
+    return re.match(folded(text)).hasMatch();
 }
 
 QString grammarFor(const Node& n)
@@ -232,9 +291,28 @@ QString promptFor(const Node& n, const QString& userQuestion)
     return s;
 }
 
+bool requestsCurveModel(const QString& text)
+{
+    QString f = text.toLower().normalized(QString::NormalizationForm_D);
+    f.remove(QRegularExpression(QStringLiteral("[\\x{0300}-\\x{036f}]")));
+    // Demande explicite d'un modèle en mode courbe (prompt réel « Açores », 13/11/2026 : « modèle ChronoModel en mode
+    // courbe vectorielle (I, D, F) » lu « non » parce que la réponse du modèle de langage était son raisonnement).
+    static const QRegularExpression re(QStringLiteral(
+        R"(\b(?:mode courbe|curve mode|courbes? (?:vectorielles?|univariees?|bivariees?|trivariees?|de variation seculaire|)"
+        R"(age-profondeur|archeomagneti\w*)|(?:vector|univariate|bivariate|trivariate|secular variation|age-depth|)"
+        R"(archaeomagnetic) curves?)\b)"));
+    return re.match(f).hasMatch();
+}
+
 QString parseAnswer(const Node& n, const QString& answer)
 {
-    QString a = answer.trimmed().toLower();
+    // Raisonnement d'un modèle « à réflexion » (gpt-oss, Qwen… : reasoning_content remis entre <think> et </think>) : il
+    // recopie souvent la liste des choix (« - non : … »), il ne compte pas. Raisonnement non refermé (réponse coupée par
+    // max_tokens) : aucune réponse.
+    QString a = answer;
+    a.remove(QRegularExpression(QStringLiteral("<think>.*?</think>"), QRegularExpression::DotMatchesEverythingOption));
+    if (a.contains(QLatin1String("<think>"))) return QString();
+    a = a.trimmed().toLower();
     a.remove(QRegularExpression(QStringLiteral(R"([`*"'«»“”.\s]+$)")));
     a.remove(QRegularExpression(QStringLiteral(R"(^[`*"'«»“”\s-]+)")));
     for (const Choice& c : n.choices) if (a == c.id) return c.id;

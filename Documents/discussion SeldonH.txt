@@ -1,0 +1,114 @@
+# let motif
+on attendrait qu’il aide l’utilisateur à :
+
+  *  comprendre les outils et les étapes du logiciel ;
+  *  saisir, organiser et vérifier les données de datation ou géologie ;
+  *  expliquer les résultats, les unités et les marges d’incertitude ;
+  *  repérer les incohérences et préciser les hypothèses utilisées ;
+  *  produire des synthèses ou des rapports, sans présenter une estimation comme une certitude.
+Il devrait surtout t’aider à utiliser le logiciel, organiser et contrôler tes données,
+ interpréter les résultats et leurs incertitudes, et expliquer clairement les étapes — tout en signalant les limites plutôt qu’en donnant des conclusions trop certaines.
+
+# date simple
+
+date ce C14 de 1954 +- 50
+
+Calibre l’âge radiocarbone de trois mille six cent quarante-huit ans BP, avec une erreur de vingt-cinq ans.
+
+
+s : Inclinaison magnétique de 65∘ avec une incertitude de 1∘ (α95 = 1).
+
+
+https://albert.api.etalab.gouv.fr/v1
+sk-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo5Mzg3LCJ0b2tlbl9pZCI6OTkzNywiZXhwaXJlcyI6MTgwMDYxNDQyMX0.LVkKh9CEnGO97sO_PzMWCmsBbn3l1U7bduNEsBO6CHM
+
+https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions
+
+# test Event
+
+fait un évènement avec 
+ 14c 6589 +- 30 et 14c 5879+- 35
+
+# test strati
+
+crée un modèle avec un Event US10 au dessus de l'Event US6
+Event US 3 est au dessus de US5
+US6 est en dessous de l'US10 et de l'US7
+US7 est aussi au dessus de US3
+US1 est en dessous de US6 et US5
+dans US10: 14c 6589 +- 30 et 14c 5879+- 35
+US6: 14c référence Ly-12345 6458 +- 30 en bleu
+US5: 14C 6455 +- 40
+
+US3: am Rennes2025 inclinaison 65 alpha95 1.2
+US7: une borne à 40 BC couleur rouge
+US1: TL réf Bdx-478 age 3500 +- 45 fait en 2010 en orange
+
+
+# test courbe age-prof
+
+Je voudrais faire une courbe âge-profondeur pour la carotte Teilleul 2.
+ J’ai 9 niveaux, du haut vers le bas, chacun plus ancien que celui du dessus. 
+ En surface, à 4 cm (+- 1 cm), c’est le niveau actuel : 
+ je le date entre -1500 et 2000, je l’appelle « surface », la courbe doit passer par ce point et je le veux en vert.
+  Ensuite, toutes les dates sont des 14C, avec une erreur de 2 cm sur la profondeur :
+à 13 cm, Ly-8812 310 +- 50 BP
+à 21 cm, Ly-8813 590 +- 30 BP en bleu
+à 29 cm, Ly-8814 1080 +- 70 
+à 36 cm, Ly-8815 1150 +- 80 en bleu ; 
+à 53 cm, Ly-8820 1760 +- 50 en orange ; 
+à 62 cm, Ly-8821 1850 +- 80 en orange ; 
+à 84 cm, Ly-8826 2160 +- 60 en rouge ; 
+et au fond, à 106 cm, Ly-8830 2930 +- 40 BP en rouge.
+
+Calibre avec IntCal20, étudie la période de -1500 à 2000 au pas d’un an, et ne fais pas de recuit.
+
+# test text csv
+Title;teilleulc2.chr
+method;dating name/code;param a;param b;param c;Depth;Err depth;
+Unif;surface;1980;2000;;-4;1;
+14C;LY;310;50;intcal20.14c;-13;2;
+14C;LY;590;30;intcal20.14c;-21;2;
+14C;LY;1080;70;intcal20.14c;-29;2;
+14C;LY;1150;80;intcal20.14c;-36;2;
+14C;LY;1760;50;intcal20.14c;-53;2;
+14C;LY;1850;80;intcal20.14c;-62;2;
+14C;LY;2160;60;intcal20.14c;-84;2;
+14C;LY;2930;40;intcal20.14c;-106;2;
+
+# date inverse
+
+Quel Age 14c pour −450 avec IntCal20
+
+# calcul de durée
+
+Quelle durée entre les évènements CTC_X7021_SB4 et CTC_X7022_SB5
+
+# combinaison produit
+fait la combinaison de  14c 6589 +- 30 et 14c 5879+- 35
+
+fait la combinaison de 
+14c 6589 +- 30 avec un wiggle fixe de +500 ans
+et 14c 5879+- 35 avec un wiggle range -300 et -200
+
+# question archéo
+
+j'ai trois US stratigraphiques, au dessus (us1) j'ai un age C14 de 3578 +-30 , au fond (us3) j'ai un c14 3987 +- 25.
+Je veux dater l'us2 du milieu.
+Comment faire?
+
+# vrai simulation de question longue
+Relations stratigraphiques et chronologie
+
+La séquence stratigraphique comprend trois niveaux principaux. Le niveau 3, situé à la base de la séquence, correspond au dépôt le plus ancien observé. Il est recouvert par le niveau 2, qui contient des traces d’occupation, notamment un foyer. Un échantillon de charbon prélevé dans ce foyer a livré une date de 4520 ± 40 BP. Le niveau 1, situé au-dessus du niveau 2, est donc postérieur à celui-ci selon le principe de superposition. Un échantillon associé à une structure de combustion dans ce niveau a donné une date de 3860 ± 35 BP. Ces résultats sont compatibles avec l’ordre stratigraphique observé, sous réserve de la calibration des dates et de la fiabilité de l’association entre les échantillons et les structures.
+
+Une fosse recoupe les niveaux 1 et 2 : elle est donc postérieure aux dépôts qu’elle traverse. Son remblai constitue un dépôt distinct, dont la date ne correspond pas nécessairement au moment du creusement. Pour établir la chronologie de cette fosse, il faudrait vérifier la provenance et la nature des matériaux datés dans son remblai. Dans l’ensemble, les relations stratigraphiques établissent une succession relative des événements, tandis que les datations au carbone 14 contribuent à leur attribuer des repères chronologiques. Une date sur charbon peut toutefois être plus ancienne que l’événement archéologique si le bois était déjà vieux ou remanié.
+
+Questions archéologiques à explorer
+
+    Les niveaux 1 et 2 correspondent-ils à deux phases d’occupation distinctes ou à une occupation continue ?
+    Les activités pratiquées dans chaque niveau ont-elles changé au cours du temps ?
+    Le foyer daté du niveau 2 est-il associé à des artefacts ou à des vestiges alimentaires particuliers ?
+    La fosse a-t-elle été creusée pendant une phase d’occupation identifiable, et quelle fonction pouvait-elle avoir ?
+    Les écarts entre dates au carbone 14 et ordre stratigraphique pourraient-ils s’expliquer par du charbon remanié, du « vieux bois » ou une contamination ?
+    D’autres échantillons issus de contextes bien définis permettraient-ils de préciser la durée de chaque phase ?

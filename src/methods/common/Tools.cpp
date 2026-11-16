@@ -412,6 +412,18 @@ QVector<ToolDef> build()
                    "table" });
     }
 
+    v.append({ "calculatrice",
+               QStringLiteral("Calculatrice de SeldonH : évalue une formule (arithmétique, racine, puissance, logarithme, trigonométrie "
+                              "en degrés, conversions de dates ADtoBP, BPtoAD…, valeurs avec erreur « 2500 +- 30 » propagées). À "
+                              "utiliser pour TOUT calcul numérique, même simple (racine carrée, moyenne, différence de deux années) : "
+                              "ne calcule jamais de tête. Nombres recopiés de l'utilisateur."),
+               schema({ { "expr", str(QStringLiteral("Formule, ex. « sqrt(36) », « (2450 - 2310) / 2 », « 2^10 », « ln(2) », "
+                                                     "« ADtoBP(-499) », « moyenne(12; 15; 18) ». Fonctions : sqrt racine exp ln log "
+                                                     "log10 abs round floor ceil min max sin cos tan asin acos atan, ^ pour la "
+                                                     "puissance ; arguments séparés par « ; ».")) } },
+                      { "expr" }),
+               "expr" });
+
     v.append({ "courbes_disponibles",
                QStringLiteral("Liste les courbes de référence connues de SeldonH (calibration 14C, F14C bombe, archéomagnétisme, plugin "
                               "Gauss) et les densités du plugin Density. À appeler avant un calcul quand l'utilisateur nomme une courbe "
@@ -421,7 +433,7 @@ QVector<ToolDef> build()
 
     // Niveau de confiance facultatif, commun à toutes les datations.
     for (ToolDef& d : v) {
-        if (d.methodId.isEmpty() || d.methodId == QLatin1String("density_file")) continue;
+        if (d.methodId.isEmpty() || d.methodId == QLatin1String("density_file") || d.methodId == QLatin1String("expr")) continue;
         QJsonObject props = d.parameters.value("properties").toObject();
         // Calculs qui ne sont pas des datations : seulement le niveau de confiance.
         const bool notDating = d.name == QLatin1String("analyser_traces") || d.methodId == QLatin1String("inverse")

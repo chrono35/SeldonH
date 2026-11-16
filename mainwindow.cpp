@@ -108,6 +108,8 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle(QStringLiteral("SeldonH"));
     resize(1280, 800);
+    // Formules « expr » du modèle de langage : même calculatrice que la conversation (« ans », variables).
+    MethodRunner::setSharedCalculator(&calc_);
 
     settings_ = AppSettings::load();
     dateformat::setDecimals(settings_.decimals);
@@ -204,6 +206,7 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     MethodRunner::setProgressHandler({});
+    MethodRunner::setSharedCalculator(nullptr);
     if (remote_) remote_->stop();
     if (engine_) engine_->stop();
     if (thread_) {
@@ -897,6 +900,7 @@ void MainWindow::relaunchTurn(int turn)
         t.question = src.question;
         t.modelUser = src.modelUser;                     // même texte envoyé (connaissances, résultats, fichier joint)
         t.skillIds = src.skillIds;
+        t.skillsDropped = src.skillsDropped;
         t.followUp = src.followUp;
         t.drewModel = src.drewModel;
         logUser(src.question + tr("\n\n↻ Question relancée"));
@@ -922,6 +926,7 @@ void MainWindow::exportPrompt(int turn)
     if (!suites.isEmpty()) full["suites"] = suites;
     full["question"] = t.question;
     full["skills"] = QJsonArray::fromStringList(t.skillIds);
+    if (!t.skillsDropped.isEmpty()) full["fiches_ecartees"] = QJsonArray::fromStringList(t.skillsDropped);
     full["answer"] = t.answer;                           // réponse obtenue avec ce prompt
     if (!t.toolBlocks.isEmpty()) full["tool_calls"] = t.toolBlocks;
 
@@ -950,6 +955,8 @@ void MainWindow::exportPrompt(int turn)
             params << QStringLiteral("%1 = %2").arg(it.key(), it.value().isString() ? it.value().toString() : QString::fromUtf8(QJsonDocument(QJsonArray{ it.value() }).toJson(QJsonDocument::Compact)).mid(1).chopped(1));
         md += tr("- **Paramètres** : %1\n").arg(params.join(", "));
         md += tr("- **Compétences injectées** : %1\n").arg(t.skillIds.isEmpty() ? tr("aucune") : t.skillIds.join(", "));
+        if (!t.skillsDropped.isEmpty())
+            md += tr("- **Fiches écartées faute de place** : %1\n").arg(t.skillsDropped.join(", "));
         if (full.contains("dropped_messages"))
             md += tr("- **Messages oubliés par le moteur** (contexte plein) : %1\n").arg(full.value("dropped_messages").toInt());
         auto messages = [&](const QJsonArray& msgs) {
@@ -1009,6 +1016,15 @@ void MainWindow::sendMessage()
         if (calc_.isCalculation(q0)) {
             logUser(q0);
             logNotice(calcHtml(calc_.evaluate(q0)));
+            input_->clear();
+            return;
+        }
+        // Calcul écrit en mots (« calcule la racine carrée de 36 ») : traduit en formule, montrée à l'utilisateur.
+        const QString w = Calculator::fromWords(q0);
+        if (!w.isEmpty() && calc_.isCalculation(w)) {
+            logUser(q0);
+            logNotice(calcHtml(calc_.evaluate(w))
+                      + tr("<p><small>↻ Compris : « %1 » → <code>%2</code></small></p>").arg(q0.toHtmlEscaped(), w.toHtmlEscaped()));
             input_->clear();
             return;
         }
@@ -1108,6 +1124,14 @@ void MainWindow::sendMessage()
     // Méthodes non nommées : celles des questions précédentes, sinon les courantes (pas de fiche TL ou AM pour du 14C seul).
     if (modelRequest && cited.isEmpty()) cited = MethodRunner::datingMethodsIn(earlier);
     if (modelRequest && cited.isEmpty()) cited = QStringList{ "c14", "tl", "am", "gauss" };
+    // Mode courbe (chemin de l'arbre) : I, D, F, alpha95 sont les MESURES de la courbe, pas une datation archéomagnétique.
+    // La fiche « Date — archéomagnétisme » (date « am » dans dates) contredisait la fiche du modèle : un petit modèle mettait
+    // une fausse date « am » dans chaque Event (prompt réel « Açores », 13/11/2026).
+    const QString turnCurve = treeUsed ? treeParams_.value(QStringLiteral("courbe")).toString() : QString();
+    if (!ChrBuilder::curveComponents(turnCurve).isEmpty()) {
+        cited.removeAll(QStringLiteral("am"));
+        if (cited.isEmpty()) cited = QStringList{ "c14", "gauss" };
+    }
     QStringList pinned;
     if (modelRequest) pinned << QStringLiteral("03_chronomodel_creer_modele");
     // Demande de modèle et ordre des couches donné dans la question ou plus tôt (« au-dessus », « au fond », « sous »…) :
@@ -1166,6 +1190,21 @@ void MainWindow::sendMessage()
                 << QStringLiteral("chronomodel_resultats_convergence");
     if (!modelRequest && !modelFollowUp && !stratDating)
         exclude << QStringLiteral("03_chronomodel_creer_modele") << QStringLiteral("13_chronomodel_courbe_age_profondeur");
+    // Fiche 03 scindée (16/11/2026) : la scène des phases et le mode courbe ne viennent que si le texte en parle (prompt plus
+    // court pour un modèle d'Events simple, le cas le plus fréquent en local).
+    if (modelRequest || modelFollowUp || stratDating) {
+        // Phase citée sans négation (« ni phase », « sans phase », « aucune phase » ne comptent pas : prompt du 16/11/2026,
+        // fiche des phases jointe à « utilise la mesure attendue » à cause du « ni phase » du premier message). Questions
+        // précédentes : seulement pour une demande de modèle (une question de suivi ne reprend que la sienne).
+        static const QRegularExpression phaseWord(QStringLiteral(R"((?<!\bni )(?<!\bsans )(?<!\baucune )(?<!\bpas de )\bphases?\b)"),
+                                                  QRegularExpression::CaseInsensitiveOption);
+        if (phaseWord.match(seldon::text::fold(modelRequest ? earlier + qk : qk)).hasMatch()) pinned << QStringLiteral("27_modele_phases");
+        // Pas sur les seules grandeurs I, D, F : un modèle d'Events peut avoir des dates « am » (inclinaison, α95).
+        if (!ChrBuilder::curveComponents(turnCurve).isEmpty() || seldon::decision::requestsCurveModel(qk))
+            pinned << QStringLiteral("28_modele_courbe");
+    }
+    if (!modelRequest && !modelFollowUp && !stratDating)
+        exclude << QStringLiteral("27_modele_phases") << QStringLiteral("28_modele_courbe");
     // Durée, ordre ou « date entre » de niveaux du modèle de la conversation (« combien de temps sépare le niveau -21 du
     // niveau -29 ? », prompt réel du 12/11/2026) : SeldonH calcule lui-même, sur les traces jointes si elles portent ces
     // Events, sinon sur les dates calibrées indépendamment (estimation sans la stratigraphie). Pas de nouveau modèle.
@@ -1190,7 +1229,8 @@ void MainWindow::sendMessage()
     // (la réponse suit la fiche 24 ; d'autres fiches noyaient un petit modèle, prompt réel du 12/11/2026 : 22 800 caractères).
     if (treeUsed) pinned << treeSkills_;                // fiches de la feuille de l'arbre atteinte
     pinned.removeDuplicates();
-    const QList<SkillMatch> matches = skills_.select(qk, (modelRequest || stratDating) ? 0 : settings_.skillChars, exclude, pinned);
+    QStringList skillsDropped;
+    const QList<SkillMatch> matches = skills_.select(qk, (modelRequest || stratDating) ? 0 : settings_.skillChars, exclude, pinned, &skillsDropped);
     const QString knowledge = SkillManager::format(matches);
 
     if (!turns_.isEmpty() && turns_.last().truncation) {     // nouvelle question : plus de « Continuer » sur la précédente
@@ -1207,8 +1247,10 @@ void MainWindow::sendMessage()
     t.question = qShown;
     t.drewModel = drawRequested;
     t.levelEstimate = !levelRel.isEmpty();
+    t.curveType = turnCurve;
     t.help = helpQuestion;
     for (const SkillMatch& m : matches) t.skillIds << m.skill->id;
+    t.skillsDropped = skillsDropped;
 
     // Calculs déterministes (calibration 14C) : faits par l'application, pas par le modèle.
     // Tableau joint ou collé avec cette question : la consigne le vise (« calcule l'événement « Four » », « date les 14C »).
@@ -1312,12 +1354,24 @@ void MainWindow::sendMessage()
     if (!knowledge.isEmpty())  mu += "[Connaissances de référence]\n" + knowledge + "\n\n";
     if (treeUsed && treeParams_.contains(QStringLiteral("courbe"))) {
         const QString ct = treeParams_.value(QStringLiteral("courbe")).toString();
-        // Courbes archéomagnétiques : la mesure va sur l'Event (forme de test_curveIDF.chr, 12/11/2026).
-        static const QStringList magnetic = { "vector", "spherical", "unknown_dec", "inclination", "declination", "intensity", "trivariate" };
-        mu += QStringLiteral("[Aiguillage de SeldonH : modèle en mode courbe, type « %1 » : écris \"curve\":\"%1\" à la racine du bloc "
-                             "chronomodel%2.]\n\n").arg(ct, magnetic.contains(ct)
-                             ? QStringLiteral(" ; la mesure de chaque Event (inc, dec, alpha95, field, error_f) va sur l'événement, "
-                                              "ses dates restent ses datations") : QString());
+        // Modèle en deux étapes (16/11/2026) : mesures écrites par Event dans le texte (« PI02 : … I = 39,0° ») → le modèle de
+        // langage n'écrit que les Events, leurs dates et les contraintes ; SeldonH recopie les mesures (étape 2,
+        // ChrBuilder::fillCurveMeasures). Réponse bien plus courte en local, valeurs recopiées à l'identique.
+        const QString comps = ChrBuilder::curveComponents(ct);
+        const bool seldonFills = ChrBuilder::hasCurveMeasures(earlierQs.join(QLatin1Char('\n')) + QLatin1Char('\n') + q, ct);
+        const QString what = comps.contains(QLatin1Char('X')) ? QStringLiteral("X, Y, Z et leurs erreurs") : QStringLiteral("inc, dec, alpha95, field, error_f");
+        if (comps.isEmpty())
+            mu += QStringLiteral("[Aiguillage de SeldonH : modèle en mode courbe, type « %1 » : écris \"curve\":\"%1\" à la racine du bloc "
+                                 "chronomodel.]\n\n").arg(ct);
+        else if (seldonFills)
+            mu += QStringLiteral("[Aiguillage de SeldonH : modèle en mode courbe, type « %1 ». Écris \"curve\":\"%1\" à la racine, puis "
+                                 "SEULEMENT les Events (nom exact du texte), leurs dates (datations : c14, unif, gauss…) et les contraintes. "
+                                 "N'écris PAS les mesures de la courbe (%2) : SeldonH les recopie lui-même du texte sur chaque Event. "
+                                 "Aucune date « am » : la mesure n'est pas une datation.]\n\n").arg(ct, what);
+        else
+            mu += QStringLiteral("[Aiguillage de SeldonH : modèle en mode courbe, type « %1 » : écris \"curve\":\"%1\" à la racine du bloc "
+                                 "chronomodel ; la mesure de chaque Event (%2) va sur l'événement, ses dates restent ses datations "
+                                 "(aucune date « am »).]\n\n").arg(ct, what);
     }
     else if (treeUsed && std::any_of(treeTrace_.begin(), treeTrace_.end(), [](const QJsonValue& v) {
                  return v.toObject().value("noeud").toString() == QLatin1String("modele_courbe")
@@ -1723,14 +1777,21 @@ bool MainWindow::startTree(const QString& q, const QString& qk, const QStringLis
 QString MainWindow::treeDetector(const QString& node) const
 {
     if (node == QLatin1String("modele_courbe") && MethodRunner::isAgeDepthRequest(treeQk_)) return QStringLiteral("oui");
+    if (node == QLatin1String("modele_courbe") && seldon::decision::requestsCurveModel(treeQuestion_)) return QStringLiteral("oui");
     // Ordre entre des couches lu dans le texte, et aucun mot de courbe : modèle d'Events. Avec un mot de courbe
     // (« courbe archéomagnétique », « inclinaison »…), le modèle de langage tranche (courbe et stratigraphie possibles).
+    // Aucun mot de courbe dans la conversation (ni courbe, ni grandeur, ni profondeur…) : modèle d'Events, sans demander au
+    // modèle de langage (vitesse en local : une question de moins).
     if (node == QLatin1String("modele_courbe")) {
         const QString all = treeEarlier_.join(QLatin1Char('\n')) + QLatin1Char('\n') + treeQuestion_;
-        if (!seldon::decision::mentionsCurve(all) && !seldon::strat::relationsFromTexts(treeEarlier_ + QStringList{ treeQuestion_ }).isEmpty())
-            return QStringLiteral("non");
+        if (!seldon::decision::mentionsCurve(all)) return QStringLiteral("non");
     }
     if (node == QLatin1String("modele_type_courbe") && MethodRunner::isAgeDepthRequest(treeQk_)) return QStringLiteral("profondeur");
+    // Grandeurs écrites (« I = 39 », « (I, D, F) », « univariée ») : type de courbe lu par SeldonH.
+    if (node == QLatin1String("modele_type_courbe")) {
+        const QString ct = seldon::decision::curveTypeFromText(treeQuestion_);
+        if (!ct.isEmpty()) return ct;
+    }
     if (node == QLatin1String("modele_strati")) {
         const QStringList texts = treeEarlier_ + QStringList{ treeQuestion_ };
         if (!seldon::strat::relationsFromTexts(texts).isEmpty()) return QStringLiteral("oui");
@@ -1744,6 +1805,8 @@ QString MainWindow::treeDetector(const QString& node) const
             for (const QString& t : texts) if (seldon::strat::superpositionStated(t)) return QStringLiteral("oui");
             return QStringLiteral("?");
         }
+        // « Il n'y a ni phase ni ordre stratigraphique » : non, sans le demander au modèle de langage.
+        if (seldon::decision::deniesStratigraphy(treeQuestion_)) return QStringLiteral("non");
     }
     return QString();
 }
@@ -1811,7 +1874,9 @@ void MainWindow::treeStep()
         chat.append(ChatMessage{ "user", seldon::decision::promptFor(*n, text).toStdString() });
         SamplingParams sp;
         sp.temperature = 0.0f;                                // décodage glouton : réponse reproductible
-        sp.maxTokens = remoteActive() ? 64 : 12;              // distant : marge pour un modèle qui raisonne
+        // Distant : un modèle « à réflexion » (gpt-oss) raisonne même sans réflexion demandée ; 64 jetons coupaient son
+        // raisonnement avant la réponse (prompt « Açores », 13/11/2026).
+        sp.maxTokens = remoteActive() ? 1024 : 12;
         sp.enableThinking = false;
         sp.grammar = seldon::decision::grammarFor(*n).toStdString();
         classifying_ = true;
@@ -1907,8 +1972,8 @@ bool MainWindow::runRequestedCalculations()
         blocks = fresh;
     }
     // Provenance : une mesure que l'utilisateur n'a pas donnée (âge, erreur, α95…) ne part pas au calcul.
-    QStringList blocked, warnings;
-    blocks = sourcedCalcBlocks(blocks, &blocked, &warnings);
+    QStringList blocked, warnings, reused;
+    blocks = sourcedCalcBlocks(blocks, &blocked, &warnings, &reused);
     if (!blocked.isEmpty())
         logNotice(tr("<p><b>⚠ Calcul non lancé</b> : l'assistant a demandé un calcul avec des valeurs qui ne figurent pas "
                      "dans vos messages (%1). SeldonH ne calcule qu'avec vos données : reposez la question avec les "
@@ -1918,6 +1983,9 @@ bool MainWindow::runRequestedCalculations()
 
     RunOutcome out = MethodRunner::run(blocks, displayFormat());
     if (!out.found) return false;
+    if (!reused.isEmpty())
+        out.noticeHtml.prepend(tr("<p><i>↻ Valeur(s) reprise(s) d'un résultat précédent de SeldonH : %1.</i></p>")
+                                   .arg(reused.join(QStringLiteral(" ; ")).toHtmlEscaped()));
     if (!warnings.isEmpty()) {
         out.noticeHtml.prepend(tr("<p><i>⚠ Valeur(s) choisie(s) par l'assistant, absente(s) de vos messages : %1. "
                                   "Vérifiez-les avant d'utiliser ce résultat.</i></p>").arg(warnings.join(QStringLiteral(" ; ")).toHtmlEscaped()));
@@ -1954,6 +2022,7 @@ void MainWindow::stopGeneration()
 void MainWindow::onToken(const QString& piece)
 {
     if (classifying_) { classRaw_ += piece; return; }        // réponse à une question de l'arbre : pas affichée
+    if (measuring_) { measureRaw_ += piece; return; }        // recours pour les mesures de la courbe : pas affiché
     if (reporting_) { reportRaw_ += piece; return; }         // synthèse du rapport : pas affichée
     if (turns_.isEmpty()) return;
     raw_ += piece;
@@ -1989,6 +2058,8 @@ void MainWindow::finishAssistantMessage(bool interrupted)
     // inversé, contrainte oubliée, US sans date mise en Event), avant tout affichage ou enregistrement du modèle.
     QStringList stratNotes;
     QVector<seldon::suggest::ToDate> toDate;      // US à dater entre deux Events : question de la marche à suivre
+    QString curveUsed;                            // mode courbe : type de la courbe du modèle
+    QStringList missingMeasures;                  // Events dont les mesures n'ont pas été trouvées dans le texte
     if (!interrupted && modelExpected()) {
         QJsonObject spec0;
         QStringList mergeNotes;                   // clé « events » écrite deux fois, Event écrit deux fois (prompt du 13/11/2026)
@@ -2003,12 +2074,27 @@ void MainWindow::finishAssistantMessage(bool interrupted)
                 for (auto it = attachedRe.globalMatch(u.modelUser); it.hasNext();) joined << it.next().captured(1);
             }
             const seldon::strat::SpecCheck c = seldon::strat::checkSpec(spec0, qs, joined);
-            if (c.changed || !mergeNotes.isEmpty()) {
+            // Mode courbe, étape 2 : SeldonH recopie du texte les mesures de chaque Event (I, D, F, α95 ou X, Y, Z).
+            QJsonObject spec1 = c.changed ? c.spec : spec0;
+            QStringList curveNotes;
+            bool curveChanged = false;
+            {
+                const QString sc = spec1.value("curve").toString().trimmed();
+                const QString ct = ChrBuilder::curveComponents(sc).isEmpty() ? t.curveType : sc;
+                if (!ChrBuilder::curveComponents(ct).isEmpty()) {
+                    curveUsed = ct;
+                    const QJsonObject filled = ChrBuilder::fillCurveMeasures(spec1, (qs + joined).join(QLatin1Char('\n')), ct, &curveNotes,
+                                                                             &missingMeasures);
+                    curveChanged = filled != spec1;
+                    spec1 = filled;
+                }
+            }
+            if (c.changed || !mergeNotes.isEmpty() || curveChanged || !curveNotes.isEmpty()) {
                 // Export du prompt : la réponse telle que le modèle l'a écrite, avant la correction de SeldonH.
                 t.prompt[QStringLiteral("reponse_avant_correction")] = t.answer;
-                stratNotes = mergeNotes + c.notes;
+                stratNotes = mergeNotes + c.notes + curveNotes;
                 t.prompt[QStringLiteral("corrections_seldonh")] = QJsonArray::fromStringList(stratNotes);
-                t.answer = seldon::strat::replaceModelBlock(t.answer, c.changed ? c.spec : spec0);
+                t.answer = seldon::strat::replaceModelBlock(t.answer, spec1);
             }
             for (const seldon::strat::Undated& u : c.undated) toDate.append({ u.name, u.older, u.younger });
         }
@@ -2059,9 +2145,20 @@ void MainWindow::finishAssistantMessage(bool interrupted)
         }
     }
 
+    // Mode courbe : mesures introuvables dans le texte pour certains Events → recours au modèle de langage (lancé par
+    // onFinished), puis présentation du modèle ; sinon le modèle est présenté tout de suite.
+    if (!interrupted && measureAllowed_ && !missingMeasures.isEmpty() && modelReady_) {
+        measurePending_ = MeasurePending{ true, int(turns_.size()) - 1, curveUsed, missingMeasures, stratNotes, toDate };
+        return;
+    }
+    if (!interrupted) presentModel(t, stratNotes, toDate);
+}
+
+void MainWindow::presentModel(Turn& t, const QStringList& stratNotes, const QVector<seldon::suggest::ToDate>& toDate)
+{
     // Modèle ChronoModel complet : il est dessiné tout de suite (scène des Events, et des phases s'il y en a).
     QJsonObject spec;
-    if (!interrupted && ChrBuilder::extractSpec(t.answer, spec)) {
+    if (ChrBuilder::extractSpec(t.answer, spec)) {
         if (!stratNotes.isEmpty()) {
             QString h = tr("<p><b>↕ Modèle vérifié par SeldonH d'après votre texte</b></p><ul>");
             for (const QString& n : std::as_const(stratNotes)) h += QStringLiteral("<li>%1</li>").arg(n.toHtmlEscaped());
@@ -2085,6 +2182,82 @@ void MainWindow::finishAssistantMessage(bool interrupted)
             stepsShown_ = true;
         }
     }
+}
+
+// ---------- Mode courbe : recours au modèle de langage pour les mesures (16/11/2026) ----------
+bool MainWindow::startMeasureFill()
+{
+    MeasurePending& p = measurePending_;
+    if (!p.active || p.turn < 0 || p.turn >= turns_.size()) { p = MeasurePending(); return false; }
+    const QString comps = ChrBuilder::curveComponents(p.curve);
+    QStringList keys;
+    if (comps.contains('I')) keys << "inc";
+    if (comps.contains('D')) keys << "dec";
+    if (comps.contains('I') || comps.contains('D')) keys << "alpha95";
+    if (comps.contains('F')) keys << "field" << "error_f";
+    for (const QChar c : { QChar('X'), QChar('Y'), QChar('Z') })
+        if (comps.contains(c)) keys << QString(c).toLower() << QStringLiteral("error_") + QString(c).toLower();
+    const QString prompt = QStringLiteral(
+        "[Recours de SeldonH : lecture de mesures. Réponds par UN SEUL objet JSON, sans rien d'autre.]\n\n"
+        "Texte de l'utilisateur :\n<<<\n%1\n>>>\n\n"
+        "Pour chacun de ces Events : %2, recopie du texte ses mesures (clés : %3), nombres tels qu'écrits, sous la forme "
+        "{\"<Event>\":{\"%4\":<valeur>,…},…}. Omets une valeur que le texte ne donne pas ; n'en calcule ni n'en invente aucune.\n\nJSON :")
+        .arg(userSourceText().trimmed(), p.missing.join(QStringLiteral(", ")), keys.join(QStringLiteral(", ")), keys.value(0));
+    QVector<ChatMessage> chat;
+    const QVector<ChatMessage> base = buildChat(nullptr);
+    if (!base.isEmpty() && base.first().role == "system") chat.append(base.first());
+    chat.append(ChatMessage{ "user", prompt.toStdString() });
+    SamplingParams sp;
+    sp.temperature = 0.0f;
+    sp.enableThinking = false;
+    sp.maxTokens = std::clamp(int(p.missing.size() * keys.size()) * 8 + 64, 128, 2048) + (remoteActive() ? 1024 : 0);
+    measuring_ = true;
+    measureRaw_.clear();
+    generating_ = true;
+    updateControls();
+    statsLabel_->setText(tr("Mesures de la courbe : %1 Event(s) à compléter, lecture par le modèle…").arg(p.missing.size()));
+    if (remote_) remote_->setToolsSuspended(true);
+    if (remoteActive()) emit requestRemoteGenerate(chat, sp);
+    else emit requestGenerate(chat, sp);
+    return true;
+}
+
+void MainWindow::onMeasured(const GenStats& st, bool failed)
+{
+    measuring_ = false;
+    generating_ = false;
+    if (remote_) remote_->setToolsSuspended(false);
+    MeasurePending p = measurePending_;
+    measurePending_ = MeasurePending();
+    if (p.turn < 0 || p.turn >= turns_.size()) { updateControls(); return; }
+    Turn& t = turns_[p.turn];
+    QStringList notes = p.notes;
+    if (!failed && !st.stoppedByUser) {
+        const QString a = QString::fromStdString(splitThinking(measureRaw_.toStdString(), false).answer);
+        t.prompt[QStringLiteral("recours_mesures")] = a.left(8000);
+        const qsizetype b = a.indexOf(QLatin1Char('{')), e = a.lastIndexOf(QLatin1Char('}'));
+        const QJsonObject got = (b >= 0 && e > b) ? QJsonDocument::fromJson(a.mid(b, e - b + 1).toUtf8()).object() : QJsonObject();
+        QJsonObject spec;
+        if (!got.isEmpty() && ChrBuilder::extractSpec(t.answer, spec)) {
+            const seldon::provenance::NumberPool pool(userSourceText(), false);
+            QStringList added;
+            QJsonObject merged = ChrBuilder::mergeCurveMeasures(spec, got, p.curve, [&](double v) { return pool.contains(v); }, &added);
+            QStringList again, still;
+            merged = ChrBuilder::fillCurveMeasures(merged, userSourceText(), p.curve, &again, &still);
+            notes.erase(std::remove_if(notes.begin(), notes.end(), [](const QString& n) { return n.startsWith(QStringLiteral("Mesures absentes")); }),
+                        notes.end());
+            notes << added;
+            for (const QString& n : std::as_const(again)) if (n.startsWith(QStringLiteral("Mesures absentes"))) notes << n;
+            t.answer = seldon::strat::replaceModelBlock(t.answer, merged);
+            t.prompt[QStringLiteral("corrections_seldonh")] = QJsonArray::fromStringList(notes);
+            chat_->setAssistant(t.view, shownAnswer(t.answer), t.thinking, false, true);
+        }
+    }
+    presentModel(t, notes, p.toDate);
+    saveCurrent();
+    updateControls();
+    statsLabel_->setText(failed ? tr("Mesures de la courbe : recours impossible, modèle présenté tel quel.")
+                                : tr("Mesures de la courbe complétées."));
 }
 
 void MainWindow::showChrScene(const QJsonObject& chr, const QString& kind, const QString& title)
@@ -2137,13 +2310,38 @@ QString MainWindow::receivedText() const
     return s + calcSourceText();
 }
 
-QVector<QJsonObject> MainWindow::sourcedCalcBlocks(const QVector<QJsonObject>& blocks, QStringList* blocked,
-                                                   QStringList* warnings) const
+QString MainWindow::seldonResultsText() const
 {
-    const seldon::provenance::NumberPool pool(calcSourceText());
+    static const QRegularExpression block(QStringLiteral(
+        R"(\[Résultat[^\n]*\][\s\S]*?(?=\n\[(?:Connaissances|Question|Fin de l'échange|Consignes)|\z))"));
+    QString s;
+    for (const Turn& t : turns_) {
+        if (t.synthetic) { s += t.modelUser + QLatin1Char('\n'); continue; }
+        for (auto it = block.globalMatch(t.modelUser); it.hasNext();) s += it.next().captured(0) + QLatin1Char('\n');
+    }
+    return s;
+}
+
+QVector<QJsonObject> MainWindow::sourcedCalcBlocks(const QVector<QJsonObject>& blocks, QStringList* blocked,
+                                                   QStringList* warnings, QStringList* reused) const
+{
+    const QString user = calcSourceText();
+    const seldon::provenance::NumberPool pool(user);
+    // Prompt réel du 16/11/2026 : « date un 14C avec la mesure attendue de la question du dessus », l'outil appelé avec
+    // l'âge 2409 BP de la calibration inverse était bloqué (« absent de vos messages ») et le modèle redemandait l'âge.
+    // Un résultat exact de SeldonH, que l'utilisateur désigne, est une source légitime : le calcul est lancé, avec une note.
+    const seldon::provenance::NumberPool withResults(user + QLatin1Char('\n') + seldonResultsText(), false);
     QVector<QJsonObject> ok;
     for (const QJsonObject& b : blocks) {
-        const seldon::provenance::RequestCheck c = seldon::provenance::checkRequest(b, pool);
+        seldon::provenance::RequestCheck c = seldon::provenance::checkRequest(b, pool);
+        if (!c.ok()) {
+            const seldon::provenance::RequestCheck c2 = seldon::provenance::checkRequest(b, withResults);
+            if (c2.ok()) {
+                if (reused) *reused << c.measures;
+                else if (warnings) *warnings << c.measures;
+                c.measures.clear();
+            }
+        }
         if (!c.ok()) { if (blocked) *blocked << c.measures; continue; }
         if (warnings) *warnings << c.bounds;
         ok << b;
@@ -2185,6 +2383,7 @@ void MainWindow::showChrScenes(const QJsonObject& chr, const QString& name, bool
 void MainWindow::onFinished(const GenStats& st)
 {
     if (classifying_) { onClassified(st, false); return; }
+    if (measuring_) { onMeasured(st, false); return; }
     if (reporting_) { finishReport(st.stoppedByUser ? tr("rédaction arrêtée") : QString()); return; }
     generating_ = false;
     if (!turns_.isEmpty()) {
@@ -2203,11 +2402,17 @@ void MainWindow::onFinished(const GenStats& st)
         finishCalcOnly();
         return;
     }
+    measureAllowed_ = true;
     finishAssistantMessage(stopped);
+    measureAllowed_ = false;
     calcCut_ = false;
     continuing_ = false;
     if (toolsApplyPending_) { toolsApplyPending_ = false; applyRemoteTools(false); }
     saveCurrent();
+    if (measurePending_.active) {                            // mode courbe : recours pour les mesures manquantes
+        updateQuota(st);
+        if (startMeasureFill()) return;
+    }
 
     const double tps = st.genMs > 0 ? st.generated * 1000.0 / st.genMs : 0.0;
     if (!remoteActive() && st.generated >= 32) lastLocalTps_ = tps;     // pour « Optimiser pour ce modèle »
@@ -2297,6 +2502,7 @@ void MainWindow::fetchRemoteContext()
 void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*text*/, const GenStats& st)
 {
     if (classifying_) { onClassified(st, true); return; }    // outils suspendus pendant l'aiguillage : réponse inutilisable
+    if (measuring_) { onMeasured(st, true); return; }
     if (reporting_) { finishReport(tr("le modèle a demandé un calcul au lieu de rédiger")); return; }
     if (turns_.isEmpty()) { generating_ = false; updateControls(); return; }
     finishAssistantMessage(false);                      // texte écrit avant les appels (souvent vide)
@@ -2321,11 +2527,11 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
         if (const QJsonDocument a = QJsonDocument::fromJson(args.toUtf8()); a.isObject() && !chrDates_.isEmpty())
             args = QString::fromUtf8(QJsonDocument(MethodRunner::fillDateNames(a.object(), chrDates_)).toJson(QJsonDocument::Compact));
         // Provenance : mesures inventées -> calcul refusé, le modèle doit les demander ; bornes choisies -> avertissement.
-        QStringList blocked, warnings;
+        QStringList blocked, warnings, reused;
         if (const QJsonDocument a = QJsonDocument::fromJson(c.arguments.toUtf8()); a.isObject()) {
             QJsonObject rq = a.object();
             if (!rq.contains("method")) rq["method"] = c.name;
-            sourcedCalcBlocks({ rq }, &blocked, &warnings);
+            sourcedCalcBlocks({ rq }, &blocked, &warnings, &reused);
         }
         if (!blocked.isEmpty()) {
             const QString msg = seldon::provenance::blockedMessage(blocked);
@@ -2338,6 +2544,9 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
             continue;
         }
         tools::ToolOutcome o = tools::execute(c.name, args, fmt);
+        if (o.executed && !reused.isEmpty())
+            o.run.noticeHtml.prepend(tr("<p><i>↻ Valeur(s) reprise(s) d'un résultat précédent de SeldonH : %1.</i></p>")
+                                         .arg(reused.join(QStringLiteral(" ; ")).toHtmlEscaped()));
         if (o.executed && !warnings.isEmpty()) {
             o.content.prepend(QStringLiteral("[%1]\n").arg(seldon::provenance::boundsMessage(warnings)));
             o.run.noticeHtml.prepend(tr("<p><i>⚠ Valeur(s) choisie(s) par l'assistant, absente(s) de vos messages : %1. "
@@ -2389,6 +2598,7 @@ void MainWindow::onToolCalls(const QVector<ToolCall>& calls, const QString& /*te
 
 void MainWindow::onFailed(const QString& error)
 {
+    if (measuring_) { onMeasured(GenStats(), true); return; } // recours impossible : le modèle est présenté tel quel
     if (classifying_) {                                       // aiguillage impossible : la question suit le chemin habituel
         treeTrace_.append(QJsonObject{ { "erreur", error } });
         onClassified(GenStats(), true);

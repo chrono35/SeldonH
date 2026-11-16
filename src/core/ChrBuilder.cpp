@@ -1767,4 +1767,387 @@ QString ChrBuilder::summarize(const QJsonObject& chr, int maxEvents)
     return s;
 }
 
+
+// ---------- Mode courbe, étape 2 : mesures de chaque Event lues par SeldonH (16/11/2026) ----------
+namespace {
+
+struct MeasurePattern {
+    QChar comp;                 // I, D, F, X, Y, Z ; 'a' = alpha95, 'e' = erreur de F
+    QRegularExpression re;      // valeur en 1, erreur éventuelle en 2
+};
+
+const QVector<MeasurePattern>& measurePatterns()
+{
+    static const QString num = QStringLiteral(R"((-?\d+(?:[.,]\d+)?))");
+    static const QString pm = QStringLiteral(R"((?:\s*(?:±|\+\s*/?\s*-)\s*(\d+(?:[.,]\d+)?))?)");
+    static const QString eq = QStringLiteral(R"(\s*[=:]\s*)");
+    static const QVector<MeasurePattern> v{
+        { 'I', QRegularExpression(QStringLiteral(R"((?:\bI|(?i:\binclinaisons?|\binclinations?|\binc))(?![\w]))") + eq + num) },
+        { 'D', QRegularExpression(QStringLiteral(R"((?:\bD|(?i:\bd[ée]clinaisons?|\bdeclinations?|\bdec))(?![\w]))") + eq + num) },
+        { 'a', QRegularExpression(QStringLiteral(R"((?i:\balpha\s*-?\s*95|α\s*95|\ba95))") + eq + num) },
+        { 'F', QRegularExpression(QStringLiteral(R"((?:\bF|(?i:\bintensit[ée]s?|\bintensity|\bfield|\bpal[ée]ointensit[ée]s?))(?![\w]))") + eq + num + pm) },
+        { 'e', QRegularExpression(QStringLiteral(R"((?i:σ\s*F|\bsigma_?f\b|\berror_f\b|\berreur\s+(?:sur\s+)?(?:F|l'intensit[ée])))") + eq + num) },
+        { 'X', QRegularExpression(QStringLiteral(R"(\bX(?![\w])(?:\s*\([^)]*\))?)") + eq + num + pm) },
+        { 'Y', QRegularExpression(QStringLiteral(R"(\bY(?![\w])(?:\s*\([^)]*\))?)") + eq + num + pm) },
+        { 'Z', QRegularExpression(QStringLiteral(R"(\bZ(?![\w])(?:\s*\([^)]*\))?)") + eq + num + pm) },
+    };
+    return v;
+}
+
+bool magneticComponents(const QString& comps) { return comps.contains('I') || comps.contains('D') || comps.contains('F'); }
+
+// Valeurs lues dans un passage : composante -> (valeur, erreur ou NaN).
+QHash<QChar, QPair<double, double>> measuresIn(const QString& chunk, const QString& comps)
+{
+    QHash<QChar, QPair<double, double>> out;
+    const bool mag = magneticComponents(comps);
+    for (const MeasurePattern& p : measurePatterns()) {
+        const bool wanted = mag ? (comps.contains(p.comp) || (p.comp == 'a' && (comps.contains('I') || comps.contains('D')))
+                                   || (p.comp == 'e' && comps.contains('F')))
+                                : comps.contains(p.comp);
+        if (!wanted) continue;
+        const auto m = p.re.match(chunk);
+        if (!m.hasMatch()) continue;
+        const double v = text::toNumber(m.captured(1));
+        const double e = m.lastCapturedIndex() >= 2 && !m.captured(2).isEmpty() ? text::toNumber(m.captured(2)) : std::nan("");
+        if (std::isfinite(v)) out.insert(p.comp, { v, e });
+    }
+    return out;
+}
+
+QString normalizedText(QString t)
+{
+    t.replace(QChar(0x2212), QLatin1Char('-'));            // signe moins typographique
+    t.replace(QChar(0x00A0), QLatin1Char(' '));
+    t.replace(QChar(0x202F), QLatin1Char(' '));
+    return t;
+}
+
+// Nom d'Event sous une forme proche : casse, espaces, tirets et zéros de tête ignorés (« PI 2 », « pi-02 » pour « PI02 »).
+QRegularExpression looseName(const QString& name)
+{
+    static const QRegularExpression runs(QStringLiteral(R"(\d+|[^\W\d_]+)"));
+    QStringList parts;
+    for (auto it = runs.globalMatch(name); it.hasNext();) {
+        const QString r = it.next().captured(0);
+        if (r.at(0).isDigit()) {
+            QString d = r;
+            while (d.size() > 1 && d.startsWith(QLatin1Char('0'))) d.remove(0, 1);
+            parts << QStringLiteral("0*") + d;
+        } else {
+            parts << QRegularExpression::escape(r);
+        }
+    }
+    if (parts.isEmpty()) return QRegularExpression();
+    return QRegularExpression(QStringLiteral("(?<![A-Za-z0-9])%1(?![A-Za-z0-9])").arg(parts.join(QStringLiteral(R"([\s_.\-]*)"))),
+                              QRegularExpression::CaseInsensitiveOption);
+}
+
+// Composante d'une colonne de tableau d'après son en-tête ; 0 si ce n'en est pas une. 'N' : colonne des noms.
+QChar columnComponent(QString h, bool mag)
+{
+    h = text::fold(h).trimmed();
+    h.remove(QRegularExpression(QStringLiteral(R"(\s*\([^)]*\)\s*$|\s*\[[^\]]*\]\s*$|[°*`])")));
+    h = h.trimmed();
+    static const QStringList names{ "nom", "name", "event", "evenement", "site", "coulee", "echantillon", "sample", "id", "code", "ref",
+                                    "reference", "us", "niveau" };
+    if (names.contains(h)) return 'N';
+    if (mag) {
+        static const QStringList I{ "i", "inc", "inclinaison", "inclination" }, D{ "d", "dec", "declinaison", "declination" },
+            A{ "alpha95", "a95", "α95", "alpha 95" }, F{ "f", "field", "intensite", "intensity", "paleointensite" },
+            E{ "sf", "σf", "error_f", "erreur f", "erreur_f", "sigma f", "sigma_f", "±f", "+-f", "err f", "ef" };
+        if (I.contains(h)) return 'I';
+        if (D.contains(h)) return 'D';
+        if (A.contains(h)) return 'a';
+        if (F.contains(h)) return 'F';
+        if (E.contains(h)) return 'e';
+    } else {
+        for (const QChar c : { QChar('X'), QChar('Y'), QChar('Z') }) {
+            const QString l = QString(c).toLower();
+            if (h == l) return c;
+            if (h == QStringLiteral("s") + l || h == QStringLiteral("σ") + l || h == QStringLiteral("err ") + l || h == QStringLiteral("erreur ") + l
+                || h == QStringLiteral("error_") + l || h == QStringLiteral("sigma ") + l)
+                return QChar(ushort('p' + (c.unicode() - 'X')));   // erreur de X, Y, Z : 'p', 'q', 'r'
+        }
+    }
+    return QChar();
+}
+
+QStringList splitCells(const QString& line)
+{
+    QString l = line.trimmed();
+    if (l.startsWith(QLatin1Char('|'))) l.remove(0, 1);
+    if (l.endsWith(QLatin1Char('|'))) l.chop(1);
+    static const QRegularExpression sep(QStringLiteral(R"(\s*[;\t|]\s*|\s{2,})"));
+    QStringList c = l.split(sep);
+    for (QString& x : c) x = x.trimmed();
+    return c;
+}
+
+// Mesures d'un tableau du texte : index d'Event -> composante -> (valeur, erreur).
+QHash<int, QHash<QChar, QPair<double, double>>> tableMeasures(const QString& text, const QStringList& eventNames, const QString& comps)
+{
+    QHash<int, QHash<QChar, QPair<double, double>>> out;
+    const bool mag = magneticComponents(comps);
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (int h = 0; h < lines.size(); ++h) {
+        const QStringList head = splitCells(lines[h]);
+        if (head.size() < 2) continue;
+        QVector<QChar> kind;
+        int nameCol = -1, wanted = 0;
+        for (int c = 0; c < head.size(); ++c) {
+            const QChar k = columnComponent(head[c], mag);
+            kind << k;
+            if (k == 'N' && nameCol < 0) nameCol = c;
+            else if (!k.isNull() && k != 'N') ++wanted;
+        }
+        if (wanted == 0) continue;
+        if (nameCol < 0) nameCol = 0;
+        for (int r = h + 1; r < lines.size(); ++r) {
+            if (lines[r].trimmed().isEmpty()) break;
+            if (QRegularExpression(QStringLiteral(R"(^[\s|:\-+]+$)")).match(lines[r]).hasMatch()) continue;   // |---|---|
+            const QStringList cells = splitCells(lines[r]);
+            if (cells.size() <= nameCol) break;
+            const QString nm = cells[nameCol];
+            int ev = eventNames.indexOf(nm);
+            for (int i = 0; ev < 0 && i < eventNames.size(); ++i) {
+                const QRegularExpression lre = looseName(eventNames[i]);
+                const auto m = lre.match(nm);
+                if (m.hasMatch() && m.capturedLength() == nm.size()) ev = i;
+            }
+            if (ev < 0) continue;
+            QHash<QChar, QPair<double, double>>& got = out[ev];
+            for (int c = 0; c < cells.size() && c < kind.size(); ++c) {
+                const QChar k = kind[c];
+                if (k.isNull() || k == 'N') continue;
+                static const QRegularExpression vpm(QStringLiteral(R"(^(-?\d+(?:[.,]\d+)?)(?:\s*(?:±|\+\s*/?\s*-)\s*(\d+(?:[.,]\d+)?))?)"));
+                QString cell = cells[c];
+                cell.replace(QChar(0x2212), QLatin1Char('-'));
+                const auto m = vpm.match(cell);
+                if (!m.hasMatch()) continue;
+                const double v = text::toNumber(m.captured(1));
+                const double e = m.captured(2).isEmpty() ? std::nan("") : text::toNumber(m.captured(2));
+                if (!std::isfinite(v)) continue;
+                const ushort u = k.unicode();
+                if (u >= 'p' && u <= 'r') {                     // colonne d'erreur de X, Y, Z
+                    const QChar comp(ushort(u - 'p' + 'X'));
+                    if (got.contains(comp)) got[comp].second = v;
+                    else got.insert(comp, { std::nan(""), v });
+                } else {
+                    const double keepErr = got.contains(k) ? got.value(k).second : std::nan("");
+                    got[k] = { v, std::isfinite(e) ? e : keepErr };
+                }
+            }
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+QString ChrBuilder::curveComponents(const QString& curveType)
+{
+    static const QHash<QString, QString> c{ { "vector", "IDF" }, { "spherical", "ID" }, { "unknown_dec", "IF" },
+                                            { "inclination", "I" }, { "declination", "D" }, { "intensity", "F" },
+                                            { "univariate", "X" }, { "bivariate", "XY" }, { "trivariate", "XYZ" } };
+    return c.value(curveType.trimmed().toLower());
+}
+
+bool ChrBuilder::hasCurveMeasures(const QString& text, const QString& curveType)
+{
+    const QString comps = curveComponents(curveType);
+    if (comps.isEmpty()) return false;
+    const QString t = normalizedText(text);
+    for (const QString& line : t.split(QLatin1Char('\n')))
+        if (!measuresIn(line, comps).isEmpty()) return true;
+    // Tableau : un en-tête avec une colonne de mesure et au moins une ligne en dessous.
+    const bool mag = magneticComponents(comps);
+    const QStringList lines = t.split(QLatin1Char('\n'));
+    for (int h = 0; h + 1 < lines.size(); ++h) {
+        const QStringList head = splitCells(lines[h]);
+        if (head.size() < 2) continue;
+        int wanted = 0;
+        for (const QString& c : head) { const QChar k = columnComponent(c, mag); if (!k.isNull() && k != 'N') ++wanted; }
+        if (wanted > 0 && splitCells(lines[h + 1]).size() >= 2) return true;
+    }
+    return false;
+}
+
+QJsonObject ChrBuilder::fillCurveMeasures(QJsonObject spec, const QString& text, const QString& curveType, QStringList* notes,
+                                          QStringList* missingEvents)
+{
+    const QString comps = curveComponents(curveType);
+    if (comps.isEmpty()) return spec;                       // âge-profondeur ou type inconnu : rien à faire ici
+    if (spec.value("curve").toString().trimmed().isEmpty()) spec["curve"] = curveType;
+    const bool mag = magneticComponents(comps);
+    const QString t = normalizedText(text);
+
+    QJsonArray events = spec.value("events").toArray();
+    // Occurrences des noms d'Events dans le texte (nom entier, sensible à la casse).
+    struct Occ { qsizetype pos, len; int ev; };
+    QVector<Occ> occ;
+    for (int i = 0; i < events.size(); ++i) {
+        const QString name = events[i].toObject().value("name").toString().trimmed();
+        if (name.isEmpty()) continue;
+        const QRegularExpression re(QStringLiteral("(?<![\\w-])%1(?![\\w-])").arg(QRegularExpression::escape(name)));
+        for (auto it = re.globalMatch(t); it.hasNext();) {
+            const auto m = it.next();
+            occ.append({ m.capturedStart(), m.capturedLength(), i });
+        }
+    }
+    std::sort(occ.begin(), occ.end(), [](const Occ& a, const Occ& b) { return a.pos < b.pos; });
+    QStringList eventNames;
+    for (const QJsonValue& v : std::as_const(events)) eventNames << v.toObject().value("name").toString().trimmed();
+    const auto fromTable = tableMeasures(t, eventNames, comps);
+    static const QRegularExpression blank(QStringLiteral(R"(\n\s*\n)"));
+
+    struct Key { QChar comp; const char* value; const char* error; };
+    const QVector<Key> keys = mag ? QVector<Key>{ { 'I', "X_Inc_Depth", nullptr }, { 'D', "Y_Dec", nullptr }, { 'F', "Z_Field", "sZ_sF" },
+                                                  { 'a', "sX_Alpha95_sDepth", nullptr }, { 'e', "sZ_sF", nullptr } }
+                                  : QVector<Key>{ { 'X', "X_Inc_Depth", "sX_Alpha95_sDepth" }, { 'Y', "Y_Dec", "sY" }, { 'Z', "Z_Field", "sZ_sF" } };
+    static const char* const aliases[] = { "inc", "inclinaison", "inclination", "I", "dec", "declinaison", "déclinaison", "declination",
+                                           "D", "field", "intensite", "intensité", "intensity", "F", "alpha95", "a95", "error_f", "erreur_f",
+                                           "sF", "sigma_f", "x", "y", "z", "X", "Y", "Z", "error_x", "error_y", "error_z" };
+    int filled = 0, removedAm = 0;
+    QStringList changed, incomplete;
+    for (int i = 0; i < events.size(); ++i) {
+        QJsonObject e = events[i].toObject();
+        const QString name = e.value("name").toString().trimmed();
+        // Mesures du texte : premier passage de cet Event (nom → nom d'un autre Event ou ligne vide) qui en contient.
+        QHash<QChar, QPair<double, double>> found = fromTable.value(i);
+        for (auto it = found.begin(); it != found.end();) it = std::isfinite(it->first) ? std::next(it) : found.erase(it);
+        for (int k = 0; k < occ.size() && found.isEmpty(); ++k) {
+            if (occ[k].ev != i) continue;
+            const qsizetype from = occ[k].pos + occ[k].len;
+            qsizetype to = t.size();
+            for (int j = k + 1; j < occ.size(); ++j) if (occ[j].ev != i && occ[j].pos >= from) { to = occ[j].pos; break; }
+            const auto bm = blank.match(t, from);
+            if (bm.hasMatch() && bm.capturedStart() < to) to = bm.capturedStart();
+            found = measuresIn(t.mid(from, to - from), comps);
+        }
+        // Nom écrit autrement dans le texte (« PI 2 », « pi-02 ») : passage jusqu'à la fin de la ligne.
+        if (found.isEmpty() && !name.isEmpty()) {
+            const QRegularExpression lre = looseName(name);
+            for (auto it = lre.globalMatch(t); it.hasNext() && found.isEmpty();) {
+                const auto m = it.next();
+                if (eventNames.contains(m.captured(0)) && m.captured(0) != name) continue;   // c'est un autre Event
+                const qsizetype eol = t.indexOf(QLatin1Char('\n'), m.capturedEnd());
+                found = measuresIn(t.mid(m.capturedEnd(), (eol < 0 ? t.size() : eol) - m.capturedEnd()), comps);
+            }
+        }
+        const QJsonObject before = curveMeasures(e);
+        if (!found.isEmpty()) {
+            for (const char* a : aliases) e.remove(QLatin1String(a));
+            for (const Key& k : keys) {
+                if (!found.contains(k.comp)) continue;
+                const auto [v, err] = found.value(k.comp);
+                if (before.contains(k.value) && std::abs(before.value(k.value).toDouble() - v) > 1e-9)
+                    changed << QStringLiteral("« %1 » %2 : %3 → %4").arg(name, QString::fromLatin1(k.value),
+                                                                           QString::number(before.value(k.value).toDouble()), QString::number(v));
+                e[k.value] = v;
+                if (k.error && std::isfinite(err)) e[k.error] = err;
+            }
+            // Valeurs écrites par le modèle pour des composantes absentes du texte : gardées (signalées par crossCheck).
+            for (auto it = before.begin(); it != before.end(); ++it) if (!e.contains(it.key())) e[it.key()] = it.value();
+            ++filled;
+        } else {
+            // Rien dans le texte : les valeurs du modèle (s'il y en a) restent, sous les clés de ChronoModel.
+            for (const char* a : aliases) e.remove(QLatin1String(a));
+            for (auto it = before.begin(); it != before.end(); ++it) e[it.key()] = it.value();
+        }
+        // Composantes demandées par le type de courbe et encore absentes.
+        QStringList miss;
+        const QJsonObject now = curveMeasures(e);
+        for (const Key& k : keys) {
+            if (k.comp == 'a' || k.comp == 'e') continue;
+            if (comps.contains(k.comp) && !now.contains(k.value))
+                miss << (mag ? (k.comp == 'I' ? QStringLiteral("inclinaison") : k.comp == 'D' ? QStringLiteral("déclinaison") : QStringLiteral("intensité"))
+                             : QString(k.comp));
+        }
+        if (mag && (comps.contains('I') || comps.contains('D')) && now.value("sX_Alpha95_sDepth").toDouble(0) <= 0) miss << QStringLiteral("α95");
+        if (comps.contains(mag ? 'F' : 'Z') && now.value("sZ_sF").toDouble(0) <= 0 && (mag || comps.contains('Z')))
+            miss << (mag ? QStringLiteral("erreur sur F") : QStringLiteral("erreur sur Z"));
+        if (!miss.isEmpty() && e.value("type").toString() != QLatin1String("bound")) {
+            incomplete << QStringLiteral("« %1 » : %2").arg(name, miss.join(QStringLiteral(", ")));
+            if (missingEvents) *missingEvents << name;
+        }
+        // Archéomagnétisme : une date « am » n'est pas une datation de l'Event, c'est sa mesure.
+        if (mag) {
+            QJsonArray dates, kept;
+            dates = e.value("dates").toArray();
+            for (const QJsonValue& d : std::as_const(dates)) {
+                const QJsonObject o = d.toObject();
+                const QString ty = text::fold(o.value("type").toString(o.value("method").toString(o.value("plugin_id").toString()))).trimmed();
+                if (ty == QLatin1String("am") || ty == QLatin1String("archeomagnetisme") || ty == QLatin1String("archeomag")) { ++removedAm; continue; }
+                kept.append(d);
+            }
+            if (kept.size() != dates.size()) e["dates"] = kept;
+        }
+        events[i] = e;
+    }
+    spec["events"] = events;
+    if (notes) {
+        if (filled) *notes << QStringLiteral("Mesures de la courbe recopiées du texte par SeldonH sur %1 Event(s).").arg(filled);
+        if (!changed.isEmpty()) *notes << QStringLiteral("Mesures du modèle d'IA remplacées par celles du texte : %1.").arg(changed.join(QStringLiteral(" ; ")));
+        if (removedAm) *notes << QStringLiteral("%1 date(s) « am » retirée(s) : en mode courbe, la mesure archéomagnétique est portée par l'Event, ce n'est pas une datation.").arg(removedAm);
+        if (!incomplete.isEmpty()) *notes << QStringLiteral("Mesures absentes du texte : %1.").arg(incomplete.join(QStringLiteral(" ; ")));
+    }
+    return spec;
+}
+
+
+QJsonObject ChrBuilder::mergeCurveMeasures(QJsonObject spec, const QJsonObject& byEvent, const QString& curveType,
+                                           const std::function<bool(double)>& allowed, QStringList* notes)
+{
+    const QString comps = curveComponents(curveType);
+    if (comps.isEmpty() || byEvent.isEmpty()) return spec;
+    const bool mag = magneticComponents(comps);
+    static const QHash<QString, QString> magKeys{
+        { "inc", "X_Inc_Depth" }, { "i", "X_Inc_Depth" }, { "inclinaison", "X_Inc_Depth" }, { "inclination", "X_Inc_Depth" },
+        { "dec", "Y_Dec" }, { "d", "Y_Dec" }, { "declinaison", "Y_Dec" }, { "declination", "Y_Dec" },
+        { "alpha95", "sX_Alpha95_sDepth" }, { "a95", "sX_Alpha95_sDepth" },
+        { "field", "Z_Field" }, { "f", "Z_Field" }, { "intensite", "Z_Field" }, { "intensity", "Z_Field" },
+        { "error_f", "sZ_sF" }, { "erreur_f", "sZ_sF" }, { "sf", "sZ_sF" }, { "sigma_f", "sZ_sF" } };
+    static const QHash<QString, QString> xyzKeys{
+        { "x", "X_Inc_Depth" }, { "error_x", "sX_Alpha95_sDepth" }, { "sx", "sX_Alpha95_sDepth" },
+        { "y", "Y_Dec" }, { "error_y", "sY" }, { "sy", "sY" }, { "z", "Z_Field" }, { "error_z", "sZ_sF" }, { "sz", "sZ_sF" } };
+    static const QStringList chrKeys{ "X_Inc_Depth", "Y_Dec", "Z_Field", "sX_Alpha95_sDepth", "sY", "sZ_sF" };
+    QJsonArray events = spec.value("events").toArray();
+    int added = 0;
+    QStringList refused;
+    for (auto it = byEvent.begin(); it != byEvent.end(); ++it) {
+        if (!it.value().isObject()) continue;
+        int ev = -1;
+        for (int i = 0; i < events.size() && ev < 0; ++i) {
+            const QString n = events[i].toObject().value("name").toString().trimmed();
+            if (n == it.key().trimmed()) ev = i;
+        }
+        for (int i = 0; i < events.size() && ev < 0; ++i) {
+            const QString n = events[i].toObject().value("name").toString().trimmed();
+            const auto m = looseName(n).match(it.key().trimmed());
+            if (m.hasMatch() && m.capturedLength() == it.key().trimmed().size()) ev = i;
+        }
+        if (ev < 0) continue;
+        QJsonObject e = events[ev].toObject();
+        const QJsonObject have = curveMeasures(e);
+        const QJsonObject m = it.value().toObject();
+        for (auto k = m.begin(); k != m.end(); ++k) {
+            QString key = chrKeys.contains(k.key()) ? k.key() : (mag ? magKeys : xyzKeys).value(text::fold(k.key()).trimmed());
+            if (key.isEmpty() || have.contains(key) || e.contains(key)) continue;
+            const double v = k.value().isString() ? text::toNumber(k.value().toString()) : k.value().toDouble(std::nan(""));
+            if (!std::isfinite(v)) continue;
+            if (allowed && !allowed(v)) { refused << QStringLiteral("« %1 » %2 = %3").arg(it.key(), k.key(), QString::number(v)); continue; }
+            e[key] = v;
+            ++added;
+        }
+        events[ev] = e;
+    }
+    spec["events"] = events;
+    if (notes) {
+        if (added) *notes << QStringLiteral("%1 mesure(s) de la courbe lue(s) par le modèle d'IA (format du texte non reconnu par SeldonH) : à vérifier.").arg(added);
+        if (!refused.isEmpty()) *notes << QStringLiteral("Mesures du modèle d'IA refusées, absentes de votre texte : %1.").arg(refused.join(QStringLiteral(" ; ")));
+    }
+    return spec;
+}
+
 } // namespace seldon

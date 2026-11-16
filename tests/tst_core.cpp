@@ -54,6 +54,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QLabel>
 #include <QLineEdit>
 #include <QRadioButton>
+#include <QScrollBar>
 #include "../src/ui/ChatView.h"
 #include "../src/core/DocxWriter.h"
 #include <private/qzipreader_p.h>
@@ -2376,6 +2377,72 @@ private slots:
         QVERIFY(!c.isCalculation("US10 au-dessus de US6"));
         QVERIFY(!c.isCalculation("date uniforme entre -500 et -400"));
         QVERIFY(!c.isCalculation("Dessine le modèle"));
+        // Prompt réel du 16/11/2026 : « 15* racine(12,5) », puis « +20 /2 », puis « /3 ». Virgule décimale dans une fonction
+        // à un argument ; instruction qui commence par un opérateur = suite du résultat précédent.
+        {
+            seldon::Calculator k;
+            QVERIFY(k.isCalculation(QString::fromUtf8("15* racine(12,5)")));
+            const double r1 = k.evaluate(QString::fromUtf8("15* racine(12,5)")).value(0).value;
+            QVERIFY(std::abs(r1 - 15 * std::sqrt(12.5)) < 1e-9);
+            QVERIFY(k.isCalculation("+20 /2"));
+            const auto l2 = k.evaluate("+20 /2").value(0);
+            QVERIFY(std::abs(l2.value - (r1 + 10)) < 1e-9);
+            QCOMPARE(l2.expr, QStringLiteral("ans +20 /2"));
+            QVERIFY(l2.details.startsWith("ans = "));
+            QVERIFY(k.isCalculation("/3"));
+            QVERIFY(std::abs(k.evaluate("/3").value(0).value - (r1 + 10) / 3) < 1e-9);
+            QVERIFY(std::abs(k.evaluate("- 1").value(0).value - ((r1 + 10) / 3 - 1)) < 1e-9);
+            QCOMPARE(k.evaluate("-5").value(0).value, -5.0);              // collé : un nombre négatif
+            QCOMPARE(k.evaluate("max(1,5)").value(0).value, 5.0);         // plusieurs arguments : la virgule sépare
+            seldon::Calculator fresh;
+            QVERIFY(!fresh.isCalculation("/3"));                          // sans résultat précédent : pas un calcul
+            // Formule du modèle de langage (outil calculatrice) : même « ans » que la conversation.
+            seldon::Calculator shared;
+            seldon::MethodRunner::setSharedCalculator(&shared);
+            seldon::MethodRunner::run({ QJsonObject{ { "method", "expr" }, { "expr", "15*sqrt(12.5)" } } });
+            seldon::MethodRunner::setSharedCalculator(nullptr);
+            QVERIFY(shared.isCalculation("/3"));
+            QVERIFY(std::abs(shared.evaluate("/3").value(0).value - r1 / 3) < 1e-9);
+        }
+        // Calcul écrit en mots (prompt réel du 16/11/2026 : « calcuk racine carré de 36 », parti au modèle de langage).
+        {
+            using C = seldon::Calculator;
+            auto fw = [](const char* t) { return C::fromWords(QString::fromUtf8(t)); };
+            QCOMPARE(fw("calcuk racine carré de 36"), QStringLiteral("sqrt(36)"));
+            QCOMPARE(fw("Quelle est la racine carrée de 2,25 ?"), QStringLiteral("sqrt(2.25)"));
+            QCOMPARE(fw("racine de racine de 16"), QStringLiteral("sqrt(sqrt(16))"));
+            QCOMPARE(fw("3 au carré"), QStringLiteral("(3)^2"));
+            QCOMPARE(fw("2 puissance 10"), QStringLiteral("(2)^(10)"));
+            QCOMPARE(fw("logarithme de 100"), QStringLiteral("log10(100)"));
+            QCOMPARE(fw("logarithme népérien de 2"), QStringLiteral("ln(2)"));
+            QCOMPARE(fw("calcule 2 plus 3 fois 4"), QStringLiteral("2+3*4"));
+            QCOMPARE(fw("10 divisé par 4 s'il te plaît"), QStringLiteral("10/4"));
+            QCOMPARE(fw("racine cubique de 27"), QStringLiteral("(27)^(1/3)"));
+            QCOMPARE(fw("square root of 49"), QStringLiteral("sqrt(49)"));
+            QVERIFY(fw("C14 de 3560 +- 20 BP").isEmpty());
+            QVERIFY(fw("3560 plus ou moins 20 BP").isEmpty());
+            QVERIFY(fw("Repérer la variable racine de la chaîne").isEmpty());
+            QVERIFY(c.isCalculation(fw("calcuk racine carré de 36")));
+            QCOMPARE(C().evaluate(fw("calcuk racine carré de 36")).value(0).value, 6.0);
+            QVERIFY(std::abs(C().evaluate(fw("racine cubique de 27")).value(0).value - 3.0) < 1e-12);
+            QCOMPARE(C().evaluate(fw("calcule 2 plus 3 fois 4")).value(0).value, 14.0);
+            // Phrase qui garde des mots après traduction : pas un calcul, la question suit le chemin habituel.
+            QVERIFY(!c.isCalculation(fw("date la racine de 36 en BP")));
+        }
+        // Calculatrice demandée par le modèle de langage (bloc « calcul » ou outil « calculatrice ») : exécutée par SeldonH.
+        {
+            const seldon::RunOutcome o = seldon::MethodRunner::run({ QJsonObject{ { "method", "expr" }, { "expr", "sqrt(36)" } } });
+            QVERIFY(o.found);
+            QVERIFY(o.promptBlock.contains(QStringLiteral("sqrt(36) = 6")));
+            QVERIFY(o.noticeHtml.contains(QStringLiteral("<b>6</b>")));
+            const seldon::RunOutcome a = seldon::MethodRunner::run({ QJsonObject{ { "method", "calculatrice" }, { "formule", "2^10" } } });
+            QVERIFY(a.promptBlock.contains(QStringLiteral("2^10 = 1024")));
+            const QVector<QJsonObject> blocks = seldon::MethodRunner::extractCalcBlocks(QStringLiteral("```json\n{\"method\":\"expr\",\"expr\":\"ln(2)\"}\n```"));
+            QCOMPARE(blocks.size(), 1);
+            QString why;
+            const QJsonObject t = seldon::tools::requestFor(QStringLiteral("calculatrice"), QJsonObject{ { "expr", "sqrt(36)" } }, &why);
+            QCOMPARE(t.value("method").toString(), QStringLiteral("expr"));
+        }
         // radiocarbone : âge <-> F14C, erreur comme ChronoModel (aller-retour exact)
         {
             const auto l = c.evaluate("C14toF14C(2500; 30)");
@@ -4601,9 +4668,9 @@ private slots:
     void toolsSchema()
     {
         const auto& all = seldon::tools::all();
-        QCOMPARE(all.size(), 16);
+        QCOMPARE(all.size(), 17);
         const QJsonArray api = seldon::tools::schemaForApi();
-        QCOMPARE(api.size(), 16);
+        QCOMPARE(api.size(), 17);
         static const QRegularExpression okName("^[a-z0-9_]{1,64}$");
         QStringList seen;
         for (const QJsonValue& v : api) {
@@ -4620,7 +4687,7 @@ private slots:
             // « event » (MCMC) et « combine » (produit) combinent les autres méthodes ; « density_file » écrit un fichier pour
             // le plugin Density ; « traces » lit les chaînes jointes ; « inverse » lit une courbe de référence ; « order » compare deux datations ;
             // « table » agit sur le tableau de datations joint ; « curve » évalue la courbe de ChronoModel jointe
-            if (!d.methodId.isEmpty() && !QStringList{ "event", "combine", "relation", "density_file", "inverse", "table", "curve" }.contains(d.methodId))
+            if (!d.methodId.isEmpty() && !QStringList{ "event", "combine", "relation", "density_file", "inverse", "table", "curve", "expr" }.contains(d.methodId))
                 QVERIFY2(seldon::MethodRegistry::instance().byId(d.methodId) != nullptr, qPrintable(d.name));
     }
 
@@ -4749,7 +4816,7 @@ private slots:
         const RemoteConfig cfg{ "http://x/v1", "", "m" };
         const QJsonObject b1 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
                                                                            tools::schemaForApi(), QJsonArray{ am, tm })).object();
-        QCOMPARE(b1.value("tools").toArray().size(), 16);
+        QCOMPARE(b1.value("tools").toArray().size(), 17);
         QCOMPARE(b1.value("tool_choice").toString(), QString("auto"));
         QCOMPARE(b1.value("messages").toArray().size(), 3);
         const QJsonObject b2 = QJsonDocument::fromJson(remote::buildChatBody(cfg, { { "user", "q" } }, {}, false, false,
@@ -4792,7 +4859,7 @@ private slots:
 
         // 1re requête : outils déclarés
         const QJsonObject first = QJsonDocument::fromJson(srv.bodies_[0]).object();
-        QCOMPARE(first.value("tools").toArray().size(), 16);
+        QCOMPARE(first.value("tools").toArray().size(), 17);
 
         eng.submitToolResults({ { cs[0].id, cs[0].name, out.content } });
         QTRY_COMPARE_WITH_TIMEOUT(fin.count(), 1, 5000);
@@ -4976,6 +5043,105 @@ private slots:
         QVERIFY(bad.found);
         QVERIFY(bad.noticeHtml.contains("Calcul impossible"));
         QVERIFY(bad.plot.isEmpty());
+    }
+
+    // Budget des compétences (16/11/2026) : une fiche trop longue n'est jamais choisie par mots-clés avec un petit contexte
+    // local (4 096 tokens → 3 000 caractères), et une fiche qui ne tient plus est écartée sans bruit. Garde-fous.
+    void skillBudgets()
+    {
+        SkillManager m;
+        m.reload(QString());
+        constexpr int kMinBudget = 3000;            // AutoTune : plancher du budget (contexte de 4 096 tokens)
+        // Fiches plus longues que le budget minimal : seulement si le code ou l'arbre les impose (pinned), jamais par
+        // mots-clés seuls. 02 et 04 : à scinder (choisies par mots-clés, donc absentes avec un contexte de 4 096 tokens).
+        const QStringList pinnedByCode{ "03_chronomodel_creer_modele", "10_aide_utilisation", "13_chronomodel_courbe_age_profondeur",
+                                        "19_chronomodel_phases_events", "20_combinaison_traces_inverse", "21_ordre_des_dates",
+                                        "22_tableaux", "23_courbes_chronomodel", "24_contrainte_stratigraphique" };
+        const QStringList toSplit{ "02_chronomodel_concepts", "04_chronomodel_interpreter" };
+        QHash<QString, int> size;
+        int always = 0;
+        for (const Skill& s : m.skills()) {
+            size[s.id] = int(s.body.size());
+            if (s.always) { always += int(s.body.size()); continue; }
+            if (pinnedByCode.contains(s.id) || toSplit.contains(s.id)) continue;
+            QVERIFY2(s.body.size() <= kMinBudget, qPrintable(QStringLiteral("%1 : %2 caractères > %3 (petit contexte local : "
+                                                                              "jamais choisie)").arg(s.id).arg(s.body.size()).arg(kMinBudget)));
+        }
+        // Chaque feuille de l'arbre : fiches toujours présentes + fiches du chemin ≤ 75 % d'un contexte de 8 192 tokens
+        // (3,5 caractères par token) : il reste de la place pour la question et la réponse.
+        using namespace seldon::decision;
+        const Tree& t = Tree::builtin();
+        int worst = 0;
+        QString worstPath;
+        std::function<void(const QString&, QVector<QPair<QString, QString>>)> walk = [&](const QString& id, QVector<QPair<QString, QString>> path) {
+            const Node* n = t.node(id);
+            QVERIFY(n);
+            for (const Choice& c : n->choices) {
+                auto p = path;
+                p.append({ n->id, c.id });
+                if (!c.isLeaf()) { walk(c.next, p); continue; }
+                int total = always;
+                for (const QString& f : accumulate(t, p).skills) total += size.value(f);
+                if (total > worst) {
+                    worst = total;
+                    QStringList ids;
+                    for (const auto& x : p) ids << x.first + "=" + x.second;
+                    worstPath = ids.join(" ");
+                }
+            }
+        };
+        walk(t.root(), {});
+        QVERIFY2(worst <= int(0.75 * 8192 * 3.5), qPrintable(QStringLiteral("%1 caractères pour %2").arg(worst).arg(worstPath)));
+        // Au budget minimal, la fiche utile est bien choisie.
+        auto picks = [&](const QString& q, const QString& id, int budget) {
+            for (const SkillMatch& x : m.select(q, budget)) if (x.skill->id == id) return true;
+            return false;
+        };
+        // Au budget minimal, une question de calibration reçoit la fiche du radiocarbone (mieux classée) et pas la 09 : avec
+        // le budget par défaut, les deux.
+        QVERIFY(picks(QString::fromUtf8("Peux-tu calibrer une date C14 et donner les HPD ?"), "09_outils_calcul", AppSettings().skillChars));
+        QVERIFY(picks(QString::fromUtf8("quelle est la racine carrée de 2,37 et pourquoi ?"), "25_calculatrice", kMinBudget));
+        QVERIFY(picks(QString::fromUtf8("crée un fichier de densité avec une loi log-normale"), "26_creer_densite", kMinBudget));
+        // Fiche pertinente écartée faute de place : signalée.
+        QStringList dropped;
+        m.select(QString::fromUtf8("Peux-tu calibrer une date C14 et donner les HPD ?"), 500, {}, {}, &dropped);
+        QVERIFY(!dropped.isEmpty() && dropped.join(" ").contains("09_outils_calcul"));
+    }
+
+    // Dialogue stable pendant le streaming (16/11/2026) : la vue reste collée à la fin, sauf si l'utilisateur remonte.
+    void chatStreamingScroll()
+    {
+        ChatView v;
+        v.resize(500, 300);
+        v.show();
+        for (int i = 0; i < 6; ++i) { v.addUser(QStringLiteral("question %1").arg(i)); v.addNotice(QStringLiteral("<p>fiche</p>")); }
+        const int a = v.addAssistant();
+        QScrollBar* bar = v.verticalScrollBar();
+        QString md;
+        for (int k = 0; k < 40; ++k) {
+            md += QStringLiteral("Ligne %1 de la réponse, assez longue pour passer à la ligne dans une vue étroite. ").arg(k);
+            if (k == 10) md += QStringLiteral("\n\n```\ncode ouvert\n");          // bloc de code pas encore fermé
+            v.setAssistant(a, md, QStringLiteral("raisonnement"), false, false);
+            QTest::qWait(100);                                                    // rendu différé (80 ms) et mise en page
+            QVERIFY2(bar->value() == bar->maximum(), qPrintable(QStringLiteral("étape %1 : %2 / %3").arg(k).arg(bar->value()).arg(bar->maximum())));
+        }
+        // L'utilisateur remonte : la vue ne bouge plus pendant la suite du streaming.
+        for (int k = 0; k < 3; ++k) bar->triggerAction(QAbstractSlider::SliderPageStepSub);   // comme la molette ou la barre
+        QTest::qWait(20);
+        const int kept = bar->value();
+        QVERIFY(kept < bar->maximum() - 8);
+        for (int k = 0; k < 5; ++k) {
+            md += QStringLiteral("Suite %1. ").arg(k);
+            v.setAssistant(a, md, QString(), false, false);
+            QTest::qWait(100);
+            QCOMPARE(bar->value(), kept);
+        }
+        v.setAssistant(a, md + "\n```", QString(), false, true);
+        QCOMPARE(bar->value(), kept);
+        // Nouvelle question : retour à la fin.
+        v.addUser(QStringLiteral("encore"));
+        QTest::qWait(50);
+        QCOMPARE(bar->value(), bar->maximum());
     }
 
     void calcExampleInSkill()
@@ -7443,6 +7609,127 @@ private slots:
     }
 
     // Arbre de décision (12/11/2026) : structure, fiches et outils existants, chaque outil branché à au moins une question
+    // Modèle en mode courbe en deux étapes (16/11/2026) : le modèle de langage écrit les Events et leurs dates, SeldonH
+    // recopie les mesures. Prompt réel « Açores » (13/11/2026) : réponse de gpt-oss avec une fausse date « am » par Event.
+    void curveMeasuresTwoSteps()
+    {
+        QFile f(QFINDTESTDATA("data/prompt_acores_courbe_idf.json"));
+        QVERIFY(f.open(QIODevice::ReadOnly));
+        const QJsonObject p = QJsonDocument::fromJson(f.readAll()).object();
+        const QString question = p.value("question").toString(), answer = p.value("answer").toString();
+        QJsonObject spec;
+        QVERIFY(ChrBuilder::extractSpec(answer, spec));
+        QCOMPARE(spec.value("events").toArray().size(), 21);
+        QVERIFY(ChrBuilder::hasCurveMeasures(question, "vector"));
+        QStringList notes;
+        const QJsonObject s = ChrBuilder::fillCurveMeasures(spec, question, "vector", &notes);
+        QCOMPARE(s.value("curve").toString(), QStringLiteral("vector"));
+        // Aucune date « am » ; chaque Event garde sa vraie datation (c14 ou unif).
+        int am = 0;
+        for (const QJsonValue& v : s.value("events").toArray())
+            for (const QJsonValue& d : v.toObject().value("dates").toArray()) am += d.toObject().value("type").toString() == QLatin1String("am");
+        QCOMPARE(am, 0);
+        for (const QJsonValue& v : s.value("events").toArray()) QCOMPARE(v.toObject().value("dates").toArray().size(), 1);
+        QVERIFY(notes.join(" ").contains(QStringLiteral("21 date(s) « am » retirée(s)")));
+        // Les 105 valeurs (I, D, α95, F, σF de 21 coulées) recopiées à l'identique du texte.
+        auto ev = [&](const QString& n) {
+            for (const QJsonValue& v : s.value("events").toArray()) if (v.toObject().value("name").toString() == n) return v.toObject();
+            return QJsonObject();
+        };
+        const QJsonObject pi02 = ev("PI02"), pi04 = ev("PI04"), te04 = ev("TE04"), sm11 = ev("SM11");
+        QCOMPARE(pi02.value("X_Inc_Depth").toDouble(), 39.0);
+        QCOMPARE(pi02.value("Y_Dec").toDouble(), -1.7);
+        QCOMPARE(pi02.value("sX_Alpha95_sDepth").toDouble(), 6.1);
+        QCOMPARE(pi02.value("Z_Field").toDouble(), 43.9);
+        QCOMPARE(pi02.value("sZ_sF").toDouble(), 6.1);
+        QCOMPARE(pi04.value("Y_Dec").toDouble(), -17.2);
+        QCOMPARE(te04.value("Z_Field").toDouble(), 54.1);
+        QCOMPARE(te04.value("sZ_sF").toDouble(), 0.6);
+        QCOMPARE(sm11.value("X_Inc_Depth").toDouble(), 56.0);
+        int values = 0;
+        for (const QJsonValue& v : s.value("events").toArray())
+            for (const char* k : { "X_Inc_Depth", "Y_Dec", "sX_Alpha95_sDepth", "Z_Field", "sZ_sF" }) values += v.toObject().contains(k);
+        QCOMPARE(values, 105);
+        QVERIFY(!notes.join(" ").contains(QStringLiteral("absentes")));
+        // Le fichier .chr se construit sans erreur.
+        const ChrResult r = ChrBuilder::build(s);
+        QVERIFY2(r.errors.isEmpty(), qPrintable(r.errors.join("\n")));
+        // Étape 1 sans mesures (ce que le modèle écrit désormais) : même résultat.
+        QJsonObject bare = spec;
+        QJsonArray evs;
+        for (const QJsonValue& v : spec.value("events").toArray()) {
+            QJsonObject o = v.toObject();
+            QJsonArray ds;
+            for (const QJsonValue& d : o.value("dates").toArray()) if (d.toObject().value("type").toString() != QLatin1String("am")) ds.append(d);
+            o["dates"] = ds;
+            evs.append(o);
+        }
+        bare["events"] = evs;
+        bare.remove("curve");
+        const QJsonObject s2 = ChrBuilder::fillCurveMeasures(bare, question, "vector");
+        QCOMPARE(s2.value("events").toArray(), s.value("events").toArray());
+        // Autres types : X, XY, XYZ et ID, IF restent possibles.
+        QCOMPARE(ChrBuilder::curveComponents("univariate"), QStringLiteral("X"));
+        QCOMPARE(ChrBuilder::curveComponents("bivariate"), QStringLiteral("XY"));
+        QCOMPARE(ChrBuilder::curveComponents("trivariate"), QStringLiteral("XYZ"));
+        QCOMPARE(ChrBuilder::curveComponents("spherical"), QStringLiteral("ID"));
+        QCOMPARE(ChrBuilder::curveComponents("unknown_dec"), QStringLiteral("IF"));
+        const QString xy = QString::fromUtf8("- F1 : 14C 2450 ± 30 BP ; X = 12,5 ± 0,4 ; Y = -3,1 ± 0,2\n- F2 : 14C 2300 ± 30 BP ; X = 13,0 ± 0,5 ; Y = -2,8 ± 0,3\n");
+        QJsonObject sxy{ { "name", "XY" }, { "events", QJsonArray{
+            QJsonObject{ { "name", "F1" }, { "dates", QJsonArray{ QJsonObject{ { "type", "c14" }, { "age", 2450 }, { "error", 30 } } } } },
+            QJsonObject{ { "name", "F2" }, { "dates", QJsonArray{ QJsonObject{ { "type", "c14" }, { "age", 2300 }, { "error", 30 } } } } } } } };
+        QStringList n2;
+        const QJsonObject rxy = ChrBuilder::fillCurveMeasures(sxy, xy, "bivariate", &n2);
+        const QJsonObject f1 = rxy.value("events").toArray().at(0).toObject(), f2 = rxy.value("events").toArray().at(1).toObject();
+        QCOMPARE(f1.value("X_Inc_Depth").toDouble(), 12.5);
+        QCOMPARE(f1.value("sX_Alpha95_sDepth").toDouble(), 0.4);
+        QCOMPARE(f1.value("Y_Dec").toDouble(), -3.1);
+        QCOMPARE(f2.value("sY").toDouble(), 0.3);
+        QCOMPARE(rxy.value("curve").toString(), QStringLiteral("bivariate"));
+        QVERIFY2(ChrBuilder::build(rxy).errors.isEmpty(), qPrintable(ChrBuilder::build(rxy).errors.join("\n")));
+        // Event dont la mesure manque : signalé.
+        QStringList n3;
+        ChrBuilder::fillCurveMeasures(sxy, QString::fromUtf8("- F1 : X = 12,5 ± 0,4 ; Y = -3,1 ± 0,2\n- F2 : X = 13 ± 0,5\n"), "bivariate", &n3);
+        QVERIFY(n3.join(" ").contains(QStringLiteral("« F2 » : Y")));
+        // Âge-profondeur : rien à faire ici.
+        QCOMPARE(ChrBuilder::fillCurveMeasures(sxy, xy, "age_depth"), sxy);
+
+        // Tableau de mesures (en-tête, séparateurs « ; » ou Markdown), noms écrits autrement (« PI 2 » pour « PI02 »).
+        auto twoEvents = [](const char* a, const char* b) {
+            return QJsonObject{ { "name", "T" }, { "events", QJsonArray{
+                QJsonObject{ { "name", a }, { "dates", QJsonArray{ QJsonObject{ { "type", "c14" }, { "age", 625 }, { "error", 65 } } } } },
+                QJsonObject{ { "name", b }, { "dates", QJsonArray{ QJsonObject{ { "type", "c14" }, { "age", 1310 }, { "error", 70 } } } } } } } };
+        };
+        const QString csv = QString::fromUtf8("Mesures :\nSite ; I (°) ; D (°) ; alpha95 ; F (µT) ; sF\nPI05 ; 32,7 ; 10,0 ; 4,2 ; 56,3 ; 4,9\nPI11 ; 57,0 ; 18,1 ; 4,1 ; 69,6 ; 3,2\n");
+        QVERIFY(ChrBuilder::hasCurveMeasures(csv, "vector"));
+        QStringList missing;
+        const QJsonObject tcsv = ChrBuilder::fillCurveMeasures(twoEvents("PI05", "PI11"), csv, "vector", nullptr, &missing);
+        QVERIFY(missing.isEmpty());
+        QCOMPARE(tcsv.value("events").toArray().at(1).toObject().value("Z_Field").toDouble(), 69.6);
+        QCOMPARE(tcsv.value("events").toArray().at(0).toObject().value("sX_Alpha95_sDepth").toDouble(), 4.2);
+        const QString md = QString::fromUtf8("| Nom | X | sX |\n|---|---|---|\n| F1 | 12,5 | 0,4 |\n| F2 | 13,0 | 0,5 |\n");
+        const QJsonObject tmd = ChrBuilder::fillCurveMeasures(twoEvents("F1", "F2"), md, "univariate");
+        QCOMPARE(tmd.value("events").toArray().at(1).toObject().value("X_Inc_Depth").toDouble(), 13.0);
+        QCOMPARE(tmd.value("events").toArray().at(1).toObject().value("sX_Alpha95_sDepth").toDouble(), 0.5);
+        const QString loose = QString::fromUtf8("- PI 2 : I = 39,0°, D = -1,7°, alpha95 = 6,1° ; F = 43,9 ± 6,1 µT\n- pi-04 : I = 62,4°, D = -17,2°, alpha95 = 2,8° ; F = 39,1 ± 2,2 µT\n");
+        missing.clear();
+        const QJsonObject tl = ChrBuilder::fillCurveMeasures(twoEvents("PI02", "PI04"), loose, "vector", nullptr, &missing);
+        QVERIFY2(missing.isEmpty(), qPrintable(missing.join(",")));
+        QCOMPARE(tl.value("events").toArray().at(1).toObject().value("Y_Dec").toDouble(), -17.2);
+
+        // Recours : mesures renvoyées par le modèle de langage, gardées seulement si elles viennent du texte.
+        const QString text = QString::fromUtf8("PI05 (Pico) : inclinaison trente-deux virgule sept… voir tableau : 32,7 / 10,0 / 4,2 / 56,3 / 4,9");
+        const seldon::provenance::NumberPool pool(text, false);
+        QStringList mn;
+        const QJsonObject got = QJsonDocument::fromJson(R"({"PI05":{"inc":32.7,"dec":10.0,"alpha95":4.2,"field":56.3,"error_f":4.9},
+                                                           "PI11":{"inc":57.0,"dec":18.1,"alpha95":4.1,"field":69.6,"error_f":3.2}})").object();
+        const QJsonObject mg = ChrBuilder::mergeCurveMeasures(twoEvents("PI05", "PI11"), got, "vector", [&](double v) { return pool.contains(v); }, &mn);
+        QCOMPARE(mg.value("events").toArray().at(0).toObject().value("X_Inc_Depth").toDouble(), 32.7);
+        QCOMPARE(mg.value("events").toArray().at(0).toObject().value("sZ_sF").toDouble(), 4.9);
+        QVERIFY(!mg.value("events").toArray().at(1).toObject().contains("X_Inc_Depth"));     // 57,0 n'est pas dans le texte
+        QVERIFY(mn.join(" ").contains(QStringLiteral("refusées")));
+    }
+
     void decisionTree()
     {
         using namespace seldon::decision;
@@ -7501,6 +7788,26 @@ private slots:
         QCOMPARE(parseAnswer(*root, "modele ou relation"), QString());               // ambigu
         QCOMPARE(parseAnswer(*root, "je ne sais pas"), QString());
         QCOMPARE(parseAnswer(*t.node("modele_courbe"), "Oui"), QStringLiteral("oui"));
+        // Raisonnement d'un modèle distant qui recopie les choix : ignoré ; coupé avant la réponse : illisible.
+        QCOMPARE(parseAnswer(*t.node("modele_courbe"), "<think>\nThe user asks... - non : non : des Events - oui : une courbe\n</think>\noui"), QStringLiteral("oui"));
+        QCOMPARE(parseAnswer(*t.node("modele_courbe"), "<think>\nThe user asks: ... ? - non : non : des Events (et év"), QString());
+        QVERIFY(requestsCurveModel(QString::fromUtf8("Fais-moi le modèle ChronoModel en mode courbe vectorielle (I, D, F).")));
+        QVERIFY(requestsCurveModel(QString::fromUtf8("construire une courbe de variation séculaire")));
+        QVERIFY(!requestsCurveModel(QString::fromUtf8("une courbe de calibration IntCal20, US 1 sous US 2")));
+        // Détecteurs qui évitent des questions au modèle de langage (vitesse en local).
+        const QString azores = QString::fromUtf8(
+            "Fais-moi le modèle ChronoModel en mode courbe vectorielle (I, D, F). Il n'y a ni phase ni ordre stratigraphique entre "
+            "les coulées. PI02 : éruption historique de 1563 ; I = 39,0°, D = -1,7°, alpha95 = 6,1° ; F = 43,9 ± 6,1 µT.");
+        QCOMPARE(curveTypeFromText(azores), QStringLiteral("inc_dec_int"));
+        QCOMPARE(curveTypeFromText(QString::fromUtf8("courbe archéomagnétique en inclinaison seule, I = 62")), QStringLiteral("inclinaison"));
+        QCOMPARE(curveTypeFromText(QString::fromUtf8("inclinaison et déclinaison de 12 fours")), QStringLiteral("inc_dec"));
+        QCOMPARE(curveTypeFromText(QString::fromUtf8("une courbe univariée de la température")), QStringLiteral("univariee"));
+        QVERIFY(curveTypeFromText(QString::fromUtf8("l'intensité de l'occupation du site")).isEmpty());
+        QVERIFY(deniesStratigraphy(azores));
+        QVERIFY(deniesStratigraphy(QString::fromUtf8("sans stratigraphie entre les fours")));
+        QVERIFY(!deniesStratigraphy(QString::fromUtf8("l'US 1 est sous l'US 2 (ordre stratigraphique)")));
+        QVERIFY(!mentionsCurve(QString::fromUtf8("fais un modèle avec trois phases et deux dates 14C")));
+        QVERIFY(mentionsCurve(QString::fromUtf8("la température en fonction du temps")));
 
         // arbres défectueux : tout est signalé
         Tree bad;
@@ -8119,6 +8426,20 @@ private slots:
         const NumberPool pool(user);
         QVERIFY(checkRequest(obj(R"({"method":"c14","age":3578,"error":30})"), pool).ok());
         QVERIFY(checkRequest(obj(R"({"method":"c14","age":3578,"error":30,"curve":"intcal20"})"), pool).bounds.isEmpty());
+        // Valeur reprise d'un résultat de SeldonH (prompt réel du 16/11/2026 : âge attendu 2409 BP d'une calibration
+        // inverse, puis « date un 14C avec la mesure attendue et une erreur de 25 ») : absente des messages, présente
+        // dans les résultats → acceptée avec la réserve de MainWindow::sourcedCalcBlocks.
+        {
+            const QString q = QString::fromUtf8("Quel Age 14c pour −450 avec IntCal20\ndate un 14c en utilisant le map de la question du dessus avec une erreur de 25\nutilise la mesure atrendue");
+            const QString res = QString::fromUtf8("[Résultat de calcul de SeldonH]\nMesure attendue (erreur de la courbe) : 2409 ± 14 BP.");
+            const QJsonObject rq = obj(R"({"method":"c14","age":2409,"error":25,"curve":"intcal20"})");
+            QVERIFY(!checkRequest(rq, NumberPool(q)).ok());
+            QVERIFY(checkRequest(rq, NumberPool(q + "\n" + res, false)).ok());
+        }
+        // Formule de la calculatrice : nombres de l'utilisateur ; petits entiers (exposant, diviseur) admis.
+        QVERIFY(checkRequest(obj(R"({"method":"expr","expr":"(3987 - 3578) / 2"})"), pool).ok());
+        QVERIFY(checkRequest(obj(R"({"method":"expr","expr":"log10(3578)^2"})"), pool).ok());
+        QVERIFY(!checkRequest(obj(R"({"method":"expr","expr":"3600 - 3578"})"), pool).ok());
         // Mesure recopiée de travers ou inventée : bloquée.
         RequestCheck c = checkRequest(obj(R"({"method":"c14","age":3587,"error":30})"), pool);
         QVERIFY(!c.ok());

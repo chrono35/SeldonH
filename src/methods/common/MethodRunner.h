@@ -48,6 +48,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 namespace seldon {
 
+class Calculator;
+
 struct RunOutcome {
     bool        found = false;      // au moins une demande exécutée (même en échec)
     int         count = 0;
@@ -233,6 +235,10 @@ public:
     // Exécute des demandes déjà structurées (JSON avec "method"). Clé facultative "level" : niveau de confiance (%) des
     // intervalles HPD, 95 par défaut ; les HPD à 95 % et 68 % restent toujours données en complément.
     static RunOutcome run(const QVector<QJsonObject>& requests, DateFormat format = DateFormat::BcAd);
+    // Calculatrice de la conversation (MainWindow) : les formules « expr » demandées par le modèle de langage y sont
+    // calculées, pour que « ans » et les variables suivent la conversation (« /3 » après un résultat). nullptr : une
+    // calculatrice neuve à chaque appel (tests, serveur MCP).
+    static void setSharedCalculator(Calculator* calc);
 
     // Blocs ```calcul ... ``` (ou ```json avec "method") d'une réponse du modèle : objet JSON, tableau d'objets ou
     // objets séparés par des virgules ; "method" obligatoire. Chaque demande est normalisée (normalizeRequest).

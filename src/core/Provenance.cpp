@@ -107,6 +107,21 @@ void walk(const QJsonObject& o, const QString& where, const NumberPool& pool, Re
                 if (e.isObject()) walk(e.toObject(), here, pool, out);
             continue;
         }
+        // Formule de la calculatrice ({"method":"expr","expr":"sqrt(36)"}) : chacun de ses nombres est une mesure, sauf
+        // les petits entiers (exposants, diviseurs : « x^2 », « (a+b)/2 », « ^(1/3) ») ; les chiffres d'un nom de
+        // fonction (log10, c14tof14c) ne comptent pas.
+        static const QStringList exprKeys{ "expr", "expression", "formule", "formula" };
+        if (exprKeys.contains(key) && v.isString()) {
+            static const QRegularExpression num(QStringLiteral(R"((?<![A-Za-z_\d.,])(\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?))"));
+            for (auto m = num.globalMatch(v.toString()); m.hasNext();) {
+                const QString s = m.next().captured(1);
+                const double x = QString(s).replace(QLatin1Char(','), QLatin1Char('.')).toDouble();
+                if (!std::isfinite(x) || pool.contains(x)) continue;
+                if (x <= 10 && x == std::floor(x)) continue;
+                out.measures << (here.isEmpty() ? QStringLiteral("expr : %1").arg(s) : QStringLiteral("expr : %1 (« %2 »)").arg(s, here));
+            }
+            continue;
+        }
         const bool measure = measureKeys().contains(key), bound = boundKeys().contains(key);
         if (!measure && !bound) continue;
         const double x = numericValue(v);

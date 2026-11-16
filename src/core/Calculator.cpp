@@ -33,6 +33,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <limits>
 
 #include "../methods/common/DateFormat.h"
+#include "../methods/common/FuzzyWords.h"
 #include "../methods/common/RefCurve.h"
 
 namespace seldon {
@@ -313,7 +314,12 @@ struct Calculator::Eval {
         if (peek() == QLatin1Char('(')) {
             ++pos;
             const bool saved = commaSeparates;
-            commaSeparates = !semicolonArgs(pos);
+            // Fonction à un seul argument : « racine(12,5) » = racine de 12,5 (virgule décimale, prompt réel du 16/11/2026).
+            static const QStringList oneArg{ "sqrt", "racine", "exp", "ln", "log", "log10", "abs", "floor", "ceil", "sin", "cos", "tan",
+                                             "asin", "acos", "atan", "sinr", "cosr", "tanr", "rad", "deg", "adtobp", "bptoad", "adtob2k",
+                                             "b2ktoad", "bptob2k", "b2ktobp", "adtoka", "katoad", "adtoma", "matoad", "adtobc", "bctoad",
+                                             "igad", "val", "err" };
+            commaSeparates = !semicolonArgs(pos) && !oneArg.contains(low);
             QVector<Value> args;
             if (!eat(QLatin1Char(')'))) {
                 for (;;) {
@@ -700,6 +706,16 @@ QVector<Calculator::Line> Calculator::evaluate(const QString& text)
                 continue;
             }
         }
+        // Instruction qui commence par un opérateur (« +20 », « /3 », « * 2 », « - 5 ») : elle continue le résultat précédent,
+        // comme une calculatrice de poche (prompt réel du 16/11/2026 : « +20 /2 » calculé 10 au lieu de ans + 20/2).
+        // « -5 » collé reste un nombre négatif ; « - 5 » (espace) est une soustraction.
+        static const QRegularExpression continues(QStringLiteral(R"(^\s*(?:[+*/^×÷]|[-−]\s))"));
+        bool fromAns = false;
+        if (hasAns_ && l.variable.isEmpty() && continues.match(body).hasMatch()) {
+            body = QStringLiteral("ans ") + body.trimmed();
+            l.expr = body;
+            fromAns = true;
+        }
         Eval e(body, vars_, ans_, hasAns_);
         const Value val = e.expr();
         const double v = val.v;
@@ -718,6 +734,7 @@ QVector<Calculator::Line> Calculator::evaluate(const QString& text)
             l.uncertainty = std::isfinite(val.e) ? val.e : 0.0;
             l.parts = e.parts;
             l.details = e.details;
+            if (fromAns && l.details.isEmpty()) l.details = QStringLiteral("ans = %1").arg(formatValue(ans_.v, ans_.e));
             if (!l.variable.isEmpty()) {
                 vars_[l.variable] = Value{ v, l.uncertainty };
                 for (int k = 1; k < e.parts.size(); ++k)
@@ -729,6 +746,78 @@ QVector<Calculator::Line> Calculator::evaluate(const QString& text)
         out << l;
     }
     return out;
+}
+
+QString Calculator::fromWords(const QString& text)
+{
+    QString t = text.trimmed().toLower().normalized(QString::NormalizationForm_D);
+    t.remove(QRegularExpression(QStringLiteral("[\\x{0300}-\\x{036f}]")));
+    t.replace(QChar(0x2019), QLatin1Char('\''));
+    t.replace(QChar(0x2212), QLatin1Char('-'));
+    if (t.isEmpty() || t.contains(QLatin1Char('\n'))) return QString();
+    static const QRegularExpression polite(QStringLiteral(R"(\b(?:s'il (?:te|vous) pla[iî]t|stp|svp|merci|please)\b)"));
+    t.remove(polite);
+    static const QRegularExpression tail(QStringLiteral(R"([\s?!.=,;:]+$)"));
+    t.remove(tail);
+    t = t.simplified();
+
+    // Mot de commande en tête, faute de frappe d'une lettre tolérée (« calcuk ») : retiré.
+    {
+        static const QStringList cmds{ "calcul", "calcule", "calculer", "calculez", "evalue", "evaluer", "compute", "calculate" };
+        const qsizetype sp = t.indexOf(QLatin1Char(' '));
+        const QString w = sp < 0 ? t : t.left(sp);
+        if (w.size() >= 5)
+            for (const QString& c : cmds)
+                if (fuzzy::distance(w, c, 1) <= 1) { t = sp < 0 ? QString() : t.mid(sp + 1); break; }
+    }
+    static const QRegularExpression lead(QStringLiteral(
+        R"(^(?:(?:combien\s+(?:font|fait|vaut)|que\s+vaut|quel(?:le)?\s+est|donne[sz]?(?:[\s-]moi)?|what\s+is)\s+)?(?:la\s+|le\s+|l'|the\s+)?)"));
+    t.remove(lead);
+    t = t.simplified();
+    if (t.isEmpty()) return QString();
+
+    t.replace(QRegularExpression(QStringLiteral(R"((\d),(\d))")), QStringLiteral("\\1.\\2"));   // 2,5 → 2.5 (argument de fonction)
+
+    // Opérande : nombre, appel de fonction déjà traduit (un niveau de parenthèses) ou parenthèse.
+    const QString X = QStringLiteral(R"((-?\d+(?:\.\d+)?|[a-z0-9_]+\([^()]*\)|\([^()]*\)))");
+    const QString de = QStringLiteral(R"((?:\s+(?:de\s+|d'|of\s+)|\s+|(?<=')))");
+    struct Rule { QString re, out; };
+    const QVector<Rule> rules{
+        { R"(\bracines?\s+cubiques?)" + de + X, "(\\1)^(1/3)" },
+        { R"(\bcube\s+root)" + de + X, "(\\1)^(1/3)" },
+        { R"(\bracines?(?:\s+carree?s?)?)" + de + X, "sqrt(\\1)" },      // « carré » : faute courante
+        { R"(\bsquare\s+root)" + de + X, "sqrt(\\1)" },
+        { R"(\b(?:logarithmes?|log)\s+(?:neperiens?|naturels?|natural))" + de + X, "ln(\\1)" },
+        { R"(\bln)" + de + X, "ln(\\1)" },
+        { R"(\b(?:logarithmes?(?:\s+decimale?s?)?|log(?:\s+decimale?s?)?))" + de + X, "log10(\\1)" },
+        { R"(\b(?:exponentielles?|exponential|exp))" + de + X, "exp(\\1)" },
+        { R"(\b(?:valeurs?\s+absolues?|absolute\s+value))" + de + X, "abs(\\1)" },
+        { R"(\b(?:sinus|sine|sin))" + de + X, "sin(\\1)" },
+        { R"(\b(?:cosinus|cosine|cos))" + de + X, "cos(\\1)" },
+        { R"(\b(?:tangentes?|tangent|tan))" + de + X, "tan(\\1)" },
+        { R"(\b(?:carres?|square))" + de + X, "(\\1)^2" },
+        { R"(\bcube)" + de + X, "(\\1)^3" },
+        { X + R"(\s+(?:au\s+carre|squared))", "(\\1)^2" },
+        { X + R"(\s+(?:au\s+cube|cubed))", "(\\1)^3" },
+        { X + R"(\s+(?:(?:a\s+la\s+|to\s+the\s+)?puissance|(?:to\s+the\s+)?power(?:\s+of)?|exposant)\s+)" + X, "(\\1)^(\\2)" },
+        { X + R"(\s+(?:fois|multiplie\s+par|times|multiplied\s+by)\s+)" + X, "\\1*\\2" },
+        { X + R"(\s+(?:divise\s+par|divided\s+by)\s+)" + X, "\\1/\\2" },
+        { X + R"(\s+(?:plus)\s+)" + X, "\\1+\\2" },
+        { X + R"(\s+(?:moins|minus)\s+)" + X, "\\1-\\2" },
+    };
+    bool changed = false;
+    for (int guard = 0; guard < 12; ++guard) {
+        bool any = false;
+        for (const Rule& r : rules) {
+            const QRegularExpression re(r.re);
+            const QString before = t;
+            t.replace(re, r.out);
+            if (t != before) { any = true; break; }        // une règle à la fois, puis on recommence (imbrication)
+        }
+        if (!any) break;
+        changed = true;
+    }
+    return changed ? t.simplified() : QString();
 }
 
 bool Calculator::isCalculation(const QString& text) const
@@ -743,7 +832,10 @@ bool Calculator::isCalculation(const QString& text) const
     QString rest = t;
     rest.replace(pm, QStringLiteral(" "));
     rest.remove(QRegularExpression(QStringLiteral(R"(^[\s\-−+]+)")));
-    if (!op.match(rest).hasMatch()) return false;
+    // « +20 », « /3 », « - 5 » après un résultat : suite du calcul précédent (voir evaluate).
+    static const QRegularExpression continues(QStringLiteral(R"(^\s*(?:[+*/^×÷]|[-−]\s))"));
+    const bool fromAns = hasAns_ && continues.match(t).hasMatch();
+    if (!fromAns && !op.match(rest).hasMatch()) return false;
     Calculator dry = *this;                        // essai à blanc : les variables du texte sont connues ligne après ligne
     const QVector<Line> lines = dry.evaluate(text);
     if (lines.isEmpty()) return false;

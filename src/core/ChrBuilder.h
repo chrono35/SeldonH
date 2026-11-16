@@ -57,6 +57,8 @@ SPDX-License-Identifier: GPL-3.0-or-later
 // événements) reprennent ceux de projets ChronoModel 4.0 réels.
 #pragma once
 
+#include <functional>
+
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -119,6 +121,32 @@ public:
     static bool signedDepths(const QJsonObject& spec);
     // Valeur de X_Inc_Depth d'un Event de la spécification (« depth » ou « profondeur ») ; NaN sans profondeur.
     static double chronoDepth(const QJsonObject& event, bool signedDepths);
+
+    // Modèle en mode courbe, étape 2 (16/11/2026) : le modèle de langage écrit les Events et leurs dates ; SeldonH recopie
+    // lui-même, de `text` (questions et fichiers joints de l'utilisateur), les mesures de chaque Event sur l'événement :
+    //   - archéomagnétisme (vector, spherical, unknown_dec, inclination, declination, intensity) : « I = 39,0° »,
+    //     « D = -1,7° », « alpha95 = 6,1° », « F = 43,9 ± 6,1 µT » (aussi inclinaison, déclinaison, intensité, α95) ;
+    //   - courbes univariate, bivariate, trivariate : « X = 12,3 ± 0,5 », « Y = … », « Z = … ».
+    // Les mesures d'un Event sont lues entre son nom et le nom de l'Event suivant (ou une ligne vide). Une valeur écrite par
+    // le modèle et différente du texte est remplacée par celle du texte. Une date « am » d'un Event qui recopie sa mesure
+    // est retirée : en mode courbe, la mesure n'est pas une datation. `curveType` : type de la courbe (curve de la
+    // spécification) ; « curve » est écrit à la racine s'il manque. `notes` : ce qui a été fait ou ce qui manque, en français.
+    // Courbe âge-profondeur : rien (profondeurs traitées à part).
+    // Mesures lues aussi dans un tableau (ligne d'en-tête « Nom ; I ; D ; alpha95 ; F ; sF », séparateurs ; tabulation | ou
+    // espaces multiples, tableau Markdown compris) ; nom d'Event reconnu aussi sous une forme proche (« PI 2 » pour « PI02 »).
+    // `missingEvents` : noms des Events (bornes exclues) auxquels il manque encore une composante.
+    static QJsonObject fillCurveMeasures(QJsonObject spec, const QString& text, const QString& curveType, QStringList* notes = nullptr,
+                                         QStringList* missingEvents = nullptr);
+    // Recours (16/11/2026) : mesures renvoyées par le modèle de langage pour les Events incomplets,
+    // {"PI07":{"inc":65.7,"dec":-8.3,"alpha95":4.8,"field":43,"error_f":4.9}} (clés de la fiche ou de ChronoModel). Une valeur
+    // n'est prise que si `allowed` l'accepte (provenance : nombre écrit par l'utilisateur) et si l'Event ne l'a pas déjà.
+    static QJsonObject mergeCurveMeasures(QJsonObject spec, const QJsonObject& byEvent, const QString& curveType,
+                                          const std::function<bool(double)>& allowed, QStringList* notes = nullptr);
+    // Le texte contient des mesures de courbe écrites par Event (au moins une ligne « nom … I = 39 » ou « X = 12 ») : le
+    // modèle de langage peut alors laisser les mesures à SeldonH (réponse plus courte).
+    static bool hasCurveMeasures(const QString& text, const QString& curveType);
+    // Composantes demandées par un type de courbe : lettres parmi « IDF » (archéomagnétisme) ou « XYZ ». Vide si inconnu.
+    static QString curveComponents(const QString& curveType);
 
     // Convention de contrainte : [a, b] = a plus ancien que b. ChronoModel stocke bwd_id (plus ancien) / fwd_id (plus récent) ;
     // sens vérifié sur trois projets réels.

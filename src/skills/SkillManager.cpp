@@ -124,7 +124,7 @@ bool startsWord(const QString& q, const QString& k)
 } // namespace
 
 QList<SkillMatch> SkillManager::select(const QString& question, int maxChars, const QStringList& exclude,
-                                       const QStringList& pinned) const
+                                       const QStringList& pinned, QStringList* dropped) const
 {
     const QString q = normalize(question);
     const QSet<QString> qWords = [&] {
@@ -165,7 +165,10 @@ QList<SkillMatch> SkillManager::select(const QString& question, int maxChars, co
         }
     }
     for (const SkillMatch& m : std::as_const(scored)) {
-        if (used + m.skill->body.size() > maxChars) continue;     // on essaie les suivantes, plus courtes
+        if (used + m.skill->body.size() > maxChars) {             // on essaie les suivantes, plus courtes
+            if (dropped && maxChars > 0) *dropped << QStringLiteral("%1 (%2 car.)").arg(m.skill->id).arg(m.skill->body.size());
+            continue;
+        }
         out.append(m);
         used += m.skill->body.size();
     }

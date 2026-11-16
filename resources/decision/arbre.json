@@ -64,7 +64,7 @@
               "creer_densite"
             ],
             "fiches": [
-              "18_date_densite"
+              "26_creer_densite"
             ]
           }
         },
@@ -74,6 +74,18 @@
           "feuille": {
             "outils": [
               "courbes_disponibles"
+            ]
+          }
+        },
+        {
+          "id": "calcul",
+          "libelle": "faire un calcul numérique (formule, racine carrée, puissance, moyenne, conversion d'années)",
+          "feuille": {
+            "outils": [
+              "calculatrice"
+            ],
+            "fiches": [
+              "25_calculatrice"
             ]
           }
         },
@@ -287,7 +299,8 @@
           "ajoute": {
             "courbe": "univariate",
             "fiches": [
-              "03_chronomodel_creer_modele"
+              "03_chronomodel_creer_modele",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -298,7 +311,8 @@
           "ajoute": {
             "courbe": "bivariate",
             "fiches": [
-              "03_chronomodel_creer_modele"
+              "03_chronomodel_creer_modele",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -309,7 +323,8 @@
           "ajoute": {
             "courbe": "trivariate",
             "fiches": [
-              "03_chronomodel_creer_modele"
+              "03_chronomodel_creer_modele",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -321,7 +336,8 @@
             "courbe": "inclination",
             "fiches": [
               "03_chronomodel_creer_modele",
-              "06_archeomagnetisme"
+              "06_archeomagnetisme",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -333,7 +349,8 @@
             "courbe": "declination",
             "fiches": [
               "03_chronomodel_creer_modele",
-              "06_archeomagnetisme"
+              "06_archeomagnetisme",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -345,7 +362,8 @@
             "courbe": "intensity",
             "fiches": [
               "03_chronomodel_creer_modele",
-              "06_archeomagnetisme"
+              "06_archeomagnetisme",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -357,7 +375,8 @@
             "courbe": "spherical",
             "fiches": [
               "03_chronomodel_creer_modele",
-              "06_archeomagnetisme"
+              "06_archeomagnetisme",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -369,7 +388,8 @@
             "courbe": "unknown_dec",
             "fiches": [
               "03_chronomodel_creer_modele",
-              "06_archeomagnetisme"
+              "06_archeomagnetisme",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"
@@ -381,7 +401,8 @@
             "courbe": "vector",
             "fiches": [
               "03_chronomodel_creer_modele",
-              "06_archeomagnetisme"
+              "06_archeomagnetisme",
+              "28_modele_courbe"
             ]
           },
           "suite": "modele_strati"

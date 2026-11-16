@@ -63,6 +63,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "TextUtil.h"
 #include "FuzzyWords.h"
 #include "Tools.h"
+#include "../../core/Calculator.h"
 #include "Traces.h"
 
 namespace seldon {
@@ -3538,10 +3539,70 @@ double MethodRunner::requestedLevel(const QString& question)
     return 0.0;
 }
 
+namespace { Calculator* gSharedCalc = nullptr; }
+
+void MethodRunner::setSharedCalculator(Calculator* calc) { gSharedCalc = calc; }
+
 RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fmt)
 {
     RunOutcome out;
     if (requests.isEmpty()) return out;
+
+    // Formules de la calculatrice ({"method":"expr","expr":"sqrt(36)"}, 16/11/2026) : le modèle de langage ne calcule
+    // rien de tête, même une racine carrée. Calculées par Calculator, puis les autres demandes suivent.
+    {
+        QVector<QJsonObject> rest;
+        QVector<Calculator::Line> lines;
+        Calculator localCalc;
+        Calculator& calc = gSharedCalc ? *gSharedCalc : localCalc;
+        for (const QJsonObject& r : requests) {
+            const QJsonObject n = normalizeRequest(r);
+            if (n.value("method").toString() != QLatin1String("expr")) { rest << r; continue; }
+            const QString e = n.value("expr").toString().trimmed();
+            if (e.isEmpty()) {
+                Calculator::Line l;
+                l.expr = QStringLiteral("(vide)");
+                l.error = QStringLiteral("formule absente : clé « expr »");
+                lines << l;
+            } else {
+                lines += calc.evaluate(e);
+            }
+        }
+        if (!lines.isEmpty()) {
+            RunOutcome o = rest.isEmpty() ? RunOutcome() : run(rest, fmt);
+            QString h = QStringLiteral("<table cellspacing='0' cellpadding='3'>");
+            QString p = QStringLiteral("[Résultat de la calculatrice de SeldonH — valeurs exactes, DÉJÀ AFFICHÉES à l'utilisateur dans "
+                                       "une fiche : ne les recalcule pas, ne les contredis pas ; cite seulement la valeur dont ta "
+                                       "réponse a besoin, à l'identique]\n");
+            bool withErr = false;
+            for (const Calculator::Line& l : std::as_const(lines)) {
+                const QString shown = Calculator::formatValue(l.value, l.uncertainty);
+                h += QStringLiteral("<tr><td><code>%1</code></td><td>%2</td></tr>")
+                         .arg(l.expr.toHtmlEscaped(),
+                              l.ok ? QStringLiteral("= <b>%1</b>%2").arg(shown, l.details.isEmpty() ? QString()
+                                                                         : QStringLiteral("<br><i>%1</i>").arg(l.details.toHtmlEscaped()))
+                                   : QStringLiteral("⚠ %1").arg(l.error.toHtmlEscaped()));
+                p += l.ok ? QStringLiteral("%1 = %2%3\n").arg(l.expr, shown, l.details.isEmpty() ? QString() : QStringLiteral(" (%1)").arg(l.details))
+                          : QStringLiteral("%1 : calcul impossible — %2\n").arg(l.expr, l.error);
+                withErr = withErr || (l.ok && l.uncertainty > 0);
+            }
+            h += QStringLiteral("</table>");
+            if (withErr)
+                h += QStringLiteral("<p><small>Incertitudes (1σ) propagées au premier ordre en supposant les <b>erreurs indépendantes</b>.</small></p>");
+            if (o.found) {                         // fiche des autres calculs (avec son bandeau), puis la calculatrice
+                o.noticeHtml += QStringLiteral("<p><b>Calculatrice</b></p>") + h;
+                o.promptBlock += QStringLiteral("\n") + p;
+            } else {
+                o.found = true;
+                o.title = QStringLiteral("Calculatrice");
+                o.noticeHtml = cardMarker(o.title) + h;
+                o.promptBlock = p;
+            }
+            o.count += int(requests.size() - rest.size());
+            return o;
+        }
+    }
+
     out.found = true;
     out.count = requests.size();
     for (const QJsonObject& r : requests) out.requests << normalizeRequest(r);
@@ -5440,9 +5501,14 @@ QJsonObject MethodRunner::normalizeRequest(QJsonObject o)
         { "combinaison", "combine" }, { "combination", "combine" }, { "combiner", "combine" }, { "combined", "combine" },
         { "calibration inverse", "inverse" }, { "inverse calibration", "inverse" }, { "inverse_calibration", "inverse" },
         { "courbe", "curve" }, { "courbes", "curve" }, { "curves", "curve" }, { "spline", "curve" }, { "splines", "curve" },
-        { "courbe chronomodel", "curve" }, { "chronomodel curve", "curve" } };
+        { "courbe chronomodel", "curve" }, { "chronomodel curve", "curve" },
+        { "expression", "expr" }, { "calculatrice", "expr" }, { "calculator", "expr" }, { "calc", "expr" },
+        { "formule", "expr" }, { "formula", "expr" }, { "arithmetique", "expr" } };
     if (alias.contains(m)) m = alias.value(m);
     if (!m.isEmpty()) o["method"] = m;
+    if (m == QLatin1String("expr"))                       // formule de la calculatrice : clé « expr »
+        for (const char* k : { "expression", "formule", "formula" })
+            if (!o.contains("expr") && o.value(k).isString()) { o["expr"] = o.value(k); o.remove(k); }
 
     // Nombres écrits en texte.
     static const char* const numeric[] = { "age", "error", "delta_r", "delta_r_error", "ref_year", "min", "max", "inc", "dec", "alpha95",
@@ -5630,7 +5696,7 @@ QVector<QJsonObject> MethodRunner::extractCalcBlocks(const QString& answer)
             if (raw.value("method").toString().isEmpty() && !(calcFence && raw.contains("plugin_id"))) continue;
             const QJsonObject o = normalizeRequest(raw);
             const QString m = o.value("method").toString();
-            static const QStringList extra = { "event", "combine", "relation", "inverse", "density_file" };
+            static const QStringList extra = { "event", "combine", "relation", "inverse", "density_file", "expr" };
             if (!calcFence && !extra.contains(m) && !MethodRegistry::instance().byId(m)) continue;
             out << o;
         }

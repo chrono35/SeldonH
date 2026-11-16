@@ -82,8 +82,11 @@ public:
     // `exclude` : identifiants déjà présents dans le contexte récent (non réinjectés).
     // `pinned` : fiches toujours incluses en tête, même hors budget et même si elles figurent dans `exclude`
     // (ex. la fiche de création de modèle pour une demande de modèle) ; le budget sert ensuite aux autres.
+    // `dropped` (facultatif) : fiches pertinentes (mots-clés trouvés) écartées faute de place, avec leur taille
+    // (« 09_outils_calcul (2980 car.) ») : exportées avec le prompt, une fiche ne disparaît plus en silence.
     QList<SkillMatch> select(const QString& question, int maxChars,
-                             const QStringList& exclude = {}, const QStringList& pinned = {}) const;
+                             const QStringList& exclude = {}, const QStringList& pinned = {},
+                             QStringList* dropped = nullptr) const;
 
     // Texte des compétences "always" (identité, règles) : va dans le message système.
     QString alwaysText() const;

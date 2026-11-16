@@ -80,6 +80,7 @@ CMakeLists.txt.user*
 .pch/
 .rcc/
 .uic/
+/QtInstaller_SeldonH/installer-config/_ancien/2026-11-12_fond_nuit/*.icns
 /build*/
 /.qtcreator/
 

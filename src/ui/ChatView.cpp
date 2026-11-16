@@ -39,6 +39,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QUrl>
 #include <QPalette>
 #include <QScrollBar>
+#include <QKeyEvent>
 #include <QTextDocument>
 #include <memory>
 
@@ -118,6 +119,46 @@ ChatView::ChatView(QWidget* parent) : QTextBrowser(parent)
     timer_.setSingleShot(true);
     timer_.setInterval(80);           // ~12 rendus/s pendant le streaming
     connect(&timer_, &QTimer::timeout, this, &ChatView::render);
+
+    QScrollBar* bar = verticalScrollBar();
+    // Défilement par l'utilisateur seulement (molette, flèches, glissement de la barre) : Qt déplace aussi la barre de
+    // lui-même (curseur remis en haut après setHtml), ce qui ne doit pas faire quitter la fin du dialogue.
+    auto userScrolled = [this, bar]() {
+        userMoving_ = true;                              // émis avant que l'action ne déplace la barre
+        QTimer::singleShot(0, this, [this, bar]() {     // après l'action : la valeur est alors à jour
+            follow_ = bar->value() >= bar->maximum() - 8;
+            wanted_ = follow_ ? -1 : bar->value();
+            userMoving_ = bar->isSliderDown();
+        });
+    };
+    connect(bar, &QScrollBar::actionTriggered, this, userScrolled);
+    connect(bar, &QScrollBar::sliderPressed, this, userScrolled);
+    connect(bar, &QScrollBar::sliderMoved, this, userScrolled);
+    connect(bar, &QScrollBar::sliderReleased, this, userScrolled);
+    // Barre déplacée par Qt (pas par l'utilisateur) : position rétablie.
+    connect(bar, &QScrollBar::valueChanged, this, [this, bar]() {
+        if (!adjusting_ && !userMoving_ && !bar->isSliderDown()) keepScroll();
+    });
+    connect(bar, &QScrollBar::rangeChanged, this, [this]() { keepScroll(); });
+}
+
+void ChatView::keyPressEvent(QKeyEvent* e)
+{
+    QScrollBar* bar = verticalScrollBar();
+    userMoving_ = true;
+    QTextBrowser::keyPressEvent(e);
+    follow_ = bar->value() >= bar->maximum() - 8;
+    wanted_ = follow_ ? -1 : bar->value();
+    userMoving_ = false;
+}
+
+void ChatView::keepScroll()
+{
+    QScrollBar* bar = verticalScrollBar();
+    adjusting_ = true;
+    if (follow_) bar->setValue(bar->maximum());
+    else if (wanted_ >= 0) bar->setValue(std::min(wanted_, bar->maximum()));
+    adjusting_ = false;
 }
 
 QString ChatView::markdownToHtml(const QString& md)
@@ -142,6 +183,8 @@ int ChatView::addUser(const QString& text)
     it.plain = text;
     it.html = text.toHtmlEscaped().replace("\n", "<br>");
     items_.append(it);
+    follow_ = true;                   // nouvelle question : la vue revient à la fin du dialogue
+    wanted_ = -1;
     render();
     return items_.size() - 1;
 }
@@ -170,7 +213,16 @@ void ChatView::setAssistant(int index, const QString& markdown, const QString& t
 {
     if (index < 0 || index >= items_.size()) return;
     Item& it = items_[index];
-    it.html = markdown.isEmpty() ? QString() : markdownToHtml(markdown);
+    QString md = markdown;
+    // Pendant le streaming, un bloc de code ouvert (``` sans fermeture) est fermé provisoirement : sinon tout le texte qui
+    // suit passe en police de code, puis revient, et la bulle change de hauteur à chaque rendu.
+    if (!final) {
+        static const QRegularExpression fence(QStringLiteral("^[ \\t]*```"), QRegularExpression::MultilineOption);
+        int n = 0;
+        for (auto m = fence.globalMatch(md); m.hasNext(); m.next()) ++n;
+        if (n % 2) md += QStringLiteral("\n```");
+    }
+    it.html = md.isEmpty() ? QString() : markdownToHtml(md);
     it.thinking = thinking;
     it.thinkingOpen = thinkingOpen;
     it.final = final;
@@ -254,6 +306,8 @@ void ChatView::clearAll()
     items_.clear();
     figures_.clear();
     timer_.stop();
+    follow_ = true;
+    wanted_ = -1;
     render();
 }
 
@@ -484,16 +538,18 @@ QString ChatView::bubble(const Item& it, bool forExport, bool last, bool firstAi
                                       .arg(muted, it.thinking.trimmed().toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
             const int words = int(it.thinking.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts).size());
             const int self = int(&it - items_.constData());
-            const bool open = !it.final || it.thinkingShown;
-            QString head = !it.final ? tr("💭 Raisonnement en cours")
+            // Replié dès que la réponse commence (et non à la fin) : la bulle ne rétrécit pas brusquement une fois terminée.
+            const bool open = (!it.final && it.html.isEmpty()) || it.thinkingShown;
+            QString head = !it.final && it.html.isEmpty() ? tr("💭 Raisonnement en cours")
                                      : tr("%1 Raisonnement (%2 mots)").arg(open ? QStringLiteral("▾") : QStringLiteral("▸")).arg(words);
+            if (!it.final && !it.html.isEmpty())
+                head = tr("▸ Raisonnement (%1 mots)").arg(words);
             if (it.final && !forExport)
                 head = QStringLiteral("<a href=\"seldon://thinking/%1\" style=\"color:%2\">%3</a>").arg(self).arg(muted, head);
             const QString block = QStringLiteral("<p style=\"color:%1; font-size:small\">%2</p>").arg(muted, head)
                                   + (open ? tbody : QString());
             if (it.html.isEmpty() && !it.final) inner = block;
-            else if (!it.final) inner = block + inner;
-            else inner += block;
+            else inner += block;                       // sous la réponse, pendant le streaming comme à la fin
         }
         QString c = QStringLiteral("<p style=\"color:%1; font-size:small; margin-bottom:2px\"><b>%2</b>%3</p>")
                         .arg(muted, tr("Modèle d'IA"),
@@ -513,8 +569,7 @@ void ChatView::render()
 {
     dirty_ = false;
     QScrollBar* bar = verticalScrollBar();
-    const bool atBottom = bar->value() >= bar->maximum() - 8;
-    const int  oldValue = bar->value();
+    if (!follow_ && wanted_ < 0) wanted_ = bar->value();
 
     const int lastUser = lastUserIndex();
     int firstAi = -1;
@@ -526,9 +581,13 @@ void ChatView::render()
     QString html = "<html><body>";
     for (int i = 0; i < items_.size(); ++i) html += bubble(items_[i], false, i == lastUser, i == firstAi);
     html += "</body></html>";
+    // Pas d'image intermédiaire (document vide, vue en haut) entre setHtml et le rétablissement du défilement.
+    setUpdatesEnabled(false);
+    adjusting_ = true;
     setHtml(html);
-
-    bar->setValue(atBottom ? bar->maximum() : std::min(oldValue, bar->maximum()));
+    adjusting_ = false;
+    keepScroll();
+    setUpdatesEnabled(true);
 }
 
 QString ChatView::exportHtml() const

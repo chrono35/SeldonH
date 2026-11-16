@@ -101,6 +101,15 @@ Leaf accumulate(const Tree& t, const QVector<QPair<QString, QString>>& path);
 // Le texte parle d'une courbe (mode courbe de ChronoModel) : courbe, inclinaison, déclinaison, intensité, profondeur,
 // carotte, spline, variation séculaire, uni-/bi-/trivariée… Sert à ne PAS répondre « courbe : non » à la place du modèle.
 bool mentionsCurve(const QString& text);
+// Demande explicite d'un modèle en mode courbe (« mode courbe », « courbe vectorielle », « courbe de variation séculaire »…) :
+// SeldonH répond « courbe : oui » lui-même.
+bool requestsCurveModel(const QString& text);
+// Type de courbe lu dans le texte (choix du nœud « modele_type_courbe ») : grandeurs archéomagnétiques citées (« I = 39 »,
+// « (I, D, F) », inclinaison, déclinaison, intensité, « courbe vectorielle ») → inc_dec_int, inc_dec, inc_int,
+// inclinaison, declinaison, intensite ; sinon « univariée / bivariée / trivariée ». Vide si rien de sûr.
+QString curveTypeFromText(const QString& text);
+// Le texte dit qu'il n'y a pas d'ordre stratigraphique (« ni phase ni ordre stratigraphique », « sans stratigraphie »).
+bool deniesStratigraphy(const QString& text);
 
 // Grammaire GBNF d'un nœud : la réponse est exactement l'un des identifiants de choix.
 QString grammarFor(const Node& n);
@@ -108,7 +117,8 @@ QString grammarFor(const Node& n);
 // libellé), avec la consigne de répondre par un seul identifiant.
 QString promptFor(const Node& n, const QString& userQuestion);
 // Identifiant de choix lu dans une réponse libre (modèle distant, ou local sans grammaire) : réponse exacte (guillemets,
-// gras, point final tolérés), sinon un seul identifiant présent comme mot ; vide si rien ou plusieurs.
+// gras, point final tolérés), sinon un seul identifiant présent comme mot ; vide si rien ou plusieurs. Le raisonnement
+// (<think>…</think>) est ignoré ; non refermé (réponse coupée), la réponse est vide.
 QString parseAnswer(const Node& n, const QString& answer);
 
 } // namespace decision

@@ -44,6 +44,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "src/core/ChronoResults.h"
 #include "src/core/ConversationStore.h"
 #include "src/core/Report.h"
+#include "src/core/Suggestions.h"
 #include "src/llm/LlmEngine.h"
 #include "src/llm/RemoteApi.h"
 #include "src/llm/ToolsProbe.h"
@@ -133,6 +134,7 @@ private:
         QString     answer;        // réponse finale (sans réflexion)
         QString     toolBlocks;    // appels d'outils natifs de ce tour, ré-écrits en blocs ```calcul pour l'historique
         QStringList skillIds;      // compétences injectées dans ce tour
+        QStringList skillsDropped; // fiches pertinentes écartées faute de place (budget des compétences)
         int         view = -1;     // index de la bulle dans ChatView
         bool        synthetic = false;  // tour créé par l'application après un calcul (pas une question de l'utilisateur)
         bool        followUp = false;   // vrai : pas (ou plus) de calcul à relancer pour ce tour (déjà calculé par l'application, ou tour de suite)
@@ -146,6 +148,7 @@ private:
         bool        help = false;       // question sur l'utilisation de SeldonH : réponse en phrases, sans code ni calcul
         QStringList suites;             // suites proposées sous la réponse (affichage seulement ; montrées sous la dernière réponse)
         bool        levelEstimate = false;  // relation entre niveaux du modèle calculée par SeldonH : pas de nouveau modèle
+        QString     curveType;              // modèle en mode courbe (chemin de l'arbre) : vector, spherical, univariate…
     };
     QVector<QJsonObject> turnRuns_;
     bool turnHasResults_ = false;       // journaux de ChronoModel joints à la question en cours     // demandes calculées par SeldonH pendant le tour en cours (pour les suites)
@@ -179,6 +182,12 @@ private:
     void updateControls();
     void showWelcome();
     void finishAssistantMessage(bool interrupted);
+    // Modèle ChronoModel de la réponse : notes de SeldonH, vérification croisée, dessin des scènes, marche à suivre.
+    void presentModel(Turn& t, const QStringList& notes, const QVector<seldon::suggest::ToDate>& toDate);
+    // Mode courbe, recours (16/11/2026) : Events dont SeldonH n'a pas trouvé les mesures dans le texte → petit appel au
+    // modèle de langage qui renvoie seulement {"Event":{"inc":…}} ; valeurs gardées si elles viennent du texte.
+    bool startMeasureFill();
+    void onMeasured(const seldon::GenStats& st, bool failed);
     int  recallFigure(const QJsonObject& plot);   // vignette dans le dialogue de la courbe ajoutée en dernier au panneau
     void showFigure(int id);                      // clic sur une vignette : onglet du panneau (recréé s'il a été fermé)
     void showFiguresPanel();                      // ouvre le panneau des graphiques (masqué, ou replié avec le séparateur)
@@ -208,7 +217,12 @@ private:
     //    sont écartées, avec leurs raisons dans `blocked` (et les bornes choisies par le modèle dans `warnings`).
     QString calcSourceText() const;
     QString receivedText() const;
-    QVector<QJsonObject> sourcedCalcBlocks(const QVector<QJsonObject>& blocks, QStringList* blocked, QStringList* warnings) const;
+    // `reused` (facultatif) : mesures absentes de vos messages mais reprises à l'identique d'un résultat de SeldonH (mesure
+    // attendue d'une calibration inverse, valeur d'une calculatrice…) : le calcul est lancé, avec une note.
+    QVector<QJsonObject> sourcedCalcBlocks(const QVector<QJsonObject>& blocks, QStringList* blocked, QStringList* warnings,
+                                           QStringList* reused = nullptr) const;
+    // Résultats de SeldonH déjà transmis au modèle (blocs « [Résultat … de SeldonH] », retours d'outils).
+    QString seldonResultsText() const;
     void saveChrFromTurn(int turn);
     // Dessine un .chr dans le panneau : scène des Events et, s'il a des phases, scène des phases. `inChat` : avis et
     // vignettes cliquables ajoutés à la discussion (et à l'historique).
@@ -345,6 +359,16 @@ private:
     void finishReport(const QString& note);              // note vide : synthèse reçue ; sinon raison de son absence
     bool writeReport(QString* error);
     bool                 classifying_ = false;   // génération en cours = réponse à une question de l'arbre
+    bool                 measuring_ = false;     // génération en cours = recours pour les mesures de la courbe
+    bool                 measureAllowed_ = false; // finishAssistantMessage peut différer le modèle pour ce recours
+    QString              measureRaw_;
+    struct MeasurePending {
+        bool active = false;
+        int turn = -1;
+        QString curve;
+        QStringList missing, notes;
+        QVector<seldon::suggest::ToDate> toDate;
+    } measurePending_;
     bool                 treeDone_ = false;      // aiguillage terminé : sendMessage reprend avec ses réponses
     QString              treeInput_, treeQuestion_, treeQk_, treeNode_, classRaw_;
     QStringList          treeEarlier_;           // questions précédentes de la conversation

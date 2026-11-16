@@ -84,6 +84,13 @@ public:
     // de « = » ou « ? »). Faux pour une datation (« 3560 +- 20 BP »), une phrase, un nombre seul.
     bool isCalculation(const QString& text) const;
 
+    // Calcul écrit en mots, traduit en formule (16/11/2026, prompt réel « calcuk racine carré de 36 », parti au modèle de
+    // langage) : « racine carrée de 36 » → sqrt(36), « 3 au carré », « 2 puissance 10 », « logarithme de 100 »,
+    // « exponentielle de 2 », « valeur absolue de -3 », « sinus de 30 », « 12 fois 4 », « 10 divisé par 4 »… Mot de
+    // commande tolérant à une faute de frappe (« calcuk », « calcl »). Vide si rien n'est traduit ; l'appelant vérifie
+    // ensuite avec isCalculation que le résultat est bien un calcul complet (rien d'autre dans la phrase).
+    static QString fromWords(const QString& text);
+
     // Évalue chaque instruction (lignes ou « ; »). Les variables et `ans` sont mis à jour.
     QVector<Line> evaluate(const QString& text);
 

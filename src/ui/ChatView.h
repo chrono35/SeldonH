@@ -93,6 +93,7 @@ public:
 
 protected:
     QVariant loadResource(int type, const QUrl& name) override;    // images « seldon-fig:<id> »
+    void keyPressEvent(QKeyEvent* e) override;                     // Page Haut/Bas, flèches : défilement de l'utilisateur
 
 private:
     struct Item {
@@ -122,6 +123,14 @@ private:
     bool          dirty_ = false;
     bool          showThinking_ = false;
     bool          editEnabled_ = true;
+    // Défilement stable pendant le streaming (16/11/2026) : la mise en page de QTextDocument se termine par étapes après
+    // setHtml (la hauteur grandit encore) ; l'ancienne règle « en bas si la barre était en bas » recalculée à chaque rendu
+    // faisait osciller la vue. follow_ ne change que si l'utilisateur fait défiler ; rangeChanged maintient la position.
+    bool          follow_ = true;          // la vue suit la fin du dialogue
+    bool          adjusting_ = false;      // défilement fait par ChatView (pas par l'utilisateur)
+    int           wanted_ = -1;            // position à garder quand la vue ne suit pas la fin
+    bool          userMoving_ = false;     // action de défilement de l'utilisateur en cours
+    void keepScroll();
     mutable bool  forceLight_ = false;     // copie d'une fiche : couleurs du thème clair
     mutable bool  plainFigUrls_ = false;   // copie d'une fiche : images nommées « fig_<id>.png » (ressources du document)
 };

@@ -68,9 +68,13 @@ int main(int argc, char *argv[])
 #ifdef APP_VERSION
     QCoreApplication::setApplicationVersion(QStringLiteral(APP_VERSION));     // VERSION de SeldonH.pro
 #endif
+    // Qt prend possession de la fabrique et la supprime à la sortie (documentation de setApplicationProxyFactory) : pas de
+    // fuite, mais clang-analyzer ne connaît pas ce transfert de propriété et signale l'instruction suivante.
+    // NOLINTBEGIN(clang-analyzer-cplusplus.NewDeleteLeaks)
     QNetworkProxyFactory::setApplicationProxyFactory(new LocalDirectProxyFactory);
 
     QIcon icon;
+    // NOLINTEND(clang-analyzer-cplusplus.NewDeleteLeaks)
     for (int s : { 16, 32, 48, 64, 128, 256, 512 })
         icon.addFile(QString(":/icons/seldonh_%1.png").arg(s), QSize(s, s));
     a.setWindowIcon(icon);
