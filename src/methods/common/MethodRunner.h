@@ -210,6 +210,9 @@ public:
     // Marque placée en tête d'une fiche de calcul (commentaire HTML lu par ChatView, qui en fait le bandeau de la fiche).
     static QString cardMarker(const QString& title);
     static QString externalResultHeader();
+    // Même chose pour la calculatrice (formules « expr »).
+    static QString shownCalcHeader();
+    static QString externalCalcHeader();
     // Boucle d'agent du modèle local : opérations de calcul distinctes citées dans la question (calibration, combinaison,
     // événement, ordre/comparaison, durée, date entre, appartenance, corrélation, calibration inverse, fichier de densité),
     // ou nombre d'étapes écrites en séquence (« puis », « ensuite », « then ») si c'est plus. 0 : aucune opération reconnue.

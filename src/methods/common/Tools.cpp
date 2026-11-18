@@ -414,12 +414,12 @@ QVector<ToolDef> build()
 
     v.append({ "calculatrice",
                QStringLiteral("Calculatrice de SeldonH : évalue une formule (arithmétique, racine, puissance, logarithme, trigonométrie "
-                              "en degrés, conversions de dates ADtoBP, BPtoAD…, valeurs avec erreur « 2500 +- 30 » propagées). À "
+                              "en degrés, conversions de dates ADtoBP, BPtoAD…, conversion d'angles degrés-minutes-secondes ↔ degrés décimaux et degrés ↔ radians, valeurs avec erreur « 2500 +- 30 » propagées). À "
                               "utiliser pour TOUT calcul numérique, même simple (racine carrée, moyenne, différence de deux années) : "
                               "ne calcule jamais de tête. Nombres recopiés de l'utilisateur."),
                schema({ { "expr", str(QStringLiteral("Formule, ex. « sqrt(36) », « (2450 - 2310) / 2 », « 2^10 », « ln(2) », "
-                                                     "« ADtoBP(-499) », « moyenne(12; 15; 18) ». Fonctions : sqrt racine exp ln log "
-                                                     "log10 abs round floor ceil min max sin cos tan asin acos atan, ^ pour la "
+                                                     "« ADtoBP(-499) », « moyenne(12; 15; 18) », « W 00° 05' 52'' » ou « dms(48; 6; 51) » (en degrés décimaux), « DDtoDMS(-0.0978) », « rad(45) » (degrés → radians), « deg(1.2) » (radians → degrés). Fonctions : sqrt racine exp ln log "
+                                                     "log10 abs round floor ceil min max sin cos tan asin acos atan rad deg, ^ pour la "
                                                      "puissance ; arguments séparés par « ; ».")) } },
                       { "expr" }),
                "expr" });

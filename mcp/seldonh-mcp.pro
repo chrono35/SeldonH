@@ -11,6 +11,9 @@ DEFINES += APP_VERSION=\\\"$$VERSION\\\"
 INCLUDEPATH += $$PWD $$PWD/../src/methods/common
 SOURCES += $$PWD/main.cpp $$PWD/McpServer.cpp
 HEADERS += $$PWD/McpServer.h
+# Calculatrice (outil « calculatrice ») : appelée par MethodRunner (16/11/2026). QtCore seul.
+SOURCES += $$PWD/../src/core/Calculator.cpp
+HEADERS += $$PWD/../src/core/Calculator.h
 
 # Méthodes de datation et courbes de référence (les mêmes que l'application)
 include(../src/methods/methods.pri)

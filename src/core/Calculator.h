@@ -45,6 +45,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 //                dipôle axial centré ; ReducGAD(I; lat; latRef) réduction de I par le GAD ; VADM(F [; σF]; lat),
 //                VDM(F [; σF]; I) en 10²² A·m² ; VADMtoF(m; lat) ; ReducVADM(F; lat; latRef) réduction de F.
 //                Latitudes nord et longitudes est positives, angles en degrés, F en µT.
+//   angles       DMS(d [; m [; s [; signe]]]) degrés, minutes, secondes → degrés décimaux ; DDtoDMS(x) l'inverse (d, m, s affichés) ;
+//                rad(x) degrés → radians, deg(x) radians → degrés (« 45° en radians », « 1,2 rad en degrés ») ;
+//                notation écrite « 48° 06′ 51″ N », « W 00° 05' 52'' » comprise directement (S, W, O = négatif).
 //   plusieurs résultats : la valeur principale sert dans le calcul ; les autres sont affichées et, si le résultat est
 //                affecté (« p = VGP(…) »), gardées dans des variables p_lon, p_dp… (voir Line::parts).
 //   incertitudes 2500 ± 30, 2500 +- 30 ou 2500 +/- 30 : l'erreur suit les calculs au premier ordre, ERREURS SUPPOSÉES

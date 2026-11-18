@@ -154,6 +154,7 @@ QString McpServer::adaptText(const QString& promptBlock)
     QString t = promptBlock;
     // Ici, l'assistant ne voit aucune fiche de SeldonH : il doit reprendre les valeurs lui-même.
     t.replace(MethodRunner::shownResultHeader(), MethodRunner::externalResultHeader());
+    t.replace(MethodRunner::shownCalcHeader(), MethodRunner::externalCalcHeader());
     t.replace(QStringLiteral("DÉJÀ AFFICHÉES en tableau par SeldonH (avec un lien d'export CSV)"), QStringLiteral("données en CSV ci-dessous"));
     t.replace(QStringLiteral("DÉJÀ PROPOSÉ à l'enregistrement"), QStringLiteral("spécification ci-dessous"));
     // L'application de SeldonH trace les courbes elle-même ; ici, aucun panneau de graphiques.

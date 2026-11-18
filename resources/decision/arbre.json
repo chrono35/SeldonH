@@ -79,7 +79,7 @@
         },
         {
           "id": "calcul",
-          "libelle": "faire un calcul numérique (formule, racine carrée, puissance, moyenne, conversion d'années)",
+          "libelle": "faire un calcul numérique (formule, racine carrée, puissance, moyenne, conversion d'années, conversion de coordonnées en degrés-minutes-secondes ou degrés décimaux, degrés ↔ radians)",
           "feuille": {
             "outils": [
               "calculatrice"

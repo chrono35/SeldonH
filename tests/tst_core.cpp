@@ -2426,6 +2426,45 @@ private slots:
             QCOMPARE(C().evaluate(fw("calcuk racine carré de 36")).value(0).value, 6.0);
             QVERIFY(std::abs(C().evaluate(fw("racine cubique de 27")).value(0).value - 3.0) < 1e-12);
             QCOMPARE(C().evaluate(fw("calcule 2 plus 3 fois 4")).value(0).value, 14.0);
+            // Angles (prompt réel du 16/11/2026 : « convertie de degres decimal W 00° 05' 52'' », sans outil).
+            const QString w = fw("convertie de degres decimal W 00° 05' 52''");
+            QVERIFY(!w.isEmpty());
+            QVERIFY(c.isCalculation(w));
+            QVERIFY(std::abs(C().evaluate(w).value(0).value + (5.0 / 60 + 52.0 / 3600)) < 1e-12);
+            QVERIFY(c.isCalculation(QStringLiteral("48° 06′ 51″ N")));
+            QVERIFY(std::abs(C().evaluate(QStringLiteral("48° 06′ 51″ N")).value(0).value - (48 + 6.0 / 60 + 51.0 / 3600)) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(QStringLiteral("1°30' O")).value(0).value + 1.5) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(QStringLiteral("S 12,5°")).value(0).value + 12.5) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(QStringLiteral("-0° 05′ 52″")).value(0).value + (5.0 / 60 + 52.0 / 3600)) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(QStringLiteral("dms(48; 6; 51)")).value(0).value - (48 + 6.0 / 60 + 51.0 / 3600)) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(fw("48° 06′ 51″ N en degrés décimaux")).value(0).value - (48 + 6.0 / 60 + 51.0 / 3600)) < 1e-12);
+            QVERIFY(!C().evaluate(QStringLiteral("dms(10; 75; 0)")).value(0).ok);
+            QVERIFY(C().evaluate(QStringLiteral("W 00° 05' 52''")).value(0).details.contains(QStringLiteral("−0° 05′ 52″")));
+            {
+                const QString b = fw("convertis -0,0977777777778 en degrés minutes secondes");
+                QCOMPARE(b, QStringLiteral("ddtodms(-0.0977777777778)"));
+                const auto l = C().evaluate(b).value(0);
+                QVERIFY(l.ok);
+                QVERIFY2(l.details.contains(QStringLiteral("−0° 05′ 52″")), qPrintable(l.details));
+            }
+            // Degrés <-> radians (16/11/2026).
+            QCOMPARE(fw("convertis 45 degrés en radians"), QStringLiteral("rad(45)"));
+            QCOMPARE(fw("45° en radians"), QStringLiteral("rad(45°)"));
+            QCOMPARE(fw("convertir en radians 90 degrés"), QStringLiteral("rad(90)"));
+            QCOMPARE(fw("1,2 rad en degrés"), QStringLiteral("deg(1.2)"));
+            QCOMPARE(fw("convertis en degrés π/4 radians"), QStringLiteral("deg(π/4)"));
+            QCOMPARE(fw("0,5 rad en degrés minutes secondes"), QStringLiteral("ddtodms(deg(0.5))"));
+            QVERIFY(c.isCalculation(fw("45° en radians")));
+            QVERIFY(std::abs(C().evaluate(fw("45° en radians")).value(0).value - M_PI / 4) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(fw("convertis en degrés π/4 radians")).value(0).value - 45.0) < 1e-12);
+            QVERIFY(std::abs(C().evaluate(fw("48° 06′ 51″ N en radians")).value(0).value - (48 + 6.0 / 60 + 51.0 / 3600) * M_PI / 180) < 1e-12);
+            QVERIFY2(C().evaluate(QStringLiteral("rad(45)")).value(0).details.contains(QStringLiteral("45° = 0,785398163397 rad")),
+                     qPrintable(C().evaluate(QStringLiteral("rad(45)")).value(0).details));
+            {
+                const auto l = C().evaluate(fw("0,5 rad en degrés minutes secondes")).value(0);
+                QVERIFY2(l.ok && l.details.contains(QStringLiteral("28° 38′ 52,4″")), qPrintable(l.details));
+            }
+            QVERIFY(fw("la datation est en radiocarbone").isEmpty());
             // Phrase qui garde des mots après traduction : pas un calcul, la question suit le chemin habituel.
             QVERIFY(!c.isCalculation(fw("date la racine de 36 en BP")));
         }
@@ -8351,6 +8390,13 @@ private slots:
         const QString ext = McpServer::adaptText(r.promptBlock);
         QVERIFY(ext.startsWith(MethodRunner::externalResultHeader()));
         QVERIFY(!ext.contains(QStringLiteral("DÉJÀ AFFICHÉES")));
+        // Calculatrice : même adaptation (16/11/2026).
+        const RunOutcome k = MethodRunner::run({ QJsonObject{ { "method", "expr" }, { "expr", "W 00° 05' 52''" } } });
+        QVERIFY(k.promptBlock.startsWith(MethodRunner::shownCalcHeader()));
+        const QString kx = McpServer::adaptText(k.promptBlock);
+        QVERIFY(kx.startsWith(MethodRunner::externalCalcHeader()));
+        QVERIFY(!kx.contains(QStringLiteral("DÉJÀ AFFICHÉES")));
+        QVERIFY(kx.contains(QStringLiteral("-0,0977777777778")));
     }
 
     // Threads « Automatique » : cœurs physiques performance (pas les threads SMT ni les cœurs E)

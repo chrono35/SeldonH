@@ -3463,6 +3463,18 @@ QString MethodRunner::shownResultHeader()
                           "résumé des intervalles) ; cite seulement la valeur dont ton commentaire a besoin, à l'identique]\n");
 }
 
+QString MethodRunner::shownCalcHeader()
+{
+    return QStringLiteral("[Résultat de la calculatrice de SeldonH — valeurs exactes, DÉJÀ AFFICHÉES à l'utilisateur dans "
+                          "une fiche : ne les recalcule pas, ne les contredis pas ; cite seulement la valeur dont ta "
+                          "réponse a besoin, à l'identique]\n");
+}
+
+QString MethodRunner::externalCalcHeader()
+{
+    return QStringLiteral("[Résultat de la calculatrice de SeldonH — valeurs exactes, à reprendre telles quelles sans les recalculer ni les contredire]\n");
+}
+
 QString MethodRunner::externalResultHeader()
 {
     return QStringLiteral("[Résultat de calcul de SeldonH — valeurs exactes, à reprendre telles quelles sans les recalculer ni les contredire]\n");
@@ -3571,9 +3583,7 @@ RunOutcome MethodRunner::run(const QVector<QJsonObject>& requests, DateFormat fm
         if (!lines.isEmpty()) {
             RunOutcome o = rest.isEmpty() ? RunOutcome() : run(rest, fmt);
             QString h = QStringLiteral("<table cellspacing='0' cellpadding='3'>");
-            QString p = QStringLiteral("[Résultat de la calculatrice de SeldonH — valeurs exactes, DÉJÀ AFFICHÉES à l'utilisateur dans "
-                                       "une fiche : ne les recalcule pas, ne les contredis pas ; cite seulement la valeur dont ta "
-                                       "réponse a besoin, à l'identique]\n");
+            QString p = shownCalcHeader();
             bool withErr = false;
             for (const Calculator::Line& l : std::as_const(lines)) {
                 const QString shown = Calculator::formatValue(l.value, l.uncertainty);

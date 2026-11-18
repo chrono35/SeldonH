@@ -43,6 +43,37 @@ namespace {
 constexpr double kDeg = 3.14159265358979323846 / 180.0;
 constexpr double kEarthR = 6.3712e6;          // rayon terrestre de référence (m)
 
+// Angle écrit en degrés, minutes, secondes (16/11/2026, prompt réel « convertie de degres decimal W 00° 05' 52'' »,
+// parti au modèle de langage sans outil) : « 48° 06′ 51″ N », « W 00° 05' 52'' », « 1°30' E », « 12,5° S » → dms(d;m;s),
+// avec un signe -1 pour le sud et l'ouest (S, W, O) en 4e argument : « W 00° 05′ » garde son signe, ce que dms(-0;5)
+// ne pourrait pas faire. Un « - » écrit devant l'angle reste l'opérateur moins.
+QString angleNotation(const QString& text)
+{
+    if (!text.contains(QChar(0x00B0))) return text;
+    static const QString N = QStringLiteral(R"((\d+(?:[.,]\d+)?))");
+    static const QRegularExpression re(
+        QStringLiteral(R"((?:(?<![A-Za-z0-9_])([NSEWO])\s*)?(?<![0-9_.,]))") + N
+            + QStringLiteral(R"(\s*°\s*(?:)") + N + QStringLiteral(R"(\s*(?:′|'(?!')|’(?!’)|min\b)\s*)?(?:)") + N
+            + QStringLiteral(R"(\s*(?:″|''|’’|"|sec\b)\s*)?(?:([NSEWO])(?![A-Za-z0-9_]))?)"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString out;
+    qsizetype last = 0;
+    auto it = re.globalMatch(text);
+    while (it.hasNext()) {
+        const auto m = it.next();
+        auto n = [&](int k) { QString v = m.captured(k); v.replace(QLatin1Char(','), QLatin1Char('.')); return v.isEmpty() ? QStringLiteral("0") : v; };
+        const QString h = (m.captured(1) + m.captured(5)).toUpper();
+        const bool neg = h.contains(QLatin1Char('S')) || h.contains(QLatin1Char('W')) || h.contains(QLatin1Char('O'));
+        // Espace final rendu : « 45° 30' + 1 » garde son opérateur.
+        const QString tailSpace = m.captured(0).endsWith(QLatin1Char(' ')) ? QStringLiteral(" ") : QString();
+        out += text.mid(last, m.capturedStart() - last)
+               + QStringLiteral("dms(%1;%2;%3;%4)").arg(n(2), n(3), n(4), neg ? QStringLiteral("-1") : QStringLiteral("1")) + tailSpace;
+        last = m.capturedEnd();
+    }
+    out += text.mid(last);
+    return out;
+}
+
 // Longitude ramenée dans ]-180 ; 180].
 double wrap180(double a)
 {
@@ -144,7 +175,7 @@ QStringList Calculator::functionNames()
              "adtobp", "bptoad", "adtob2k", "b2ktoad", "bptob2k", "b2ktobp", "adtoka", "katoad", "adtoma", "matoad",
              "adtobc", "bctoad", "c14tof14c", "f14ctoc14", "vgp", "vgptodi", "reducvgp", "igad", "reducgad",
              "vadm", "vdm", "vadmtof", "reducvadm", "val", "err", "somme", "sum", "moyenne", "mean", "ecart_type", "écart_type",
-             "sd", "mediane", "médiane", "median", "moy_ponderee", "moy_pondérée", "wmean" };
+             "sd", "mediane", "médiane", "median", "moy_ponderee", "moy_pondérée", "wmean", "dms", "ddtodms" };
 }
 
 // Analyseur à descente récursive. Une erreur de syntaxe (ou un nom inconnu) dit que le texte n'est pas un calcul ;
@@ -318,7 +349,7 @@ struct Calculator::Eval {
             static const QStringList oneArg{ "sqrt", "racine", "exp", "ln", "log", "log10", "abs", "floor", "ceil", "sin", "cos", "tan",
                                              "asin", "acos", "atan", "sinr", "cosr", "tanr", "rad", "deg", "adtobp", "bptoad", "adtob2k",
                                              "b2ktoad", "bptob2k", "b2ktobp", "adtoka", "katoad", "adtoma", "matoad", "adtobc", "bctoad",
-                                             "igad", "val", "err" };
+                                             "igad", "val", "err", "ddtodms" };
             commaSeparates = !semicolonArgs(pos) && !oneArg.contains(low);
             QVector<Value> args;
             if (!eat(QLatin1Char(')'))) {
@@ -492,6 +523,35 @@ struct Calculator::Eval {
             fail(QStringLiteral("%1 : %2 hors de [-90 ; 90]").arg(shown, QString::fromLatin1(what)), false);
             return false;
         };
+        // ---- angles : degrés, minutes, secondes <-> degrés décimaux (signe porté par les degrés ; sud, ouest négatifs)
+        auto dmsText = [](double x) {
+            const double t = std::round(std::abs(x) * 3600.0 * 100.0) / 100.0;   // secondes au centième
+            const double d = std::floor(t / 3600.0), mn = std::floor((t - d * 3600.0) / 60.0), sc = t - d * 3600.0 - mn * 60.0;
+            QString s = format(std::round(sc * 100.0) / 100.0);
+            if (sc < 10) s.prepend(QLatin1Char('0'));
+            return QStringLiteral("%1%2° %3′ %4″").arg(x < 0 && t > 0 ? QStringLiteral("−") : QString(), format(d),
+                                                     QStringLiteral("%1").arg(int(mn), 2, 10, QLatin1Char('0')), s);
+        };
+        if (f == "dms") {
+            if (!range(1, 4)) return 0;
+            const double mn = a.size() > 1 ? a[1] : 0.0, sc = a.size() > 2 ? a[2] : 0.0;
+            // 4e argument : signe (-1 = sud ou ouest), mis par la notation écrite (« W 00° 05′ » : -0 n'existe pas).
+            const double sg = a.size() > 3 ? (a[3] < 0 ? -1.0 : 1.0) : (a[0] < 0 ? -1.0 : 1.0);
+            if (mn < 0 || mn >= 60 || sc < 0 || sc >= 60)
+                return fail(QStringLiteral("%1 : minutes et secondes doivent être dans [0 ; 60[").arg(shown), false);
+            const double r = sg * (std::abs(a[0]) + mn / 60.0 + sc / 3600.0);
+            parts = { { "dd", r } };                   // garde les détails (voir callV)
+            details = QStringLiteral("%1 = %2 en degrés décimaux").arg(dmsText(r), deg(r));
+            return r;
+        }
+        if (f == "ddtodms") {
+            if (!need(1)) return 0;
+            const double t = std::round(std::abs(a[0]) * 3600.0 * 100.0) / 100.0;
+            const double d = std::floor(t / 3600.0), mn = std::floor((t - d * 3600.0) / 60.0);
+            parts = { { "dd", a[0] }, { "d", a[0] < 0 ? -d : d }, { "m", mn }, { "s", t - d * 3600.0 - mn * 60.0 } };
+            details = QStringLiteral("%1 = %2").arg(deg(a[0]), dmsText(a[0]));
+            return a[0];
+        }
         // ---- radiocarbone : âge conventionnel <-> F14C (formules de ChronoModel, erreur dissymétrique ramenée au côté ancien)
         if (f == "c14tof14c") {
             if (!range(1, 2)) return 0;
@@ -607,8 +667,8 @@ struct Calculator::Eval {
         if (f == "sinr")  return std::sin(x);
         if (f == "cosr")  return std::cos(x);
         if (f == "tanr")  return std::tan(x);
-        if (f == "rad")   return x * kDeg;
-        if (f == "deg")   return x / kDeg;
+        if (f == "rad")   { parts = { { "rad", x * kDeg } }; details = QStringLiteral("%1° = %2 rad").arg(format(x), format(x * kDeg)); return x * kDeg; }
+        if (f == "deg")   { parts = { { "deg", x / kDeg } }; details = QStringLiteral("%1 rad = %2°").arg(format(x), format(x / kDeg)); return x / kDeg; }
         // Dates : AD = année calendaire signée (BC/AD de ChronoModel) ; mêmes formules que les formats d'affichage.
         if (f == "adtobp")  return conv(dateformat::convert(x, DateFormat::CalBP));
         if (f == "bptoad")  return dateformat::toCalendar(x, DateFormat::CalBP);
@@ -716,6 +776,7 @@ QVector<Calculator::Line> Calculator::evaluate(const QString& text)
             l.expr = body;
             fromAns = true;
         }
+        body = angleNotation(body);                  // 48° 06′ 51″ N → (dms(48;06;51))
         Eval e(body, vars_, ans_, hasAns_);
         const Value val = e.expr();
         const double v = val.v;
@@ -776,6 +837,67 @@ QString Calculator::fromWords(const QString& text)
     t = t.simplified();
     if (t.isEmpty()) return QString();
 
+    // Degrés <-> radians (16/11/2026) : « convertis 45 degrés en radians », « 45° en radians », « 1,2 rad en degrés »,
+    // « convertis en degrés π/4 radians », « 0,5 rad en degrés minutes secondes ». Verbe facultatif.
+    {
+        static const QRegularExpression convR(QStringLiteral(R"(^(?:conver\w*|transform\w*|passe[rz]?|exprime[rz]?|convert)\s+)"));
+        static const QString radW = QStringLiteral(R"((?:radians?|rad))");
+        static const QString degW = QStringLiteral(R"((?:degres?|degrees?|deg))");
+        static const QString dmsW = QStringLiteral(R"((\s+minutes?[\s,-]+(?:et\s+|and\s+)?(?:secondes?|seconds?))?)");
+        static const QString to = QStringLiteral(R"(\s+(?:en|to|into|in)\s+)");
+        static const QRegularExpression toRad(QStringLiteral(R"(^(.+?)(?:\s*)") + degW + QStringLiteral(")?") + to + radW + QStringLiteral("$"));
+        static const QRegularExpression toRadHead(QStringLiteral(R"(^(?:en|to|into|in)\s+)") + radW + QStringLiteral(R"(\s+(?:de\s+|d'|of\s+)?(.+?)(?:\s*)") + degW + QStringLiteral(")?$"));
+        static const QRegularExpression toDeg(QStringLiteral(R"(^(.+?)\s*)") + radW + to + degW + QStringLiteral(R"((?:\s+decima\w*)?)") + dmsW + QStringLiteral("$"));
+        static const QRegularExpression toDegHead(QStringLiteral(R"(^(?:en|to|into|in)\s+)") + degW + QStringLiteral(R"((?:\s+decima\w*)?)") + dmsW
+                                                  + QStringLiteral(R"(\s+(?:de\s+|d'|of\s+)?(.+?)\s*)") + radW + QStringLiteral("$"));
+        QString u = t;
+        u.remove(convR);
+        auto arg = [](QString v) {
+            v.replace(QRegularExpression(QStringLiteral(R"((\d),(\d))")), QStringLiteral("\\1.\\2"));
+            return v.trimmed();
+        };
+        QRegularExpressionMatch m;
+        if ((m = toRad.match(u)).hasMatch() && !arg(m.captured(1)).isEmpty())
+            return QStringLiteral("rad(%1)").arg(arg(m.captured(1)));
+        if ((m = toRadHead.match(u)).hasMatch() && !arg(m.captured(1)).isEmpty())
+            return QStringLiteral("rad(%1)").arg(arg(m.captured(1)));
+        const bool head = !(m = toDeg.match(u)).hasMatch() && (m = toDegHead.match(u)).hasMatch();
+        if (m.hasMatch()) {
+            const QString x = arg(m.captured(head ? 2 : 1)), dms = m.captured(head ? 1 : 2);
+            if (!x.isEmpty()) return dms.isEmpty() ? QStringLiteral("deg(%1)").arg(x) : QStringLiteral("ddtodms(deg(%1))").arg(x);
+        }
+    }
+
+    // Conversion d'angle (16/11/2026) : « convertis en degrés décimaux W 00° 05' 52'' », « 48° 06′ 51″ N en degrés
+    // décimaux », « convertis -0,0978 en degrés minutes secondes ». La notation d'angle est traduite par evaluate.
+    bool angle = false;
+    {
+        static const QString conv = QStringLiteral(R"((?:conver\w*|transform\w*|passe[rz]?|exprime[rz]?|donne[sz]?|ecri[st]?|convert)\s+)");
+        static const QString into = QStringLiteral(R"((?:(?:en|de|des|vers|to|into|in)\s+)?)");
+        static const QString dd = QStringLiteral(R"((?:degres?\s+decima\w*|decimal\s+degrees?|dd))");
+        static const QString dms = QStringLiteral(R"((?:degres?[\s,-]+minutes?[\s,-]+(?:et\s+)?secondes?|degrees?[\s,-]+minutes?[\s,-]+(?:and\s+)?seconds?|dms|sexagesima\w*))");
+        const QRegularExpression ddHead(QStringLiteral("^") + conv + into + dd + QStringLiteral(R"(\s*(?:de\s+|d'|du\s+|:)?\s*)"));
+        const QRegularExpression ddTail(QStringLiteral(R"(\s+(?:en|to|into|in)\s+)") + dd + QStringLiteral("$"));
+        const QRegularExpression dmsHead(QStringLiteral("^") + conv + into + dms + QStringLiteral(R"(\s*(?:de\s+|d'|du\s+|:)?\s*)"));
+        const QRegularExpression dmsTail(QStringLiteral(R"(\s+(?:en|to|into|in)\s+)") + dms + QStringLiteral("$"));
+        const QRegularExpression convHead(QStringLiteral("^") + conv);
+        if (t.contains(QRegularExpression(dmsHead.pattern())) || t.contains(dmsTail)) {
+            t.remove(dmsHead); t.remove(dmsTail); t.remove(convHead);
+            t.replace(QRegularExpression(QStringLiteral(R"((\d),(\d))")), QStringLiteral("\\1.\\2"));
+            t = t.simplified();
+            return t.isEmpty() ? QString() : QStringLiteral("ddtodms(%1)").arg(t);
+        }
+        if (t.contains(ddHead) || t.contains(ddTail)) {
+            t.remove(ddHead); t.remove(ddTail); t.remove(convHead);
+            t = t.simplified();
+            angle = !t.isEmpty();
+        } else if (t.contains(QChar(0x00B0)) && t.contains(convHead)) {     // « convertis 48° 06′ 51″ N »
+            t.remove(convHead);
+            t = t.simplified();
+            angle = !t.isEmpty();
+        }
+    }
+
     t.replace(QRegularExpression(QStringLiteral(R"((\d),(\d))")), QStringLiteral("\\1.\\2"));   // 2,5 → 2.5 (argument de fonction)
 
     // Opérande : nombre, appel de fonction déjà traduit (un niveau de parenthèses) ou parenthèse.
@@ -817,7 +939,7 @@ QString Calculator::fromWords(const QString& text)
         if (!any) break;
         changed = true;
     }
-    return changed ? t.simplified() : QString();
+    return changed || angle ? t.simplified() : QString();
 }
 
 bool Calculator::isCalculation(const QString& text) const
@@ -828,7 +950,7 @@ bool Calculator::isCalculation(const QString& text) const
     // « 3560 +- 20 » seul est une mesure (datation), pas un calcul ; une unité ou un nom de méthode (« BP », « C14 »)
     // donne de toute façon un nom inconnu.
     static const QRegularExpression pm(QStringLiteral(R"(\+\s*/\s*-|\+\s*-|±)"));
-    static const QRegularExpression op(QStringLiteral(R"([-+*/^×÷²=(−])"));
+    static const QRegularExpression op(QStringLiteral(R"([-+*/^×÷²=(−°])"));
     QString rest = t;
     rest.replace(pm, QStringLiteral(" "));
     rest.remove(QRegularExpression(QStringLiteral(R"(^[\s\-−+]+)")));
