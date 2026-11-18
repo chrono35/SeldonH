@@ -196,7 +196,7 @@ bool CurveStore::looksLikeGaussRef(const QString& fileName, const QString& text)
     const QString f = QFileInfo(fileName).fileName().toLower();
     if (f.contains(QLatin1String("_gp_")) || f.contains(QLatin1String("_gs_"))) return false;     // vitesse, accélération
     const bool named = f.contains(QLatin1String("gauss_ref")) || f.contains(QLatin1String("gaussref"));
-    const bool header = text.left(600).contains(QRegularExpression(QStringLiteral("(?:^|[\r\n])\s*X Axis\s*,\s*G\s*,\s*err"),
+    const bool header = text.left(600).contains(QRegularExpression(QStringLiteral(R"((?:^|[\r\n])\s*X Axis\s*,\s*G\s*,\s*err)"),
                                                                   QRegularExpression::CaseInsensitiveOption));
     if (!named && !header) return false;
     RefCurve c;

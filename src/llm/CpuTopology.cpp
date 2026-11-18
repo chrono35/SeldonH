@@ -29,6 +29,7 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include "CpuTopology.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <fstream>
 #include <set>
 #include <sstream>
@@ -86,6 +87,17 @@ int sysctlInt(const char* name)
     int v = 0;
     size_t len = sizeof(v);
     return sysctlbyname(name, &v, &len, nullptr, 0) == 0 ? v : 0;
+}
+#elif defined(_WIN32)
+// EfficiencyClass est l'octet juste après Flags (SDK Windows 10+). Les vieux
+// en-têtes MinGW l'appellent encore Reserved[0] : on le lit à cet emplacement
+// pour compiler avec MSVC comme avec MinGW.
+static_assert(offsetof(PROCESSOR_RELATIONSHIP, Flags) == 0, "PROCESSOR_RELATIONSHIP : layout inattendu");
+static_assert(offsetof(PROCESSOR_RELATIONSHIP, GroupCount) == 22, "PROCESSOR_RELATIONSHIP : layout inattendu");
+
+inline BYTE efficiencyClassOf(const PROCESSOR_RELATIONSHIP& p)
+{
+    return reinterpret_cast<const BYTE*>(&p.Flags)[1];
 }
 #endif
 
@@ -159,7 +171,7 @@ static CpuTopology detect()
             std::vector<int> classes;   // EfficiencyClass de chaque cœur (plus grand = plus performant)
             for (DWORD off = 0; off < len;) {
                 auto* e = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + off);
-                if (e->Relationship == RelationProcessorCore) classes.push_back(e->Processor.EfficiencyClass);
+                if (e->Relationship == RelationProcessorCore) classes.push_back(efficiencyClassOf(e->Processor));
                 if (e->Size == 0) break;
                 off += e->Size;
             }
