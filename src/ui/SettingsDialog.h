@@ -47,6 +47,7 @@ class QNetworkAccessManager;
 class QPlainTextEdit;
 class QPushButton;
 class QRadioButton;
+class QScrollArea;
 class QSpinBox;
 
 namespace seldon {
@@ -58,6 +59,9 @@ public:
     AppSettings settings() const;
     // Modèle local chargé et vitesse mesurée sur sa dernière réponse (0 = inconnue) : utilisés par « Optimiser ».
     void setLocalModel(const ModelInfo& info, double tokPerSec) { localInfo_ = info; localTps_ = tokPerSec; }
+
+protected:
+    void showEvent(QShowEvent* e) override;   // hauteur et position ajustées à l'écran une fois la fenêtre placée
 
 public slots:
     void done(int r) override;     // OK : confirmation si la clé API partirait en clair (http://)
@@ -74,6 +78,11 @@ private slots:
 private:
     AppSettings     base_;
     QFormLayout*    form_;
+    QScrollArea*    scroll_ = nullptr;     // le formulaire défile si l'écran est trop petit ; OK / Annuler restent visibles
+    QWidget*        content_ = nullptr;    // widget du formulaire, dans scroll_
+    QWidget*        buttons_ = nullptr;    // OK / Annuler, hors de la zone qui défile
+    QRect           availableArea() const; // zone utilisable de l'écran de la fenêtre (sans la barre des tâches)
+    void            keepOnScreen();
     QRadioButton*   localRadio_;
     QRadioButton*   remoteRadio_;
     // local

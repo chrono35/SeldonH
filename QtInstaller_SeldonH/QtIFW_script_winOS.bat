@@ -102,6 +102,10 @@ rem qmake relance a chaque fois : llama.pri choisit les bibliotheques (Vulkan ou
 rem L'executable est supprime pour forcer l'edition de liens avec les bibliotheques llama.cpp actuelles.
 if exist SeldonH.exe del /q SeldonH.exe
 if exist release\SeldonH.exe del /q release\SeldonH.exe
+rem La ressource Windows (icone SeldonH.ico) est supprimee aussi : le Makefile de qmake ne fait
+rem dependre SeldonH_resource_res.o que du .rc, pas du .ico, et garderait sinon l'ancienne icone.
+if exist SeldonH_resource_res.o del /q SeldonH_resource_res.o
+if exist release\SeldonH_resource_res.o del /q release\SeldonH_resource_res.o
 "%QTDIR%\bin\qmake.exe" "%ROOT%\SeldonH.pro" -spec win32-g++ "CONFIG+=release" "CONFIG-=debug_and_release"
 if errorlevel 1 ( popd & echo ERREUR : qmake & goto :fail )
 mingw32-make -j%NUMBER_OF_PROCESSORS%

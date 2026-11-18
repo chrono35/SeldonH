@@ -41,6 +41,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 #include <QNetworkRequest>
 #include <QRadioButton>
 #include <QVBoxLayout>
+#include <QFrame>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QScrollArea>
+#include <QShowEvent>
+#include <QStyle>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -64,17 +70,26 @@ namespace seldon {
 SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(parent), base_(s)
 {
     setWindowTitle(tr("Préférences"));
-    setMinimumWidth(780);
     setSizeGripEnabled(true);
     nam_ = new QNetworkAccessManager(this);
 
+    // Petits écrans : le formulaire est placé dans une zone qui défile, les boutons OK / Annuler restent
+    // en dessous, toujours visibles ; la fenêtre ne dépasse jamais la zone utilisable de l'écran.
     auto* outer = new QVBoxLayout(this);
-    form_ = new QFormLayout;
+    scroll_ = new QScrollArea;
+    scroll_->setWidgetResizable(true);
+    scroll_->setFrameShape(QFrame::NoFrame);
+    scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    content_ = new QWidget;
+    form_ = new QFormLayout(content_);
+    form_->setContentsMargins(0, 0, 0, 0);
+    scroll_->setWidget(content_);
+    outer->addWidget(scroll_, 1);
+    setMinimumWidth(std::min(780, availableArea().width() - 20));
     // Les champs occupent toute la largeur disponible (sous macOS, le défaut les laisse à leur taille minimale).
     form_->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
     form_->setRowWrapPolicy(QFormLayout::DontWrapRows);
     form_->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    outer->addLayout(form_);
     QFormLayout* form = form_;
 
     auto expanding = [](QWidget* w) { w->setSizePolicy(QSizePolicy::Expanding, w->sizePolicy().verticalPolicy()); };
@@ -354,11 +369,18 @@ SettingsDialog::SettingsDialog(const AppSettings& s, QWidget* parent) : QDialog(
     connect(box, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
     outer->addWidget(box);
+    buttons_ = box;
 
     connect(localRadio_, &QRadioButton::toggled, this, &SettingsDialog::updateBackendRows);
     connect(remoteRadio_, &QRadioButton::toggled, this, &SettingsDialog::updateBackendRows);
     ready_ = true;
-    resize(std::max(880, sizeHint().width()), height());
+    {
+        // Largeur : celle du formulaire, plus une barre de défilement verticale éventuelle, bornée par l'écran.
+        const QMargins m = outer->contentsMargins();
+        const int wanted = content_->sizeHint().width() + m.left() + m.right()
+                         + style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+        resize(std::min(std::max(880, wanted), availableArea().width() - 20), height());
+    }
     updateBackendRows();          // ajuste aussi la hauteur à la largeur retenue (fitHeight)
 }
 
@@ -393,15 +415,58 @@ void SettingsDialog::updateBackendRows()
 // réajustement, masquer les lignes du modèle distant laissait un grand vide sous le formulaire.
 // Les textes à retour à la ligne (avertissements) ont une hauteur qui dépend de la largeur : on la
 // calcule pour la largeur actuelle, que l'on ne modifie pas.
+// Le formulaire est dans une zone qui défile : on calcule sa hauteur naturelle, puis on borne la fenêtre
+// à la zone utilisable de l'écran (barre de titre comprise). Au-delà, le formulaire défile.
 void SettingsDialog::fitHeight()
 {
-    QLayout* lay = layout();
-    if (!lay) return;
-    lay->invalidate();
-    lay->activate();
-    const int w = width();
-    const int h = lay->hasHeightForWidth() ? lay->totalHeightForWidth(w) : lay->totalSizeHint().height();
-    resize(w, std::max(h, lay->totalMinimumSize().height()));
+    QVBoxLayout* outer = qobject_cast<QVBoxLayout*>(layout());
+    if (!outer || !content_ || !buttons_) return;
+    QLayout* cl = content_->layout();
+    cl->invalidate();
+    cl->activate();
+    const QMargins m = outer->contentsMargins();
+    const int contentW = std::max(1, width() - m.left() - m.right());
+    const int contentH = cl->hasHeightForWidth() ? cl->totalHeightForWidth(contentW) : cl->totalSizeHint().height();
+    const int wanted = m.top() + contentH + outer->spacing() + buttons_->sizeHint().height() + m.bottom();
+
+    // Barre de titre et bordures : connues une fois la fenêtre affichée, estimées avant.
+    const int frameH = isVisible() ? frameGeometry().height() - height() : 40;
+    const int maxH = availableArea().height() - frameH;
+    // Hauteur minimale : les boutons et quelques lignes de formulaire, sans dépasser l'écran.
+    const int minH = std::min(maxH, m.top() + 120 + outer->spacing() + buttons_->sizeHint().height() + m.bottom());
+    setMinimumHeight(std::max(0, minH));
+    const int lo = std::max(0, minH);
+    resize(width(), std::clamp(wanted, lo, std::max(lo, maxH)));
+    if (isVisible()) keepOnScreen();
+}
+
+QRect SettingsDialog::availableArea() const
+{
+    QScreen* sc = nullptr;
+    if (isVisible()) sc = screen();
+    if (!sc && parentWidget()) sc = parentWidget()->screen();
+    if (!sc) sc = QGuiApplication::primaryScreen();
+    return sc ? sc->availableGeometry() : QRect(0, 0, 1024, 700);
+}
+
+// Remet la fenêtre entière (barre de titre comprise) dans la zone utilisable de l'écran.
+void SettingsDialog::keepOnScreen()
+{
+    const QRect area = availableArea();
+    QRect f = frameGeometry();
+    if (f.right() > area.right())   f.moveRight(area.right());
+    if (f.bottom() > area.bottom()) f.moveBottom(area.bottom());
+    if (f.left() < area.left())     f.moveLeft(area.left());
+    if (f.top() < area.top())       f.moveTop(area.top());
+    if (f.topLeft() != frameGeometry().topLeft()) move(f.topLeft());
+}
+
+void SettingsDialog::showEvent(QShowEvent* e)
+{
+    QDialog::showEvent(e);
+    // La taille de la barre de titre et l'écran réel ne sont connus qu'ici.
+    if (width() > availableArea().width() - 20) resize(availableArea().width() - 20, height());
+    fitHeight();
 }
 
 void SettingsDialog::updateHttpWarning()
